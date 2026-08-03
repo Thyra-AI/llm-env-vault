@@ -31,7 +31,7 @@ INDEX_FILE = ROOT / "vault_index.json"
 ENV_FILE = ROOT / "llm.env"
 TARGETS_FILE = ROOT / "targets.json"
 
-VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 ENV_LINE_RE = re.compile(
     r'^(?P<indent>\s*)(?P<export>export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*)$'
 )
@@ -39,7 +39,7 @@ PLACEHOLDER_VALUE_RE = re.compile(r'^"?value \d+"?$')
 
 
 def validate_var_name(name: str) -> str:
-    if not VAR_NAME_RE.match(name):
+    if not VAR_NAME_RE.fullmatch(name):
         raise ValueError(
             f"Invalid variable name {name!r} -- must match [A-Za-z_][A-Za-z0-9_]* "
             "(letters, digits, underscore; can't start with a digit, no newlines/spaces)."
