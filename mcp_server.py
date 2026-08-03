@@ -303,8 +303,15 @@ def _on_sigterm(signum, frame):
 
 
 def _resolve_materialize_path(materialize: str, cwd: Optional[str]) -> Path:
-    base = Path(cwd) if cwd else Path.cwd()
-    return (base / materialize).resolve()
+    base = (Path(cwd) if cwd else Path.cwd()).resolve()
+    resolved = (base / materialize).resolve()
+    if not resolved.is_relative_to(base):
+        raise ValueError(
+            f"materialize must resolve to a path inside cwd ({base}); got {resolved}, "
+            f"which escapes it. Use a plain relative filename, not an absolute path or "
+            f"one with '..' segments that climb above cwd."
+        )
+    return resolved
 
 
 def _run_with_env_impl(command: list, materialize: Optional[str], background: bool,
@@ -332,12 +339,16 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
     # exact pattern the docs show (a relative materialize path alongside a
     # cwd pointing at the user's project), the file lands in the wrong
     # directory and the child can't find it.
+    # Containment is enforced: absolute paths and relative paths that climb
+    # above cwd via '..' are rejected here, before the password dialog opens.
+    # Also guards against OSError from resolving a genuinely unreachable/
+    # unusual path (e.g. an unreachable UNC share), same as install_migrate.
     try:
         materialized_path = _resolve_materialize_path(materialize, cwd) if materialize else None
         if materialized_path is not None and materialized_path.exists():
             return {"error": f"{materialized_path} already exists -- refusing to overwrite it. "
                               f"Pick a path that doesn't exist yet."}
-    except OSError as e:
+    except (OSError, ValueError) as e:
         return {"error": str(e)}
 
     secrets = gui.unlock_for_run_dialog(" ".join(command),
@@ -452,11 +463,13 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
 
     materialize: path for a short-lived real .env file (mode 0600,
     unquoted -- matches `docker run --env-file` semantics exactly),
-    resolved relative to `cwd` if given, deleted the instant the command
-    exits. Refuses to overwrite an existing file. Needed for tools that
-    read a real .env FILE directly (Docker's --env-file / env_file:); not
-    needed for `${VAR}`-style Compose interpolation, which already
-    inherits process environment.
+    resolved relative to `cwd` if given and enforced to remain inside it
+    (absolute paths and relative paths with '..' segments that climb above
+    cwd are rejected before the password prompt opens), deleted the
+    instant the command exits. Refuses to overwrite an existing file.
+    Needed for tools that read a real .env FILE directly (Docker's
+    --env-file / env_file:); not needed for `${VAR}`-style Compose
+    interpolation, which already inherits process environment.
 
     background: start the process detached (stdout/stderr redirected to a
     returned log file, stdin closed -- never inherited, since this
