@@ -221,9 +221,12 @@ def _install_migrate_impl(target_path: str) -> dict:
             # resync_targets calls. Require the same human-consented, password-
             # gated dialog as real migrations instead of silently writing
             # targets.json with zero confirmation.
-            approved = gui.install_dialog(target, to_migrate=[], other_owner={},
-                                          also_register=already_migrated)
-            if not approved:
+            outcome = gui.install_dialog(target, to_migrate=[], other_owner={},
+                                         also_register=already_migrated)
+            if not outcome["approved"]:
+                if outcome["partial_failure"]:
+                    return {"applied": False, "error": outcome["partial_failure"],
+                            "warnings": warnings}
                 return {"applied": False, "message": "Denied by user.", "warnings": warnings}
             return {"applied": True,
                     "message": f"Registered {target} for future resync_targets calls.",
