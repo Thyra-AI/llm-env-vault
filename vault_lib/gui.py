@@ -471,8 +471,12 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None):
         _label(container, title, font=FONT_TITLE).grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
-        _label(container, f"About to migrate {len(to_migrate)} variable(s) out of:").grid(
-            row=row, column=0, columnspan=2, sticky="w", **pad)
+        if to_migrate:
+            _label(container, f"About to migrate {len(to_migrate)} variable(s) out of:").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+        else:
+            _label(container, "About to register for future resync_targets:").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
         path_box = _entry(container, width=56)
         path_box.insert(0, _safe_display(str(target), 300))
@@ -547,30 +551,46 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None):
     def show_step2():
         clear()
         row = 0
-        _label(container, "Confirm Migration", font=FONT_TITLE).grid(
+        title = "Confirm Migration" if to_migrate else "Confirm Registration"
+        _label(container, title, font=FONT_TITLE).grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
 
-        _label(container, "Clicking Allow will:", justify="left").grid(
-            row=row, column=0, columnspan=2, sticky="w", **pad)
-        row += 1
-        _label(container,
-               f"  1. Encrypt the {len(to_migrate)} real value(s) below into vault.enc\n"
-               f"     (only readable with your master password).\n"
-               f"  2. Rewrite the file so each line below becomes VAR=\"value N\" --\n"
-               f"     that placeholder is all an AI assistant will ever see.",
-               justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
-        row += 1
+        if to_migrate:
+            _label(container, "Clicking Allow will:", justify="left").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+            _label(container,
+                   f"  1. Encrypt the {len(to_migrate)} real value(s) below into vault.enc\n"
+                   f"     (only readable with your master password).\n"
+                   f"  2. Rewrite the file so each line below becomes VAR=\"value N\" --\n"
+                   f"     that placeholder is all an AI assistant will ever see.",
+                   justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+        else:
+            _label(container,
+                   f"No new secrets to migrate. Clicking Allow will register "
+                   f"{_safe_display(target.name)} so future resync_targets calls keep "
+                   f"it in sync for the variable(s) listed below.",
+                   justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
 
         _label(container, "Variables (select text below and press Ctrl+C to copy):").grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
 
-        # Collisions with another project's vault entry go first so they're
-        # visible without scrolling, never buried below the fold.
-        ordered = sorted(to_migrate, key=lambda nv: nv[0] not in other_owner)
+        if to_migrate:
+            # Collisions with another project's vault entry go first so they're
+            # visible without scrolling, never buried below the fold.
+            display_names = [name for name, _ in
+                             sorted(to_migrate, key=lambda nv: nv[0] not in other_owner)]
+            list_count = len(to_migrate)
+        else:
+            # Registration-only: show which variables this file will be tracked for.
+            display_names = sorted(also_register)
+            list_count = len(also_register)
 
-        list_height = min(8, max(2, len(to_migrate)))
+        list_height = min(8, max(2, list_count))
         txt_frame = tk.Frame(container, bg=WINDOW_BG)
         txt = tk.Text(txt_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
                       highlightthickness=1, highlightbackground="#444",
@@ -579,7 +599,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None):
         yscroll = tk.Scrollbar(txt_frame, orient="vertical", command=txt.yview)
         xscroll = tk.Scrollbar(txt_frame, orient="horizontal", command=txt.xview)
         txt.config(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
-        for name, _ in ordered:
+        for name in display_names:
             label = name
             if name in other_owner:
                 label += f"   [OVERWRITES value used by {_shorten_path(other_owner[name], 40)}]"
@@ -596,8 +616,8 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None):
         txt_frame.grid_columnconfigure(0, weight=1)
         txt_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=14)
         row += 1
-        if len(to_migrate) > list_height:
-            _label(container, f"({len(to_migrate)} total -- scroll to see the rest.)",
+        if list_count > list_height:
+            _label(container, f"({list_count} total -- scroll to see the rest.)",
                    fg="#9a9a9a").grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
             row += 1
 

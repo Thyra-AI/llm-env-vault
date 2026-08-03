@@ -212,11 +212,18 @@ def _install_migrate_impl(target_path: str) -> dict:
 
     if not to_migrate:
         if already_migrated and str(target) not in targets_now:
-            try:
-                store.add_target(str(target), already_migrated)
-                warnings.append(f"Registered {target} for future resync_targets calls.")
-            except ValueError as e:
-                return {"applied": False, "error": str(e), "warnings": warnings}
+            # Registering into targets.json is a meaningful action: it grants
+            # this file permanent unattended-rewrite eligibility via future
+            # resync_targets calls. Require the same human-consented, password-
+            # gated dialog as real migrations instead of silently writing
+            # targets.json with zero confirmation.
+            approved = gui.install_dialog(target, to_migrate=[], other_owner={},
+                                          also_register=already_migrated)
+            if not approved:
+                return {"applied": False, "message": "Denied by user.", "warnings": warnings}
+            return {"applied": True,
+                    "message": f"Registered {target} for future resync_targets calls.",
+                    "warnings": warnings, "already_migrated": already_migrated}
         return {"applied": False, "message": "Nothing new to migrate.", "warnings": warnings,
                 "already_migrated": already_migrated}
 
