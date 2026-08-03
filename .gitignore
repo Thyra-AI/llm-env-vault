@@ -1,5 +1,6 @@
 vault.enc
 vault.salt
+targets.json
 .venv/
 __pycache__/
 *.pyc

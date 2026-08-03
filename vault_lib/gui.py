@@ -6,17 +6,52 @@ real value. Password verification happens inside the GUI process
 itself, in the button handlers.
 
 Security contract: add_secret_dialog / remove_secret_dialog return only
-a plain approved/denied boolean to the calling script -- the password
+a plain approved/denied boolean to the calling code -- the password
 and any decrypted values stay inside this process and are never printed
 or returned. unlock_for_run_dialog is the one deliberate exception: it
 hands back the decrypted secrets dict, because its whole job is to let
-run_with_env.py inject real values into a child process's environment.
+the run_with_env MCP tool inject real values into a child process's
+environment.
 """
+import re
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk
 
 from . import store
 from .crypto import WrongPassword
+
+
+def _safe_display(text, max_len: int = 200) -> str:
+    """Collapses all whitespace (including newlines) to single spaces and
+    hard-caps length. Applied to any text this module did not itself
+    generate before it's rendered into a dialog, so attacker-controlled
+    input (a command line, a process description) can never inject fake
+    extra lines or grow tall/wide enough to push the real consent content
+    and the Allow/Deny buttons off a non-resizable, non-scrolling window.
+    """
+    collapsed = re.sub(r"\s+", " ", str(text)).strip()
+    if len(collapsed) <= max_len:
+        return collapsed
+    head = max_len // 2 - 2
+    tail = max_len - head - 3
+    if head < 0 or tail < 0:
+        # Too small for a head...tail split with an ellipsis -- fall back
+        # to a hard cut rather than slicing with a negative index (which
+        # would silently wrap from the end and stop enforcing the cap).
+        return collapsed[:max_len]
+    return f"{collapsed[:head]}...{collapsed[-tail:]}"
+
+
+def _collapse_whitespace(text) -> str:
+    """Like _safe_display but with no length cap -- for content going into
+    a horizontally-scrollable Text widget rather than a fixed-size Label,
+    where truncating with an ellipsis would hide the middle of the very
+    thing the human is being asked to approve (a caller can pad both ends
+    with innocuous text specifically to bury the interesting part inside
+    the elided middle). Still collapses newlines so attacker-controlled
+    text can't fake extra lines that look like separate disclosures.
+    """
+    return re.sub(r"\s+", " ", str(text)).strip()
 
 WINDOW_BG = "#1e1e1e"
 FIELD_BG = "#2d2d2d"
@@ -26,7 +61,12 @@ ACCENT = "#4c8bf5"
 FONT_FAMILY = "Segoe UI"
 FONT_BODY = (FONT_FAMILY, 11)
 FONT_TITLE = (FONT_FAMILY, 14, "bold")
-FONT_MONO = ("Consolas", 11)
+
+# Every widget in every dialog uses FONT_BODY (titles use FONT_TITLE: same
+# family, just bold/larger for a heading) -- no other font is used anywhere
+# in this module. _style() also forces it as the Tk-wide default so any
+# widget that forgets to set one explicitly still can't end up on a
+# different font.
 
 
 def _style(root):
@@ -43,7 +83,7 @@ def _label(parent, text, **kw):
 
 
 def _entry(parent, **kw):
-    kw.setdefault("font", FONT_MONO)
+    kw.setdefault("font", FONT_BODY)
     return tk.Entry(parent, bg=FIELD_BG, fg=FG, insertbackground=FG,
                      relief="flat", highlightthickness=1,
                      highlightbackground="#444", highlightcolor=ACCENT, **kw)
@@ -67,15 +107,25 @@ def _center(root):
     root.geometry(f"{w}x{h}+{x}+{y}")
 
 
+def _show_error(root, err_label, text):
+    # _center() was already called once when this screen was first laid
+    # out, based on whatever text `err_label` held then (usually empty).
+    # An explicit geometry, once set, doesn't grow to fit later content --
+    # a longer error message set afterward (e.g. a save failure with a
+    # real exception message) would otherwise wrap past the window's
+    # fixed height and clip itself, and the buttons below it, off-screen.
+    err_label.config(text=text)
+    _center(root)
+
+
 def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
     """Step 1: master password. Step 2 (only after step 1 succeeds): the
     proposed change plus the real value, with Allow/Deny.
     Returns True if applied, False if denied/cancelled/failed.
     """
     store.validate_var_name(var_name)
-    first_run = not store.vault_exists()
     outcome = {"approved": False}
-    state = {"password": None, "secrets": None}
+    state = {"password": None, "secrets": None, "first_run": not store.vault_exists()}
     pad = {"padx": 14, "pady": 5}
 
     root = tk.Tk()
@@ -93,7 +143,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
     def show_step1():
         clear()
         row = 0
-        title = "Create Vault" if first_run else "Unlock Vault"
+        title = "Create Vault" if state["first_run"] else "Unlock Vault"
         _label(container, title, font=FONT_TITLE).grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
@@ -104,7 +154,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
 
-        if first_run:
+        if state["first_run"]:
             _label(container, "No vault exists yet -- choose a master password\n"
                                "(at least 8 characters).", justify="left").grid(
                 row=row, column=0, columnspan=2, sticky="w", **pad)
@@ -131,14 +181,14 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
         def on_continue():
             password = pw1.get()
             if not password:
-                err.config(text="Password cannot be empty.")
+                _show_error(root, err, "Password cannot be empty.")
                 return
-            if first_run:
+            if state["first_run"]:
                 if len(password) < 8:
-                    err.config(text="Use at least 8 characters.")
+                    _show_error(root, err, "Use at least 8 characters.")
                     return
                 if password != pw2.get():
-                    err.config(text="Passwords do not match.")
+                    _show_error(root, err, "Passwords do not match.")
                     return
                 state["password"] = password
                 state["secrets"] = {}
@@ -147,10 +197,10 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
             try:
                 state["secrets"] = store.load_secrets(password)
             except WrongPassword as e:
-                err.config(text=str(e))
+                _show_error(root, err, str(e))
                 return
             except (FileNotFoundError, ValueError) as e:
-                err.config(text=f"Vault error: {e}")
+                _show_error(root, err, f"Vault error: {e}")
                 return
             state["password"] = password
             show_step2()
@@ -165,7 +215,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
                   activebackground=ACCENT, command=on_continue).pack(side="left", padx=6)
         root.bind("<Escape>", lambda e: on_cancel())
         root.bind("<Return>", lambda e: on_continue())
-        pw1.focus_set()
+        pw1.focus_force()
         _center(root)
 
     def show_step2():
@@ -201,12 +251,20 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
         def on_allow():
             value = val.get()
             if not value:
-                err.config(text="Secret value cannot be empty.")
+                _show_error(root, err, "Secret value cannot be empty.")
                 return
             try:
-                if first_run:
+                if state["first_run"]:
                     store.create_secrets_vault(state["password"])
-                secrets = state["secrets"]
+                    state["first_run"] = False
+                    secrets = {}
+                else:
+                    # Re-decrypt right now rather than reusing the dict
+                    # captured back in step 1 -- this dialog can sit open
+                    # for a while, and a stale in-memory copy re-encrypted
+                    # over the real file would silently erase anything
+                    # another operation saved to the vault in the meantime.
+                    secrets = store.load_secrets(state["password"])
                 secrets[var_name] = value
                 store.save_secrets(state["password"], secrets)
 
@@ -215,7 +273,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
                 index[var_name] = resolved_placeholder
                 store.save_index(index)
             except Exception as e:
-                err.config(text=f"Failed to save: {e}")
+                _show_error(root, err, f"Failed to save: {e}")
                 return
             outcome["approved"] = True
             root.destroy()
@@ -234,7 +292,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
                   activebackground=ACCENT, command=on_allow).pack(side="left", padx=4)
         root.bind("<Escape>", lambda e: on_deny())
         root.bind("<Return>", lambda e: on_allow())
-        val.focus_set()
+        val.focus_force()
         _center(root)
 
     show_step1()
@@ -280,15 +338,15 @@ def remove_secret_dialog(var_name: str, placeholder: int):
         def on_continue():
             password = pw.get()
             if not password:
-                err.config(text="Password cannot be empty.")
+                _show_error(root, err, "Password cannot be empty.")
                 return
             try:
                 state["secrets"] = store.load_secrets(password)
             except WrongPassword as e:
-                err.config(text=str(e))
+                _show_error(root, err, str(e))
                 return
             except (FileNotFoundError, ValueError) as e:
-                err.config(text=f"Vault error: {e}")
+                _show_error(root, err, f"Vault error: {e}")
                 return
             state["password"] = password
             show_step2()
@@ -303,7 +361,7 @@ def remove_secret_dialog(var_name: str, placeholder: int):
                   activebackground=ACCENT, command=on_continue).pack(side="left", padx=6)
         root.bind("<Escape>", lambda e: on_cancel())
         root.bind("<Return>", lambda e: on_continue())
-        pw.focus_set()
+        pw.focus_force()
         _center(root)
 
     def show_step2():
@@ -327,7 +385,9 @@ def remove_secret_dialog(var_name: str, placeholder: int):
 
         def on_allow():
             try:
-                secrets = state["secrets"]
+                # Re-decrypt now, not the copy captured in step 1 -- see
+                # add_secret_dialog for why.
+                secrets = store.load_secrets(state["password"])
                 secrets.pop(var_name, None)
                 store.save_secrets(state["password"], secrets)
 
@@ -335,7 +395,7 @@ def remove_secret_dialog(var_name: str, placeholder: int):
                 index.pop(var_name, None)
                 store.save_index(index)
             except Exception as e:
-                err.config(text=f"Failed to save: {e}")
+                _show_error(root, err, f"Failed to save: {e}")
                 return
             outcome["approved"] = True
             root.destroy()
@@ -349,7 +409,16 @@ def remove_secret_dialog(var_name: str, placeholder: int):
         _button(btns, text="Allow", width=12, bg="#c94b4b", fg="white",
                   activebackground="#c94b4b", command=on_allow).pack(side="left", padx=6)
         root.bind("<Escape>", lambda e: on_deny())
-        root.bind("<Return>", lambda e: on_allow())
+        # No <Return>-to-Allow here on purpose: unlike step 1 (Continue) or
+        # add_secret_dialog's step 2 (gated by a required, empty-on-render
+        # value field), this screen has no input to type into, so a held
+        # or double-tapped Enter carrying over from step 1 could otherwise
+        # fire the actual removal before the human has read this screen.
+        # Rebind (don't just "not bind") -- root.bind is per-widget-per-
+        # event, so without this, step 1's <Return> -> on_continue handler
+        # stays active and fires against the Entry `clear()` already
+        # destroyed, raising TclError inside the Tk callback.
+        root.bind("<Return>", lambda e: None)
         _center(root)
 
     show_step1()
@@ -357,8 +426,303 @@ def remove_secret_dialog(var_name: str, placeholder: int):
     return outcome["approved"]
 
 
-def unlock_for_run_dialog(command_str: str):
-    """Used by run_with_env.py. Returns the decrypted secrets dict, or None if denied/failed."""
+def _shorten_path(text: str, max_len: int = 64) -> str:
+    # targets.json paths are attacker-writable state (see load_targets), so
+    # this goes through the same whitespace-collapse + hard-cap as any
+    # other untrusted text before it's ever put in a dialog.
+    return _safe_display(text, max_len)
+
+
+def install_dialog(target, to_migrate, other_owner=None, also_register=None):
+    """target: Path to the real .env being migrated.
+    to_migrate: list of (var_name, real_value) pulled from that file.
+    other_owner: optional {var_name: other_target_path} for names already
+    claimed by a different registered target -- migrating will overwrite
+    that other project's vault entry, so it's called out explicitly.
+    also_register: names already in the vault (nothing new to migrate for
+    them) that this target file also declares -- registered alongside
+    to_migrate's names so the resync_targets tool tracks all of this
+    file's variables, not just the ones that changed on this run.
+    Real values only ever live in this process's memory and inside the
+    files this module writes -- they are never returned to the caller.
+    """
+    other_owner = other_owner or {}
+    also_register = also_register or []
+    outcome = {"approved": False}
+    state = {"password": None, "secrets": None, "first_run": not store.vault_exists()}
+    pad = {"padx": 14, "pady": 5}
+
+    root = tk.Tk()
+    root.title("llm-env-vault")
+    root.resizable(False, False)
+    _style(root)
+
+    container = tk.Frame(root, bg=WINDOW_BG)
+    container.pack()
+
+    def clear():
+        for w in container.winfo_children():
+            w.destroy()
+
+    def show_step1():
+        clear()
+        row = 0
+        title = "Create Vault" if state["first_run"] else "Unlock Vault"
+        _label(container, title, font=FONT_TITLE).grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        _label(container, f"About to migrate {len(to_migrate)} variable(s) out of:").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        path_box = _entry(container, width=56)
+        path_box.insert(0, _safe_display(str(target), 300))
+        path_box.config(state="readonly", readonlybackground=FIELD_BG)
+        path_box.grid(row=row, column=0, columnspan=2, sticky="we", padx=14)
+        row += 1
+
+        if state["first_run"]:
+            _label(container, "No vault exists yet -- choose a master password\n"
+                               "(at least 8 characters).", justify="left").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+            _label(container, "Master password:").grid(row=row, column=0, sticky="e", **pad)
+            pw1 = _entry(container, show="*", width=30)
+            pw1.grid(row=row, column=1, **pad)
+            row += 1
+            _label(container, "Confirm password:").grid(row=row, column=0, sticky="e", **pad)
+            pw2 = _entry(container, show="*", width=30)
+            pw2.grid(row=row, column=1, **pad)
+            row += 1
+        else:
+            _label(container, "Master password:").grid(row=row, column=0, sticky="e", **pad)
+            pw1 = _entry(container, show="*", width=30)
+            pw1.grid(row=row, column=1, **pad)
+            row += 1
+            pw2 = None
+
+        err = _label(container, "", fg="#ff6b6b")
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
+        row += 1
+
+        def on_continue():
+            password = pw1.get()
+            if not password:
+                _show_error(root, err, "Password cannot be empty.")
+                return
+            if state["first_run"]:
+                if len(password) < 8:
+                    _show_error(root, err, "Use at least 8 characters.")
+                    return
+                if password != pw2.get():
+                    _show_error(root, err, "Passwords do not match.")
+                    return
+                state["password"] = password
+                state["secrets"] = {}
+                show_step2()
+                return
+            try:
+                state["secrets"] = store.load_secrets(password)
+            except WrongPassword as e:
+                _show_error(root, err, str(e))
+                return
+            except (FileNotFoundError, ValueError) as e:
+                _show_error(root, err, f"Vault error: {e}")
+                return
+            state["password"] = password
+            show_step2()
+
+        def on_cancel():
+            root.destroy()
+
+        btns = tk.Frame(container, bg=WINDOW_BG)
+        btns.grid(row=row, column=0, columnspan=2, pady=12)
+        _button(btns, text="Cancel", width=12, command=on_cancel).pack(side="left", padx=6)
+        _button(btns, text="Continue", width=12, bg=ACCENT, fg="white",
+                activebackground=ACCENT, command=on_continue).pack(side="left", padx=6)
+        root.bind("<Escape>", lambda e: on_cancel())
+        root.bind("<Return>", lambda e: on_continue())
+        pw1.focus_force()
+        _center(root)
+
+    def show_step2():
+        clear()
+        row = 0
+        _label(container, "Confirm Migration", font=FONT_TITLE).grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+
+        _label(container, "Clicking Allow will:", justify="left").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        _label(container,
+               f"  1. Encrypt the {len(to_migrate)} real value(s) below into vault.enc\n"
+               f"     (only readable with your master password).\n"
+               f"  2. Rewrite the file so each line below becomes VAR=\"value N\" --\n"
+               f"     that placeholder is all an AI assistant will ever see.",
+               justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+
+        _label(container, "Variables (select text below and press Ctrl+C to copy):").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+
+        # Collisions with another project's vault entry go first so they're
+        # visible without scrolling, never buried below the fold.
+        ordered = sorted(to_migrate, key=lambda nv: nv[0] not in other_owner)
+
+        list_height = min(8, max(2, len(to_migrate)))
+        txt_frame = tk.Frame(container, bg=WINDOW_BG)
+        txt = tk.Text(txt_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
+                      highlightthickness=1, highlightbackground="#444",
+                      selectbackground=ACCENT, insertbackground=FG,
+                      height=list_height, width=46, wrap="none")
+        yscroll = tk.Scrollbar(txt_frame, orient="vertical", command=txt.yview)
+        xscroll = tk.Scrollbar(txt_frame, orient="horizontal", command=txt.xview)
+        txt.config(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        for name, _ in ordered:
+            label = name
+            if name in other_owner:
+                label += f"   [OVERWRITES value used by {_shorten_path(other_owner[name], 40)}]"
+            txt.insert("end", label + "\n")
+        txt.config(state="disabled")  # Text stays selectable/copyable even when disabled
+        txt.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        # Always shown, not just when there are more rows than fit
+        # vertically: the "[OVERWRITES value used by ...]" marker on a
+        # collision line -- consent-relevant info about whose value is
+        # about to be destroyed -- can exceed the box's width on its own.
+        xscroll.grid(row=1, column=0, sticky="ew")
+        txt_frame.grid_rowconfigure(0, weight=1)
+        txt_frame.grid_columnconfigure(0, weight=1)
+        txt_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=14)
+        row += 1
+        if len(to_migrate) > list_height:
+            _label(container, f"({len(to_migrate)} total -- scroll to see the rest.)",
+                   fg="#9a9a9a").grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
+            row += 1
+
+        if other_owner:
+            # Bounded (unlike the scrollable list above, which is the real,
+            # complete record of every collision) -- this is only a
+            # secondary summary, so truncating it can't hide anything the
+            # human couldn't already see by scrolling up.
+            _label(container,
+                   f"Warning: {len(other_owner)} name(s) above are already used by another "
+                   f"registered project (listed first, scroll up if needed). Continuing will "
+                   f"overwrite that project's vault value: "
+                   f"{_safe_display(', '.join(sorted(other_owner)), 200)}",
+                   fg="#ffb454", justify="left").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+
+        _label(container, "Deny (or close this window) cancels everything -- nothing is "
+                           "written. Call resync_targets later to refresh this file "
+                           "after future vault changes.",
+               justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+
+        err = _label(container, "", fg="#ff6b6b")
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
+        row += 1
+
+        def on_allow():
+            vault_saved = False
+            try:
+                if state["first_run"]:
+                    store.create_secrets_vault(state["password"])
+                    state["first_run"] = False
+                    secrets = {}
+                else:
+                    # Re-decrypt now, not the dict captured in step 1 -- see
+                    # add_secret_dialog for why.
+                    secrets = store.load_secrets(state["password"])
+
+                # Re-read the target right now rather than trusting values
+                # captured when this dialog first opened -- it can sit open
+                # for minutes, and force_names below will overwrite the
+                # file unconditionally. Without this, a real edit made to
+                # the file while the dialog was open would be silently
+                # destroyed and replaced with a placeholder for a value
+                # the vault never actually saw.
+                # Filter by kind via indexing, not tuple-unpacking in the
+                # comprehension's `for` clause -- parse_env_file also
+                # yields 2-tuples for 'raw'/'unsupported' lines, and a
+                # comprehension unpacks the for-target before applying the
+                # if-filter, so `for kind, n, v in ...` would raise on the
+                # very first comment or blank line in the file.
+                fresh = {item[1]: item[2] for item in store.parse_env_file(target)
+                         if item[0] == "var"}
+
+                index = store.load_index()
+                names = [name for name, _ in to_migrate]
+                for name, original_value in to_migrate:
+                    fresh_value = fresh.get(name)
+                    # Same guard install_migrate applies before ever calling
+                    # this dialog: never treat an empty value or something that
+                    # already looks like one of our own placeholders as a
+                    # real secret, even if that's what's on disk right now.
+                    if fresh_value and not store.PLACEHOLDER_VALUE_RE.match(fresh_value):
+                        secrets[name] = fresh_value
+                    else:
+                        secrets[name] = original_value
+                    if name not in index:
+                        index[name] = store.next_placeholder(index)
+                store.save_secrets(state["password"], secrets)
+                store.save_index(index)
+                vault_saved = True
+                all_names = names + [n for n in also_register if n not in names]
+                store.add_target(str(target), all_names)
+                store.sync_target_file(target, index, set(all_names), force_names=set(names))
+            except Exception as e:
+                if vault_saved:
+                    _show_error(root, err, f"Saved to the vault, but could not rewrite {target.name}: "
+                                     f"{e}. The real values are safe; fix the problem and call "
+                                     f"resync_targets.")
+                else:
+                    _show_error(root, err, f"Failed to save: {e}")
+                return
+            outcome["approved"] = True
+            root.destroy()
+
+        def on_deny():
+            root.destroy()
+
+        def on_back():
+            show_step1()
+
+        btns = tk.Frame(container, bg=WINDOW_BG)
+        btns.grid(row=row, column=0, columnspan=2, pady=12)
+        _button(btns, text="Back", width=10, command=on_back).pack(side="left", padx=4)
+        _button(btns, text="Deny", width=10, command=on_deny).pack(side="left", padx=4)
+        _button(btns, text="Allow", width=12, bg=ACCENT, fg="white",
+                activebackground=ACCENT, command=on_allow).pack(side="left", padx=4)
+        root.bind("<Escape>", lambda e: on_deny())
+        # No <Return>-to-Allow here on purpose -- see remove_secret_dialog's
+        # step 2 for why: no input field gates it, so a carried-over Enter
+        # from step 1 could migrate the file before it's been read.
+        # Rebind (not just "don't bind") -- otherwise step 1's <Return> ->
+        # on_continue stays active and fires against the Entry `clear()`
+        # already destroyed, raising TclError inside the Tk callback.
+        root.bind("<Return>", lambda e: None)
+        _center(root)
+
+    show_step1()
+    root.mainloop()
+    return outcome["approved"]
+
+
+def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None):
+    """Used by the run_with_env MCP tool. Returns the decrypted secrets
+    dict, or None if denied/failed. Callers that pass only_vars are
+    expected to filter the returned dict down to those names themselves
+    -- this function still returns everything, since it has to decrypt
+    the whole vault anyway to get any of it.
+
+    No separate "Requested by" line here -- unlike the other dialogs, this
+    one already shows exactly what's about to run in the Command box
+    below, so a second line repeating the same command would just be a
+    redundant wall of the same long text twice.
+    """
     outcome = {"secrets": None}
     pad = {"padx": 14, "pady": 5}
 
@@ -367,14 +731,65 @@ def unlock_for_run_dialog(command_str: str):
     root.resizable(False, False)
     _style(root)
 
+    if only_vars is not None:
+        # Caller already validated these against the index -- show exactly
+        # what will actually be injected, not the whole vault.
+        var_names = sorted(only_vars)
+    else:
+        try:
+            var_names = sorted(store.load_index().keys())
+        except (OSError, UnicodeDecodeError, ValueError):
+            # `root` already exists at this point -- an uncaught exception
+            # here would leave it orphaned (never destroyed, since
+            # mainloop() hasn't started yet) instead of just falling back
+            # to an empty disclosure list, which is a safe default anyway.
+            var_names = []
+
     row = 0
     _label(root, "Unlock Vault to Run Command", font=FONT_TITLE).grid(
         row=row, column=0, columnspan=2, sticky="w", **pad)
     row += 1
 
-    _label(root, f"Command:\n  {command_str}", justify="left").grid(
-        row=row, column=0, columnspan=2, sticky="w", **pad)
+    if var_names:
+        _label(root, f"Will expose {len(var_names)} variable(s) to this command: "
+                     f"{_safe_display(', '.join(var_names), 300)}",
+               justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+    else:
+        _label(root, "Will expose 0 variable(s) to this command.").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+
+    _label(root, "Command:").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
     row += 1
+
+    cmd_frame = tk.Frame(root, bg=WINDOW_BG)
+    cmd_text = tk.Text(cmd_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
+                        highlightthickness=1, highlightbackground="#444",
+                        selectbackground=ACCENT, insertbackground=FG,
+                        height=3, width=52, wrap="none")
+    cmd_xscroll = tk.Scrollbar(cmd_frame, orient="horizontal", command=cmd_text.xview)
+    cmd_text.config(xscrollcommand=cmd_xscroll.set)
+    cmd_text.insert("end", _collapse_whitespace(command_str))
+    cmd_text.config(state="disabled")
+    cmd_text.grid(row=0, column=0, sticky="we")
+    cmd_xscroll.grid(row=1, column=0, sticky="ew")
+    cmd_frame.grid_columnconfigure(0, weight=1)
+    cmd_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=14)
+    row += 1
+
+    if materialize_path:
+        _label(root, f"Also writes real values to:", fg="#9a9a9a").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(5, 0))
+        row += 1
+        path_box = _entry(root, width=56)
+        path_box.insert(0, _safe_display(str(materialize_path), 300))
+        path_box.config(state="readonly", readonlybackground=FIELD_BG)
+        path_box.grid(row=row, column=0, columnspan=2, sticky="we", padx=14)
+        row += 1
+        _label(root, "(deleted the moment the command exits)", fg="#9a9a9a").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
 
     _label(root, "Master password:").grid(row=row, column=0, sticky="e", **pad)
     pw = _entry(root, show="*", width=30)
@@ -388,15 +803,15 @@ def unlock_for_run_dialog(command_str: str):
     def on_allow():
         password = pw.get()
         if not password:
-            err.config(text="Password cannot be empty.")
+            _show_error(root, err, "Password cannot be empty.")
             return
         try:
             outcome["secrets"] = store.load_secrets(password)
         except WrongPassword as e:
-            err.config(text=str(e))
+            _show_error(root, err, str(e))
             return
         except (FileNotFoundError, ValueError) as e:
-            err.config(text=f"Vault error: {e}")
+            _show_error(root, err, f"Vault error: {e}")
             return
         root.destroy()
 
@@ -411,14 +826,7 @@ def unlock_for_run_dialog(command_str: str):
 
     root.bind("<Escape>", lambda e: on_deny())
     root.bind("<Return>", lambda e: on_allow())
-    pw.focus_set()
+    pw.focus_force()
     _center(root)
     root.mainloop()
     return outcome["secrets"]
-
-
-def notify_no_vault():
-    root = tk.Tk()
-    root.withdraw()
-    messagebox.showinfo("llm-env-vault", "No vault exists yet. Run add_secret.py first.")
-    root.destroy()
