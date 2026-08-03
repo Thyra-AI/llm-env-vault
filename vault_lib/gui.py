@@ -121,10 +121,13 @@ def _show_error(root, err_label, text):
 def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
     """Step 1: master password. Step 2 (only after step 1 succeeds): the
     proposed change plus the real value, with Allow/Deny.
-    Returns True if applied, False if denied/cancelled/failed.
+    Returns an outcome dict: {"approved": bool, "partial_failure": Optional[str]}.
+    approved is True only on full success. partial_failure is set to an honest
+    description when save_secrets succeeded but save_index/llm.env did not --
+    in that case the real value IS in vault.enc even though approved is False.
     """
     store.validate_var_name(var_name)
-    outcome = {"approved": False}
+    outcome = {"approved": False, "partial_failure": None}
     state = {"password": None, "secrets": None, "first_run": not store.vault_exists()}
     pad = {"padx": 14, "pady": 5}
 
@@ -253,6 +256,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
             if not value:
                 _show_error(root, err, "Secret value cannot be empty.")
                 return
+            secrets_saved = False
             try:
                 if state["first_run"]:
                     store.create_secrets_vault(state["password"])
@@ -267,13 +271,24 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
                     secrets = store.load_secrets(state["password"])
                 secrets[var_name] = value
                 store.save_secrets(state["password"], secrets)
+                secrets_saved = True
 
                 index = store.load_index()
                 resolved_placeholder = index.get(var_name, store.next_placeholder(index))
                 index[var_name] = resolved_placeholder
                 store.save_index(index)
             except Exception as e:
-                _show_error(root, err, f"Failed to save: {e}")
+                if secrets_saved:
+                    msg = (
+                        f"Saved to the vault, but could not update "
+                        f"vault_index.json/llm.env: {e}. The real value IS in the "
+                        f"vault now; fix the problem and call add_secret again "
+                        f"(or sync_llm_env) to finish linking it to a placeholder."
+                    )
+                    outcome["partial_failure"] = msg
+                    _show_error(root, err, msg)
+                else:
+                    _show_error(root, err, f"Failed to save: {e}")
                 return
             outcome["approved"] = True
             root.destroy()
@@ -297,11 +312,11 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
 
     show_step1()
     root.mainloop()
-    return outcome["approved"]
+    return outcome
 
 
 def remove_secret_dialog(var_name: str, placeholder: int):
-    outcome = {"approved": False}
+    outcome = {"approved": False, "partial_failure": None}
     state = {"password": None, "secrets": None}
     pad = {"padx": 14, "pady": 5}
 
@@ -384,18 +399,32 @@ def remove_secret_dialog(var_name: str, placeholder: int):
         row += 1
 
         def on_allow():
+            secrets_saved = False
             try:
                 # Re-decrypt now, not the copy captured in step 1 -- see
                 # add_secret_dialog for why.
                 secrets = store.load_secrets(state["password"])
                 secrets.pop(var_name, None)
                 store.save_secrets(state["password"], secrets)
+                secrets_saved = True
 
                 index = store.load_index()
                 index.pop(var_name, None)
                 store.save_index(index)
             except Exception as e:
-                _show_error(root, err, f"Failed to save: {e}")
+                if secrets_saved:
+                    msg = (
+                        f"The secret was already removed from the vault (this "
+                        f"cannot be undone), but vault_index.json/llm.env could "
+                        f"not be updated: {e}. They will incorrectly still show a "
+                        f"placeholder for a value that no longer exists -- call "
+                        f"remove_secret again to clean that up, or edit "
+                        f"vault_index.json by hand."
+                    )
+                    outcome["partial_failure"] = msg
+                    _show_error(root, err, msg)
+                else:
+                    _show_error(root, err, f"Failed to save: {e}")
                 return
             outcome["approved"] = True
             root.destroy()
@@ -423,7 +452,7 @@ def remove_secret_dialog(var_name: str, placeholder: int):
 
     show_step1()
     root.mainloop()
-    return outcome["approved"]
+    return outcome
 
 
 def _shorten_path(text: str, max_len: int = 64) -> str:
@@ -448,7 +477,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None):
     """
     other_owner = other_owner or {}
     also_register = also_register or []
-    outcome = {"approved": False}
+    outcome = {"approved": False, "partial_failure": None}
     state = {"password": None, "secrets": None, "first_run": not store.vault_exists()}
     pad = {"padx": 14, "pady": 5}
 
@@ -675,9 +704,13 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None):
                 store.sync_target_file(target, index, set(all_names), force_names=set(names))
             except Exception as e:
                 if vault_saved:
-                    _show_error(root, err, f"Saved to the vault, but could not rewrite {target.name}: "
-                                     f"{e}. The real values are safe; fix the problem and call "
-                                     f"resync_targets.")
+                    msg = (
+                        f"Saved to the vault, but could not rewrite {target.name}: "
+                        f"{e}. The real values are safe; fix the problem and call "
+                        f"resync_targets."
+                    )
+                    outcome["partial_failure"] = msg
+                    _show_error(root, err, msg)
                 else:
                     _show_error(root, err, f"Failed to save: {e}")
                 return
@@ -708,7 +741,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None):
 
     show_step1()
     root.mainloop()
-    return outcome["approved"]
+    return outcome
 
 
 def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None):
