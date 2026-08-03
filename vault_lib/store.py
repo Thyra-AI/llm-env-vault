@@ -15,11 +15,13 @@ All writes to these files are atomic (write to a temp file in the same
 directory, fsync, then os.replace over the target) so a crash or power
 loss mid-write can never leave a truncated/corrupted vault.
 """
+import contextlib
 import json
 import os
 import re
 import stat
 import tempfile
+import time
 from pathlib import Path
 
 from . import crypto
@@ -30,6 +32,13 @@ SECRETS_FILE = ROOT / "vault.enc"
 INDEX_FILE = ROOT / "vault_index.json"
 ENV_FILE = ROOT / "llm.env"
 TARGETS_FILE = ROOT / "targets.json"
+TARGETS_LOCK_FILE = TARGETS_FILE.parent / "targets.json.lock"
+
+# How many times to retry acquiring the targets lock before giving up, and
+# how long to sleep between retries.  30 × 50 ms = 1.5 s total maximum wait,
+# which is generous for a low-contention, short critical-section local lock.
+_LOCK_RETRIES = 30
+_LOCK_RETRY_SLEEP = 0.05  # seconds
 
 VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 ENV_LINE_RE = re.compile(
@@ -159,12 +168,69 @@ def save_targets(targets: dict) -> None:
     _atomic_write_text(TARGETS_FILE, json.dumps(targets, indent=2, sort_keys=True) + "\n")
 
 
+@contextlib.contextmanager
+def _targets_lock():
+    """File-backed mutex that serialises the targets.json read-modify-write.
+
+    On Windows (the primary platform for this project), uses
+    ``msvcrt.locking()`` on a dedicated lock file (``targets.json.lock``
+    in the same directory as ``targets.json``).  Falls back to
+    ``fcntl.flock()`` on POSIX for cross-platform correctness.
+
+    Retries up to ``_LOCK_RETRIES`` times with ``_LOCK_RETRY_SLEEP``-second
+    gaps between attempts, then raises ``RuntimeError`` if the lock still
+    can't be acquired (e.g. a process died while holding it).
+    """
+    fd = os.open(str(TARGETS_LOCK_FILE), os.O_CREAT | os.O_RDWR)
+    try:
+        try:
+            import msvcrt as _msvcrt  # Windows only
+            _windows = True
+        except ImportError:
+            _windows = False
+
+        if _windows:
+            # msvcrt.locking() locks from the *current* file position, so
+            # always seek to 0 before locking and before unlocking.
+            for attempt in range(_LOCK_RETRIES):
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    _msvcrt.locking(fd, _msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if attempt == _LOCK_RETRIES - 1:
+                        raise RuntimeError(
+                            f"Could not acquire targets.json lock after "
+                            f"{_LOCK_RETRIES} retries -- another process may be "
+                            f"stuck holding it."
+                        ) from None
+                    time.sleep(_LOCK_RETRY_SLEEP)
+            try:
+                yield
+            finally:
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+        else:
+            import fcntl as _fcntl
+            _fcntl.flock(fd, _fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                _fcntl.flock(fd, _fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def add_target(path: str, names) -> None:
-    targets = load_targets()
-    existing = set(targets.get(path, []))
-    existing.update(names)
-    targets[path] = sorted(existing)
-    save_targets(targets)
+    with _targets_lock():
+        targets = load_targets()
+        existing = set(targets.get(path, []))
+        existing.update(names)
+        targets[path] = sorted(existing)
+        save_targets(targets)
 
 
 def _find_closing_quote(value: str, q: str) -> int:
