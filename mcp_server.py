@@ -94,9 +94,11 @@ def _add_secret_impl(var_name: str) -> dict:
         return {"applied": False, "error": str(e)}
     is_update = var_name in index
     placeholder = index[var_name] if is_update else store.next_placeholder(index)
-    approved = gui.add_secret_dialog(var_name, is_update, placeholder)
-    if approved:
+    outcome = gui.add_secret_dialog(var_name, is_update, placeholder)
+    if outcome["approved"]:
         return {"applied": True, "message": f'{var_name} -> "value {placeholder}" in llm.env'}
+    if outcome["partial_failure"]:
+        return {"applied": False, "error": outcome["partial_failure"]}
     return {"applied": False, "message": "Denied by user."}
 
 
@@ -131,9 +133,11 @@ def _remove_secret_impl(var_name: str) -> dict:
                          f"missing -- refusing to remove it without human confirmation. "
                          f"Restore the vault files, or edit vault_index.json by hand if "
                          f"you're sure it's safe."}
-    approved = gui.remove_secret_dialog(var_name, index[var_name])
-    if approved:
+    outcome = gui.remove_secret_dialog(var_name, index[var_name])
+    if outcome["approved"]:
         return {"applied": True, "message": f"{var_name} removed from llm.env"}
+    if outcome["partial_failure"]:
+        return {"applied": False, "error": outcome["partial_failure"]}
     return {"applied": False, "message": "Denied by user."}
 
 
@@ -227,8 +231,10 @@ def _install_migrate_impl(target_path: str) -> dict:
                 other_owner[name] = path_str
                 break
 
-    approved = gui.install_dialog(target, to_migrate, other_owner, also_register=already_migrated)
-    if not approved:
+    outcome = gui.install_dialog(target, to_migrate, other_owner, also_register=already_migrated)
+    if not outcome["approved"]:
+        if outcome["partial_failure"]:
+            return {"applied": False, "error": outcome["partial_failure"], "warnings": warnings}
         return {"applied": False, "message": "Denied by user.", "warnings": warnings}
 
     return {
