@@ -146,13 +146,13 @@ def remove_secret(var_name: str) -> dict:
 
 
 def _install_migrate_impl(target_path: str) -> dict:
-    target = Path(target_path).resolve()
-    if not target.exists():
-        return {"applied": False, "error": f"{target} does not exist."}
-    if not target.is_file():
-        return {"applied": False, "error": f"{target} is not a file."}
-
     try:
+        target = Path(target_path).resolve()
+        if not target.exists():
+            return {"applied": False, "error": f"{target} does not exist."}
+        if not target.is_file():
+            return {"applied": False, "error": f"{target} is not a file."}
+
         parsed = store.parse_env_file(target)
         index_now = store.load_index()
         targets_now = store.load_targets()
@@ -332,10 +332,13 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
     # exact pattern the docs show (a relative materialize path alongside a
     # cwd pointing at the user's project), the file lands in the wrong
     # directory and the child can't find it.
-    materialized_path = _resolve_materialize_path(materialize, cwd) if materialize else None
-    if materialized_path is not None and materialized_path.exists():
-        return {"error": f"{materialized_path} already exists -- refusing to overwrite it. "
-                          f"Pick a path that doesn't exist yet."}
+    try:
+        materialized_path = _resolve_materialize_path(materialize, cwd) if materialize else None
+        if materialized_path is not None and materialized_path.exists():
+            return {"error": f"{materialized_path} already exists -- refusing to overwrite it. "
+                              f"Pick a path that doesn't exist yet."}
+    except OSError as e:
+        return {"error": str(e)}
 
     secrets = gui.unlock_for_run_dialog(" ".join(command),
                                          materialize_path=str(materialized_path)
