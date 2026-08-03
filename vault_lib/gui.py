@@ -8,10 +8,12 @@ itself, in the button handlers.
 Security contract: add_secret_dialog / remove_secret_dialog return only
 a plain approved/denied boolean to the calling code -- the password
 and any decrypted values stay inside this process and are never printed
-or returned. unlock_for_run_dialog is the one deliberate exception: it
-hands back the decrypted secrets dict, because its whole job is to let
-the run_with_env MCP tool inject real values into a child process's
-environment.
+or returned. install_dialog returns a small outcome dict (keys:
+"approved", "conflicts") rather than a plain bool so callers can learn
+whether any conflict-protected lines were left unchanged. unlock_for_run_dialog
+is the one deliberate exception that hands back the decrypted secrets
+dict, because its whole job is to let the run_with_env MCP tool inject
+real values into a child process's environment.
 """
 import re
 import tkinter as tk
@@ -118,10 +120,15 @@ def _show_error(root, err_label, text):
     _center(root)
 
 
-def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
+def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
+                      is_sensitive: bool = False):
     """Step 1: master password. Step 2 (only after step 1 succeeds): the
     proposed change plus the real value, with Allow/Deny.
     Returns True if applied, False if denied/cancelled/failed.
+
+    is_sensitive: when True, step 2 displays an amber warning that this
+    variable name matches a well-known OS/runtime-critical env var and
+    that run_with_env will override it for any command it launches.
     """
     store.validate_var_name(var_name)
     outcome = {"approved": False}
@@ -243,6 +250,14 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int):
         val = _entry(container, show="*", width=30)
         val.grid(row=row, column=1, **pad)
         row += 1
+
+        if is_sensitive:
+            _label(container,
+                   f"Warning: {var_name} overrides a system/runtime environment variable "
+                   f"and could affect any command run_with_env launches later.",
+                   fg="#ffb454", justify="left").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
 
         err = _label(container, "", fg="#ff6b6b")
         err.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
@@ -433,7 +448,8 @@ def _shorten_path(text: str, max_len: int = 64) -> str:
     return _safe_display(text, max_len)
 
 
-def install_dialog(target, to_migrate, other_owner=None, also_register=None):
+def install_dialog(target, to_migrate, other_owner=None, also_register=None,
+                   sensitive_names=None):
     """target: Path to the real .env being migrated.
     to_migrate: list of (var_name, real_value) pulled from that file.
     other_owner: optional {var_name: other_target_path} for names already
@@ -443,12 +459,18 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None):
     them) that this target file also declares -- registered alongside
     to_migrate's names so the resync_targets tool tracks all of this
     file's variables, not just the ones that changed on this run.
+    sensitive_names: optional set of names in to_migrate that match
+    well-known OS/runtime-critical environment variable names; if any are
+    present, step 2 shows an amber warning (non-blocking).
     Real values only ever live in this process's memory and inside the
     files this module writes -- they are never returned to the caller.
+    Returns a dict {"approved": bool, "conflicts": list} so the caller
+    can learn whether any conflict-protected lines were left unchanged.
     """
     other_owner = other_owner or {}
     also_register = also_register or []
-    outcome = {"approved": False}
+    sensitive_names = set(sensitive_names or ())
+    outcome = {"approved": False, "conflicts": []}
     state = {"password": None, "secrets": None, "first_run": not store.vault_exists()}
     pad = {"padx": 14, "pady": 5}
 
@@ -615,6 +637,17 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None):
                 row=row, column=0, columnspan=2, sticky="w", **pad)
             row += 1
 
+        sensitive_in_migrate = sorted(n for n, _ in to_migrate if n in sensitive_names)
+        if sensitive_in_migrate:
+            _label(container,
+                   f"Warning: {_safe_display(', '.join(sensitive_in_migrate), 200)} "
+                   f"override(s) system/runtime environment variable(s) -- any command "
+                   f"run_with_env launches later will see the vaulted value instead of "
+                   f"the real system value.",
+                   fg="#ffb454", justify="left").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+
         _label(container, "Deny (or close this window) cancels everything -- nothing is "
                            "written. Call resync_targets later to refresh this file "
                            "after future vault changes.",
@@ -672,7 +705,9 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None):
                 vault_saved = True
                 all_names = names + [n for n in also_register if n not in names]
                 store.add_target(str(target), all_names)
-                store.sync_target_file(target, index, set(all_names), force_names=set(names))
+                conflicts = store.sync_target_file(
+                    target, index, set(all_names), force_names=set(names))
+                outcome["conflicts"] = conflicts
             except Exception as e:
                 if vault_saved:
                     _show_error(root, err, f"Saved to the vault, but could not rewrite {target.name}: "
@@ -708,7 +743,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None):
 
     show_step1()
     root.mainloop()
-    return outcome["approved"]
+    return outcome
 
 
 def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None):
