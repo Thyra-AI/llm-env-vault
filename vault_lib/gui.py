@@ -507,10 +507,19 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None):
             _label(container, "About to register for future resync_targets:").grid(
                 row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
-        path_box = _entry(container, width=56)
-        path_box.insert(0, _safe_display(str(target), 300))
-        path_box.config(state="readonly", readonlybackground=FIELD_BG)
-        path_box.grid(row=row, column=0, columnspan=2, sticky="we", padx=14)
+        path_frame = tk.Frame(container, bg=WINDOW_BG)
+        path_text = tk.Text(path_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
+                            highlightthickness=1, highlightbackground="#444",
+                            selectbackground=ACCENT, insertbackground=FG,
+                            height=2, width=52, wrap="none")
+        path_xscroll = tk.Scrollbar(path_frame, orient="horizontal", command=path_text.xview)
+        path_text.config(xscrollcommand=path_xscroll.set)
+        path_text.insert("end", _collapse_whitespace(str(target)))
+        path_text.config(state="disabled")
+        path_text.grid(row=0, column=0, sticky="we")
+        path_xscroll.grid(row=1, column=0, sticky="ew")
+        path_frame.grid_columnconfigure(0, weight=1)
+        path_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=14)
         row += 1
 
         if state["first_run"]:
@@ -835,10 +844,19 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
         _label(root, f"Also writes real values to:", fg="#9a9a9a").grid(
             row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(5, 0))
         row += 1
-        path_box = _entry(root, width=56)
-        path_box.insert(0, _safe_display(str(materialize_path), 300))
-        path_box.config(state="readonly", readonlybackground=FIELD_BG)
-        path_box.grid(row=row, column=0, columnspan=2, sticky="we", padx=14)
+        path_frame = tk.Frame(root, bg=WINDOW_BG)
+        path_text = tk.Text(path_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
+                            highlightthickness=1, highlightbackground="#444",
+                            selectbackground=ACCENT, insertbackground=FG,
+                            height=2, width=52, wrap="none")
+        path_xscroll = tk.Scrollbar(path_frame, orient="horizontal", command=path_text.xview)
+        path_text.config(xscrollcommand=path_xscroll.set)
+        path_text.insert("end", _collapse_whitespace(str(materialize_path)))
+        path_text.config(state="disabled")
+        path_text.grid(row=0, column=0, sticky="we")
+        path_xscroll.grid(row=1, column=0, sticky="ew")
+        path_frame.grid_columnconfigure(0, weight=1)
+        path_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=14)
         row += 1
         _label(root, "(deleted the moment the command exits)", fg="#9a9a9a").grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
