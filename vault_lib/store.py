@@ -242,6 +242,10 @@ def _dominant_newline(text: str) -> str:
 
 
 LOOKS_LIKE_ASSIGNMENT_RE = re.compile(r"^\s*(?:export\s+)?[^\s#=]+\s*=")
+# Captures only the key portion (before the first =) from an assignment-shaped line.
+# Used to strip the value before storing unrecognized/swallowed lines so that real
+# secret values never propagate into warning messages.
+_KEY_EXTRACTOR_RE = re.compile(r"^\s*(?:export\s+)?([^\s#=]+)\s*=")
 
 
 def parse_env_file(path: Path) -> list:
@@ -252,17 +256,21 @@ def parse_env_file(path: Path) -> list:
                                         or unterminated quoted value; the
                                         caller should skip it rather than
                                         silently truncate a real secret
-      ('unrecognized_name', text)   -- assignment-shaped (KEY=...) but the
+      ('unrecognized_name', name)   -- assignment-shaped (KEY=...) but the
                                         key isn't a valid identifier (has a
                                         hyphen, starts with a digit, etc.);
                                         this vault can't manage it, but the
                                         caller must not claim the file is
                                         secret-free while it still holds a
-                                        real, un-migrated value
-      ('swallowed', text)           -- assignment-shaped line that landed
+                                        real, un-migrated value.
+                                        Carries only the KEY name, never
+                                        the raw line or the secret value.
+      ('swallowed', name)           -- assignment-shaped line that landed
                                         inside an unterminated-quote's
                                         continuation range; likely a real
-                                        value that never got migrated
+                                        value that never got migrated.
+                                        Carries only the KEY name, never
+                                        the raw line or the secret value.
 
     Once an unterminated quote is found, every following line is treated
     as part of that same broken/multi-line value until one is found ending
@@ -284,7 +292,9 @@ def parse_env_file(path: Path) -> list:
         m = ENV_LINE_RE.match(line)
         if not m:
             if LOOKS_LIKE_ASSIGNMENT_RE.match(line):
-                parsed.append(("unrecognized_name", line))
+                _km = _KEY_EXTRACTOR_RE.match(line)
+                _key = _km.group(1) if _km else "(unparseable name)"
+                parsed.append(("unrecognized_name", _key))
             else:
                 parsed.append(("raw", line))
             i += 1
@@ -297,7 +307,9 @@ def parse_env_file(path: Path) -> list:
             while i < n:
                 cont = lines[i]
                 if LOOKS_LIKE_ASSIGNMENT_RE.match(cont):
-                    parsed.append(("swallowed", cont))
+                    _km2 = _KEY_EXTRACTOR_RE.match(cont)
+                    _key2 = _km2.group(1) if _km2 else "(unparseable name)"
+                    parsed.append(("swallowed", _key2))
                 else:
                     parsed.append(("raw", cont))
                 i += 1
