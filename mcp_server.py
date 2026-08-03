@@ -94,7 +94,8 @@ def _add_secret_impl(var_name: str) -> dict:
         return {"applied": False, "error": str(e)}
     is_update = var_name in index
     placeholder = index[var_name] if is_update else store.next_placeholder(index)
-    outcome = gui.add_secret_dialog(var_name, is_update, placeholder)
+    is_sensitive = store.is_sensitive_env_name(var_name)
+    outcome = gui.add_secret_dialog(var_name, is_update, placeholder, is_sensitive=is_sensitive)
     if outcome["approved"]:
         return {"applied": True, "message": f'{var_name} -> "value {placeholder}" in llm.env'}
     if outcome["partial_failure"]:
@@ -241,19 +242,25 @@ def _install_migrate_impl(target_path: str) -> dict:
                 other_owner[name] = path_str
                 break
 
-    outcome = gui.install_dialog(target, to_migrate, other_owner, also_register=already_migrated)
+    sensitive_names = {name for name, _ in to_migrate if store.is_sensitive_env_name(name)}
+    outcome = gui.install_dialog(target, to_migrate, other_owner, also_register=already_migrated,
+                                 sensitive_names=sensitive_names)
     if not outcome["approved"]:
         if outcome["partial_failure"]:
             return {"applied": False, "error": outcome["partial_failure"], "warnings": warnings}
         return {"applied": False, "message": "Denied by user.", "warnings": warnings}
 
-    return {
+    ret = {
         "applied": True,
         "migrated_count": len(to_migrate),
         "migrated_names": [n for n, _ in to_migrate],
         "target_still_has_real_secrets": bool(unsupported or unrecognized or swallowed),
         "warnings": warnings,
     }
+    conflicts = outcome.get("conflicts", [])
+    if conflicts:
+        ret["conflicts"] = conflicts
+    return ret
 
 
 @mcp.tool()

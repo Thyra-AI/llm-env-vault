@@ -46,6 +46,18 @@ ENV_LINE_RE = re.compile(
 )
 PLACEHOLDER_VALUE_RE = re.compile(r'^"?value \d+"?$')
 
+# Well-known OS/runtime-critical environment variable names.  Vaulting a
+# secret under one of these names and then calling run_with_env will
+# completely replace that variable for the launched child process (e.g. a
+# secret named PATH would clobber the child's executable search path).
+# This list is checked case-insensitively because Windows env var names
+# are case-insensitive in practice.
+SENSITIVE_ENV_NAMES: frozenset = frozenset({
+    "PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR",
+    "PYTHONPATH", "PYTHONHOME", "LD_LIBRARY_PATH", "LD_PRELOAD", "NODE_OPTIONS",
+    "HOME", "USERPROFILE", "TEMP", "TMP",
+})
+
 
 def validate_var_name(name: str) -> str:
     if not VAR_NAME_RE.fullmatch(name):
@@ -54,6 +66,14 @@ def validate_var_name(name: str) -> str:
             "(letters, digits, underscore; can't start with a digit, no newlines/spaces)."
         )
     return name
+
+
+def is_sensitive_env_name(name: str) -> bool:
+    """Return True if *name* matches a well-known OS/runtime-critical
+    environment variable name (case-insensitive).  Does NOT block the
+    operation -- callers use this only to surface a warning to the human.
+    """
+    return name.upper() in SENSITIVE_ENV_NAMES
 
 
 def _atomic_write_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
