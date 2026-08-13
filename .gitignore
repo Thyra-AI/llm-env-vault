@@ -1,6 +1,10 @@
 vault.enc
 vault.salt
 targets.json
+targets.json.lock
 .venv/
 __pycache__/
 *.pyc
+.serena/
+SECURITY_FINDINGS.md
+SECURITY_TEST_PLAN.md
