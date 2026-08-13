@@ -22,7 +22,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from vault_lib import gui, store
+from vault_lib import gui, store, trust
 
 mcp = FastMCP("llm-env-vault")
 
@@ -374,13 +374,70 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
     except (OSError, ValueError) as e:
         return {"error": str(e)}
 
-    secrets = gui.unlock_for_run_dialog(" ".join(command),
-                                         materialize_path=str(materialized_path)
-                                         if materialized_path else None,
-                                         only_vars=only_vars)
-    if secrets is None:
-        return {"applied": False, "message": "Denied by user."}
+    # Trust is scoped to this exact (command, cwd, only_vars, materialize,
+    # background) shape AND the content of every file named directly on
+    # the command line -- see vault_lib/trust.py. Everything it tracks
+    # lives only in this server process's memory; it's forgotten the
+    # moment the process exits, same as if the feature didn't exist.
+    signature = trust.make_signature(command, cwd, only_vars, materialize, background)
+    auto_ok, invalidated_reason = trust.check(signature, command, cwd)
+    trust_info = {}
 
+    # trust.check()'s own contract guarantees cached_secrets() is non-None
+    # whenever it returns auto_ok=True, so this should be unreachable in
+    # practice -- kept as a cheap belt-and-suspenders fallback to the real
+    # dialog rather than trusting that invariant to hold forever (e.g.
+    # across a future change to how/whether tool calls can overlap).
+    raw_secrets = trust.cached_secrets() if auto_ok else None
+
+    if auto_ok and raw_secrets is not None:
+        trust_info["auto_allowed"] = True
+        trust_info["trust_note"] = (
+            "Auto-allowed: this exact command is trusted for this session and its "
+            "referenced file(s) are unchanged -- no password prompt was shown.")
+    else:
+        # Hashed *before* the dialog opens, not after Allow is clicked --
+        # the dialog can sit open for minutes while a human reads it, and
+        # trust must bind to the file content they actually reviewed, not
+        # to whatever it happens to contain the instant they click Allow.
+        pre_hashes = trust.referenced_file_hashes(command, cwd)
+        outcome = gui.unlock_for_run_dialog(subprocess.list2cmdline(command),
+                                             materialize_path=str(materialized_path)
+                                             if materialized_path else None,
+                                             only_vars=only_vars,
+                                             trust_note=invalidated_reason)
+        raw_secrets = outcome["secrets"]
+        if raw_secrets is None:
+            result = {"applied": False, "message": "Denied by user."}
+            if invalidated_reason:
+                result["trust_note"] = invalidated_reason
+            return result
+        if outcome["trust"]:
+            trust.trust(signature, pre_hashes)
+            trust.cache_secrets(raw_secrets)
+            granted_note = (
+                "This exact command is now trusted for the rest of this session -- "
+                "future identical runs auto-allow with no password prompt, as long as "
+                "its referenced file(s) stay unchanged.")
+            warning = trust.unmonitored_file_warning(command, cwd)
+            if warning:
+                granted_note += " " + warning
+            # Prepend, not replace: if a *previous* trust grant for this same
+            # signature was just revoked (invalidated_reason set), that fact
+            # would otherwise only ever have been shown inside the now-closed
+            # dialog -- silently dropped from the tool result the caller
+            # actually sees, defeating "a message still shows" for the one
+            # case (drift -> re-approval) where it matters most.
+            trust_info["trust_note"] = (f"{invalidated_reason} {granted_note}"
+                                         if invalidated_reason else granted_note)
+        elif invalidated_reason:
+            trust_info["trust_note"] = invalidated_reason
+
+    def _finish(result: dict) -> dict:
+        result.update(trust_info)
+        return result
+
+    secrets = raw_secrets
     if only_vars is not None:
         secrets = {k: v for k, v in secrets.items() if k in only_vars}
 
@@ -394,13 +451,13 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
             # minutes, and the earlier check is only a fast-fail UX
             # nicety, not the actual guard against clobbering a file that
             # came into existence while it was open.
-            return {"applied": False,
+            return _finish({"applied": False,
                     "error": f"{materialized_path} came into existence while the password "
-                              f"prompt was open -- refusing to overwrite it. Try again."}
+                              f"prompt was open -- refusing to overwrite it. Try again."})
         try:
             store.write_materialized_env(materialized_path, secrets)
         except (OSError, ValueError) as e:
-            return {"applied": False, "error": str(e)}
+            return _finish({"applied": False, "error": str(e)})
 
     if background:
         # Under the stdio transport this process's own stdout/stdin ARE the
@@ -416,10 +473,10 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
                                          stdin=subprocess.DEVNULL,
                                          stdout=log_file, stderr=subprocess.STDOUT)
         except OSError as e:
-            return {"applied": False, "error": f"could not start {command[0]!r}: {e}"}
-        return {"applied": True, "started": True, "pid": proc.pid, "log_file": log_path,
+            return _finish({"applied": False, "error": f"could not start {command[0]!r}: {e}"})
+        return _finish({"applied": True, "started": True, "pid": proc.pid, "log_file": log_path,
                 "note": "Running detached. This tool does not track or stop it -- "
-                        "use the OS/your own process manager to stop it later."}
+                        "use the OS/your own process manager to stop it later."})
 
     old_sigterm = None
     if materialized_path is not None:
@@ -440,9 +497,9 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
             proc = subprocess.run(command, env=env, cwd=cwd, capture_output=True, text=True,
                                    stdin=subprocess.DEVNULL)
         except OSError as e:
-            return {"applied": False, "error": f"could not run {command[0]!r}: {e}"}
+            return _finish({"applied": False, "error": f"could not run {command[0]!r}: {e}"})
         except (KeyboardInterrupt, _Terminated):
-            return {"applied": False, "message": "Interrupted."}
+            return _finish({"applied": False, "message": "Interrupted."})
     finally:
         if old_sigterm is not None:
             signal.signal(signal.SIGTERM, old_sigterm)
@@ -461,7 +518,7 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
     if cleanup_error:
         result["warning"] = (f"Could not delete {materialized_path}, it still contains real "
                               f"secret values -- remove it by hand: {cleanup_error}")
-    return result
+    return _finish(result)
 
 
 @mcp.tool()
@@ -498,7 +555,24 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     returned log file, stdin closed -- never inherited, since this
     server's own stdio is the MCP protocol channel) and return immediately
     with its PID, for long-running commands (e.g. a dev server) instead of
-    blocking until it exits. Not compatible with materialize."""
+    blocking until it exits. Not compatible with materialize.
+
+    Trusted commands: the dialog offers a "Trust this exact command for
+    the rest of this session" checkbox. If checked, this exact
+    (command, cwd, only_vars, materialize, background) combination
+    auto-runs on every later call with no dialog at all, as long as every
+    file named directly on the command line (e.g. a compose file named
+    after -f) hasn't changed, and the vault itself hasn't changed (a
+    secret added/removed/rotated) since -- if either has, trust is
+    revoked and the dialog reappears with an explanation. Every result
+    from this tool includes an "auto_allowed" flag and a "trust_note"
+    whenever trust was used, granted, or revoked, so this is always
+    visible even though no dialog popped up. This trust is held only in
+    this server process's memory -- restarting the server forgets it --
+    and it is a convenience feature, not a security boundary (see
+    README.md's "Trusted commands" section, which also covers what this
+    can't catch -- e.g. a Dockerfile only referenced indirectly via a
+    compose file's `context:`)."""
     return _run_with_env_impl(command, materialize, background, cwd, only_vars)
 
 
