@@ -25,7 +25,54 @@ ever sees the tool's structured result (e.g. `{"applied": true,
 "message": "API_KEY -> \"value 1\" in llm.env"}`), never the real value
 or the password.
 
-## Setup
+## Install as a Claude Code plugin (recommended)
+
+This repo is a real Claude Code plugin -- a `.claude-plugin/plugin.json`
+manifest, an `.mcp.json` MCP server definition, and a
+`.claude-plugin/marketplace.json` that lets the repo double as its own
+single-plugin marketplace. Install it the same way you'd install any
+other Claude Code plugin, no manual client config editing:
+
+```
+/plugin marketplace add Thyra-AI/llm-env-vault
+/plugin install llm-env-vault@llm-env-vault
+```
+
+Or non-interactively, e.g. for scripting a machine setup:
+
+```bash
+claude plugin marketplace add Thyra-AI/llm-env-vault
+claude plugin install llm-env-vault@llm-env-vault --scope user
+```
+
+`--scope user` (the default) makes it available globally across every
+project you open, which is the point -- it's protecting *other*
+projects' `.env` files, not just this repo's own.
+
+**What happens to Python dependencies.** Claude Code auto-installs a
+plugin's *Node.js* dependencies into its cache, but there's no
+equivalent for Python. Committing a `.venv/` isn't an option either --
+it's platform-specific and this repo's own `.gitignore` excludes it on
+purpose. Instead, `.mcp.json` doesn't point at `mcp_server.py` directly;
+it points at `plugin_launcher.py`, which on first run creates a
+venv in the plugin's persistent data directory (`${CLAUDE_PLUGIN_DATA}`,
+which survives plugin updates) and `pip install`s `requirements.txt`
+into it, then hands off to the real server. That first run takes a
+little while (installing `cryptography` + `mcp[cli]`); every run after
+that is instant, and it only reinstalls if `requirements.txt` changes.
+The only thing you need pre-installed yourself is a `python` on `PATH`.
+
+Update or remove it the same way as any plugin:
+
+```bash
+claude plugin update llm-env-vault@llm-env-vault
+claude plugin uninstall llm-env-vault@llm-env-vault
+```
+
+## Manual setup (local development, or a non-plugin-aware MCP client)
+
+If you're working on this repo itself, or registering it with a client
+that doesn't speak the Claude Code plugin system, set it up directly:
 
 ```bash
 python -m venv .venv
@@ -33,12 +80,9 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Registering the MCP server
-
-Add an entry pointing at this venv's Python and `mcp_server.py`. The
-exact registration command can vary by client version -- check
-`claude mcp --help` -- but the underlying config is the standard MCP
-`mcpServers` shape used by most clients:
+Then add an entry pointing at this venv's Python and `mcp_server.py`.
+The underlying config is the standard MCP `mcpServers` shape used by
+most clients:
 
 ```json
 {
@@ -51,9 +95,7 @@ exact registration command can vary by client version -- check
 }
 ```
 
-Register it globally (available from any project you open, since the
-whole point is protecting *other* projects' `.env` files) rather than
-scoped to this repo alone. For Claude Code, that's typically:
+For Claude Code specifically, that's:
 
 ```bash
 claude mcp add llm-env-vault --scope user -- "C:\path\to\llm-env-vault\.venv\Scripts\python.exe" "C:\path\to\llm-env-vault\mcp_server.py"

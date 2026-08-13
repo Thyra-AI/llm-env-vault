@@ -1,0 +1,15 @@
+{
+  "name": "llm-env-vault",
+  "description": "Single-plugin marketplace for llm-env-vault, an MCP server that keeps real .env secret values away from AI coding assistants.",
+  "owner": {
+    "name": "Thyra AI",
+    "url": "https://github.com/Thyra-AI"
+  },
+  "plugins": [
+    {
+      "name": "llm-env-vault",
+      "source": "./",
+      "description": "Lets an AI coding assistant work with .env variable NAMES without ever seeing the real VALUES."
+    }
+  ]
+}

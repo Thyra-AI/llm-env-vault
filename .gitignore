@@ -3,6 +3,7 @@ vault.salt
 targets.json
 targets.json.lock
 .venv/
+.venv-data/
 __pycache__/
 *.pyc
 .serena/
