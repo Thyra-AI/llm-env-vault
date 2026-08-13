@@ -12,12 +12,16 @@ or returned. install_dialog returns a small outcome dict (keys:
 "approved", "conflicts") rather than a plain bool so callers can learn
 whether any conflict-protected lines were left unchanged. unlock_for_run_dialog
 is the one deliberate exception that hands back the decrypted secrets
-dict, because its whole job is to let the run_with_env MCP tool inject
-real values into a child process's environment.
+dict (inside its own outcome dict, keys "secrets"/"trust"), because its
+whole job is to let the run_with_env MCP tool inject real values into a
+child process's environment. See vault_lib/trust.py for what "trust"
+means there -- an in-memory-only cache scoped to this one server
+process, never written to disk.
 """
 import re
+import sys
 import tkinter as tk
-from tkinter import ttk
+import tkinter.font as tkfont
 
 from . import store
 from .crypto import WrongPassword
@@ -55,31 +59,77 @@ def _collapse_whitespace(text) -> str:
     """
     return re.sub(r"\s+", " ", str(text)).strip()
 
-WINDOW_BG = "#1e1e1e"
-FIELD_BG = "#2d2d2d"
-FG = "#e8e8e8"
-ACCENT = "#4c8bf5"
 
+# --- Design tokens -----------------------------------------------------
+# A single zinc-neutral scale plus one accent color, matching the dark
+# theme at thyra-ai.com -- picked over the old ad hoc dark-grey-plus-
+# bright-blue scheme because every neutral here sits on the same scale,
+# so nothing competes for attention except the one accent and the
+# amber/red status colors. All hex values below are that site's own
+# computed colors (read directly from its stylesheet), not eyeballed.
+WINDOW_BG = "#18181B"      # zinc-900 -- window background, every plain container
+FIELD_BG = "#27272A"       # zinc-800 -- inputs and read-only text boxes
+BORDER = "#3F3F46"         # zinc-700 -- the one border color, used everywhere
+FG = "#FAFAFA"             # zinc-50 -- primary text
+FG_MUTED = "#A1A1AA"       # zinc-400 -- secondary / hint text
+ACCENT = "#3266DA"         # thyra-ai.com's primary button blue
+ACCENT_HOVER = "#2A56B8"   # ~15% darker, hover/press feedback
+DANGER = "#F87171"         # red-400 -- destructive actions (remove_secret's Allow)
+DANGER_HOVER = "#E85959"
+WARNING = "#FBBF24"        # amber-400 -- non-blocking warnings/notes
+
+# Segoe UI, not Inter (thyra-ai.com's font): Inter isn't installed on this
+# machine, and Tkinter silently falls back to a generic default for any
+# unavailable family rather than erroring, which would undo the whole
+# point of picking a specific typeface. Segoe UI is the closest already-
+# installed match in spirit -- both are humanist UI sans faces in the
+# same weight range -- so the shift in tone comes from color, spacing,
+# and shape below, not the typeface itself.
 FONT_FAMILY = "Segoe UI"
 FONT_BODY = (FONT_FAMILY, 11)
-FONT_TITLE = (FONT_FAMILY, 14, "bold")
+FONT_BODY_BOLD = (FONT_FAMILY, 11, "bold")
+FONT_TITLE = (FONT_FAMILY, 16, "bold")
+FONT_BUTTON = (FONT_FAMILY, 10, "bold")
 
-# Every widget in every dialog uses FONT_BODY (titles use FONT_TITLE: same
-# family, just bold/larger for a heading) -- no other font is used anywhere
-# in this module. _style() also forces it as the Tk-wide default so any
-# widget that forgets to set one explicitly still can't end up on a
-# different font.
+# Every widget in every dialog uses one of the FONT_* constants above --
+# no other font is used anywhere in this module. _style() also forces
+# FONT_BODY as the Tk-wide default so any widget that forgets to set one
+# explicitly still can't end up on a different font.
+
+
+def _enable_dark_titlebar(root) -> None:
+    """Best-effort: asks Windows' DWM to paint this window's native
+    titlebar dark. Without this, every dialog had a bright white OS
+    titlebar wrapped around an otherwise all-dark window -- the single
+    most jarring inconsistency in the old look, and the first thing
+    visible before any of the content even renders. Silently does
+    nothing on non-Windows or older Windows builds that don't support
+    the attribute; never allowed to break dialog creation over cosmetics.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        root.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        value = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(value), ctypes.sizeof(value))
+    except Exception:
+        pass
 
 
 def _style(root):
     root.configure(bg=WINDOW_BG)
     root.attributes("-topmost", True)
     root.option_add("*Font", FONT_BODY)
+    _enable_dark_titlebar(root)
 
 
 def _label(parent, text, **kw):
     kw.setdefault("fg", FG)
-    kw.setdefault("wraplength", 460)
+    kw.setdefault("wraplength", 480)
     kw.setdefault("font", FONT_BODY)
     return tk.Label(parent, text=text, bg=WINDOW_BG, **kw)
 
@@ -88,14 +138,100 @@ def _entry(parent, **kw):
     kw.setdefault("font", FONT_BODY)
     return tk.Entry(parent, bg=FIELD_BG, fg=FG, insertbackground=FG,
                      relief="flat", highlightthickness=1,
-                     highlightbackground="#444", highlightcolor=ACCENT, **kw)
+                     highlightbackground=BORDER, highlightcolor=ACCENT, **kw)
 
 
-def _button(parent, **kw):
-    kw.setdefault("font", FONT_BODY)
+def _divider(parent):
+    """A 1px horizontal rule in BORDER. Not a ttk.Separator: ttk widgets
+    render through the OS theme engine regardless of surrounding tk
+    widgets' colors, so a ttk.Separator here rendered as the same bright
+    native-grey line that made the old scrollbars clash with everything
+    around them -- same problem, same fix (draw it ourselves, in a color
+    that's actually part of the palette)."""
+    return tk.Frame(parent, bg=BORDER, height=1)
+
+
+def _scrollbar(parent, **kw):
+    """A tk.Scrollbar restyled to sit inside the dark theme. Left at its
+    defaults, Scrollbar renders with the OS's light-grey scrollbar theme
+    regardless of the surrounding widgets' colors -- a bright strip
+    glued to the bottom of every command/path/variable-list box. This is
+    the same widget, just told to actually use the dark palette."""
+    kw.setdefault("troughcolor", WINDOW_BG)
+    kw.setdefault("activebackground", BORDER)
+    kw.setdefault("highlightthickness", 0)
     kw.setdefault("relief", "flat")
-    kw.setdefault("cursor", "hand2")
-    return tk.Button(parent, **kw)
+    kw.setdefault("elementborderwidth", 0)
+    kw.setdefault("bd", 0)
+    return tk.Scrollbar(parent, bg=FIELD_BG, **kw)
+
+
+def _rounded_rect_points(x1, y1, x2, y2, r):
+    r = max(0, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
+    return [
+        x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+        x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+        x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+    ]
+
+
+class _RoundedButton(tk.Canvas):
+    """A flat button with rounded corners, drawn on a Canvas instead of
+    using tk.Button.
+
+    On Windows, tk.Button always renders a visible 3D bevel border no
+    matter what relief/bg/highlight options are set -- that native
+    chrome, more than any single color choice, was what made the old
+    dialogs read as a stock Windows prompt rather than something
+    deliberately designed. Drawing the button directly matches
+    thyra-ai.com's flat, rounded-corner button language, and (as a
+    side effect) means every button auto-sizes to its own label instead
+    of being stuck at a fixed character-width guess.
+    """
+    _PAD_X = 22
+    _HEIGHT = 36
+    _RADIUS = 9
+
+    _COLORS = {
+        "primary": (ACCENT, ACCENT_HOVER, "#FFFFFF", ACCENT),
+        "danger": (DANGER, DANGER_HOVER, "#FFFFFF", DANGER),
+        "secondary": (WINDOW_BG, FIELD_BG, FG, BORDER),
+    }
+
+    def __init__(self, parent, text, command=None, kind="secondary", parent_bg=None):
+        font = tkfont.Font(family=FONT_FAMILY, size=FONT_BUTTON[1], weight="bold")
+        width = font.measure(text) + self._PAD_X * 2
+        height = self._HEIGHT
+        super().__init__(parent, width=width, height=height,
+                          bg=parent_bg if parent_bg is not None else WINDOW_BG,
+                          highlightthickness=0, bd=0, cursor="hand2")
+        self._command = command
+        self._fill, self._hover, fg, outline = self._COLORS[kind]
+        self._shape = self.create_polygon(
+            _rounded_rect_points(1, 1, width - 1, height - 1, self._RADIUS),
+            smooth=True, fill=self._fill, outline=outline, width=1)
+        self.create_text(width / 2, height / 2, text=text, fill=fg, font=font)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Button-1>", self._on_click)
+
+    def _on_enter(self, _event):
+        self.itemconfig(self._shape, fill=self._hover)
+
+    def _on_leave(self, _event):
+        self.itemconfig(self._shape, fill=self._fill)
+
+    def _on_click(self, _event):
+        if self._command is not None:
+            self._command()
+
+
+def _button(parent, text, command=None, kind="secondary"):
+    try:
+        parent_bg = parent.cget("bg")
+    except tk.TclError:
+        parent_bg = None
+    return _RoundedButton(parent, text, command=command, kind=kind, parent_bg=parent_bg)
 
 
 def _center(root):
@@ -136,7 +272,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
     store.validate_var_name(var_name)
     outcome = {"approved": False, "partial_failure": None}
     state = {"password": None, "secrets": None, "first_run": not store.vault_exists()}
-    pad = {"padx": 14, "pady": 5}
+    pad = {"padx": 18, "pady": 7}
 
     root = tk.Tk()
     root.title("llm-env-vault")
@@ -155,7 +291,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
         row = 0
         title = "Create Vault" if state["first_run"] else "Unlock Vault"
         _label(container, title, font=FONT_TITLE).grid(
-            row=row, column=0, columnspan=2, sticky="w", **pad)
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(pad["pady"], 14))
         row += 1
 
         verb = "update" if is_update else "add"
@@ -184,8 +320,8 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
             row += 1
             pw2 = None
 
-        err = _label(container, "", fg="#ff6b6b")
-        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
+        err = _label(container, "", fg=DANGER)
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
         row += 1
 
         def on_continue():
@@ -219,10 +355,9 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
             root.destroy()
 
         btns = tk.Frame(container, bg=WINDOW_BG)
-        btns.grid(row=row, column=0, columnspan=2, pady=12)
-        _button(btns, text="Cancel", width=12, command=on_cancel).pack(side="left", padx=6)
-        _button(btns, text="Continue", width=12, bg=ACCENT, fg="white",
-                  activebackground=ACCENT, command=on_continue).pack(side="left", padx=6)
+        btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+        _button(btns, "Cancel", command=on_cancel).pack(side="left", padx=6)
+        _button(btns, "Continue", command=on_continue, kind="primary").pack(side="left", padx=6)
         root.bind("<Escape>", lambda e: on_cancel())
         root.bind("<Return>", lambda e: on_continue())
         pw1.focus_force()
@@ -232,7 +367,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
         clear()
         row = 0
         _label(container, "Confirm Change", font=FONT_TITLE).grid(
-            row=row, column=0, columnspan=2, sticky="w", **pad)
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(pad["pady"], 14))
         row += 1
 
         verb = "Update" if is_update else "Add"
@@ -246,7 +381,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
 
-        ttk.Separator(container).grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=4)
+        _divider(container).grid(row=row, column=0, columnspan=2, sticky="ew", padx=pad["padx"], pady=4)
         row += 1
 
         _label(container, f"Real value for {var_name}:").grid(row=row, column=0, sticky="e", **pad)
@@ -258,12 +393,12 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
             _label(container,
                    f"Warning: {var_name} overrides a system/runtime environment variable "
                    f"and could affect any command run_with_env launches later.",
-                   fg="#ffb454", justify="left").grid(
+                   fg=WARNING, justify="left").grid(
                 row=row, column=0, columnspan=2, sticky="w", **pad)
             row += 1
 
-        err = _label(container, "", fg="#ff6b6b")
-        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
+        err = _label(container, "", fg=DANGER)
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
         row += 1
 
         def on_allow():
@@ -315,11 +450,10 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
             show_step1()
 
         btns = tk.Frame(container, bg=WINDOW_BG)
-        btns.grid(row=row, column=0, columnspan=2, pady=12)
-        _button(btns, text="Back", width=10, command=on_back).pack(side="left", padx=4)
-        _button(btns, text="Deny", width=10, command=on_deny).pack(side="left", padx=4)
-        _button(btns, text="Allow", width=12, bg=ACCENT, fg="white",
-                  activebackground=ACCENT, command=on_allow).pack(side="left", padx=4)
+        btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+        _button(btns, "Back", command=on_back).pack(side="left", padx=6)
+        _button(btns, "Deny", command=on_deny).pack(side="left", padx=6)
+        _button(btns, "Allow", command=on_allow, kind="primary").pack(side="left", padx=6)
         root.bind("<Escape>", lambda e: on_deny())
         root.bind("<Return>", lambda e: on_allow())
         val.focus_force()
@@ -333,7 +467,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
 def remove_secret_dialog(var_name: str, placeholder: int):
     outcome = {"approved": False, "partial_failure": None}
     state = {"password": None, "secrets": None}
-    pad = {"padx": 14, "pady": 5}
+    pad = {"padx": 18, "pady": 7}
 
     root = tk.Tk()
     root.title("llm-env-vault")
@@ -351,7 +485,7 @@ def remove_secret_dialog(var_name: str, placeholder: int):
         clear()
         row = 0
         _label(container, "Unlock Vault", font=FONT_TITLE).grid(
-            row=row, column=0, columnspan=2, sticky="w", **pad)
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(pad["pady"], 14))
         row += 1
         _label(container, f"About to remove the secret for {var_name}.").grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
@@ -361,8 +495,8 @@ def remove_secret_dialog(var_name: str, placeholder: int):
         pw.grid(row=row, column=1, **pad)
         row += 1
 
-        err = _label(container, "", fg="#ff6b6b")
-        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
+        err = _label(container, "", fg=DANGER)
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
         row += 1
 
         def on_continue():
@@ -385,10 +519,9 @@ def remove_secret_dialog(var_name: str, placeholder: int):
             root.destroy()
 
         btns = tk.Frame(container, bg=WINDOW_BG)
-        btns.grid(row=row, column=0, columnspan=2, pady=12)
-        _button(btns, text="Cancel", width=12, command=on_cancel).pack(side="left", padx=6)
-        _button(btns, text="Continue", width=12, bg=ACCENT, fg="white",
-                  activebackground=ACCENT, command=on_continue).pack(side="left", padx=6)
+        btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+        _button(btns, "Cancel", command=on_cancel).pack(side="left", padx=6)
+        _button(btns, "Continue", command=on_continue, kind="primary").pack(side="left", padx=6)
         root.bind("<Escape>", lambda e: on_cancel())
         root.bind("<Return>", lambda e: on_continue())
         pw.focus_force()
@@ -398,7 +531,7 @@ def remove_secret_dialog(var_name: str, placeholder: int):
         clear()
         row = 0
         _label(container, "Confirm Removal", font=FONT_TITLE).grid(
-            row=row, column=0, columnspan=2, sticky="w", **pad)
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(pad["pady"], 14))
         row += 1
         proposal = (
             f"Proposed change:\n"
@@ -409,8 +542,8 @@ def remove_secret_dialog(var_name: str, placeholder: int):
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
 
-        err = _label(container, "", fg="#ff6b6b")
-        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
+        err = _label(container, "", fg=DANGER)
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
         row += 1
 
         def on_allow():
@@ -448,10 +581,9 @@ def remove_secret_dialog(var_name: str, placeholder: int):
             root.destroy()
 
         btns = tk.Frame(container, bg=WINDOW_BG)
-        btns.grid(row=row, column=0, columnspan=2, pady=12)
-        _button(btns, text="Deny", width=12, command=on_deny).pack(side="left", padx=6)
-        _button(btns, text="Allow", width=12, bg="#c94b4b", fg="white",
-                  activebackground="#c94b4b", command=on_allow).pack(side="left", padx=6)
+        btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+        _button(btns, "Deny", command=on_deny).pack(side="left", padx=6)
+        _button(btns, "Allow", command=on_allow, kind="danger").pack(side="left", padx=6)
         root.bind("<Escape>", lambda e: on_deny())
         # No <Return>-to-Allow here on purpose: unlike step 1 (Continue) or
         # add_secret_dialog's step 2 (gated by a required, empty-on-render
@@ -505,7 +637,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
     sensitive_names = set(sensitive_names or ())
     outcome = {"approved": False, "partial_failure": None, "conflicts": []}
     state = {"password": None, "secrets": None, "first_run": not store.vault_exists()}
-    pad = {"padx": 14, "pady": 5}
+    pad = {"padx": 18, "pady": 7}
 
     root = tk.Tk()
     root.title("llm-env-vault")
@@ -524,7 +656,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
         row = 0
         title = "Create Vault" if state["first_run"] else "Unlock Vault"
         _label(container, title, font=FONT_TITLE).grid(
-            row=row, column=0, columnspan=2, sticky="w", **pad)
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(pad["pady"], 14))
         row += 1
         if to_migrate:
             _label(container, f"About to migrate {len(to_migrate)} variable(s) out of:").grid(
@@ -535,17 +667,17 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
         row += 1
         path_frame = tk.Frame(container, bg=WINDOW_BG)
         path_text = tk.Text(path_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
-                            highlightthickness=1, highlightbackground="#444",
+                            highlightthickness=1, highlightbackground=BORDER,
                             selectbackground=ACCENT, insertbackground=FG,
                             height=2, width=52, wrap="none")
-        path_xscroll = tk.Scrollbar(path_frame, orient="horizontal", command=path_text.xview)
+        path_xscroll = _scrollbar(path_frame, orient="horizontal", command=path_text.xview)
         path_text.config(xscrollcommand=path_xscroll.set)
         path_text.insert("end", _collapse_whitespace(str(target)))
         path_text.config(state="disabled")
         path_text.grid(row=0, column=0, sticky="we")
         path_xscroll.grid(row=1, column=0, sticky="ew")
         path_frame.grid_columnconfigure(0, weight=1)
-        path_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=14)
+        path_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
         row += 1
 
         if state["first_run"]:
@@ -568,8 +700,8 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
             row += 1
             pw2 = None
 
-        err = _label(container, "", fg="#ff6b6b")
-        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
+        err = _label(container, "", fg=DANGER)
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
         row += 1
 
         def on_continue():
@@ -603,10 +735,9 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
             root.destroy()
 
         btns = tk.Frame(container, bg=WINDOW_BG)
-        btns.grid(row=row, column=0, columnspan=2, pady=12)
-        _button(btns, text="Cancel", width=12, command=on_cancel).pack(side="left", padx=6)
-        _button(btns, text="Continue", width=12, bg=ACCENT, fg="white",
-                activebackground=ACCENT, command=on_continue).pack(side="left", padx=6)
+        btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+        _button(btns, "Cancel", command=on_cancel).pack(side="left", padx=6)
+        _button(btns, "Continue", command=on_continue, kind="primary").pack(side="left", padx=6)
         root.bind("<Escape>", lambda e: on_cancel())
         root.bind("<Return>", lambda e: on_continue())
         pw1.focus_force()
@@ -617,7 +748,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
         row = 0
         title = "Confirm Migration" if to_migrate else "Confirm Registration"
         _label(container, title, font=FONT_TITLE).grid(
-            row=row, column=0, columnspan=2, sticky="w", **pad)
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(pad["pady"], 14))
         row += 1
 
         if to_migrate:
@@ -657,11 +788,11 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
         list_height = min(8, max(2, list_count))
         txt_frame = tk.Frame(container, bg=WINDOW_BG)
         txt = tk.Text(txt_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
-                      highlightthickness=1, highlightbackground="#444",
+                      highlightthickness=1, highlightbackground=BORDER,
                       selectbackground=ACCENT, insertbackground=FG,
                       height=list_height, width=46, wrap="none")
-        yscroll = tk.Scrollbar(txt_frame, orient="vertical", command=txt.yview)
-        xscroll = tk.Scrollbar(txt_frame, orient="horizontal", command=txt.xview)
+        yscroll = _scrollbar(txt_frame, orient="vertical", command=txt.yview)
+        xscroll = _scrollbar(txt_frame, orient="horizontal", command=txt.xview)
         txt.config(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
         for name in display_names:
             label = name
@@ -678,11 +809,11 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
         xscroll.grid(row=1, column=0, sticky="ew")
         txt_frame.grid_rowconfigure(0, weight=1)
         txt_frame.grid_columnconfigure(0, weight=1)
-        txt_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=14)
+        txt_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
         row += 1
         if list_count > list_height:
             _label(container, f"({list_count} total -- scroll to see the rest.)",
-                   fg="#9a9a9a").grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
+                   fg=FG_MUTED).grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
             row += 1
 
         if other_owner:
@@ -695,7 +826,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                    f"registered project (listed first, scroll up if needed). Continuing will "
                    f"overwrite that project's vault value: "
                    f"{_safe_display(', '.join(sorted(other_owner)), 200)}",
-                   fg="#ffb454", justify="left").grid(
+                   fg=WARNING, justify="left").grid(
                 row=row, column=0, columnspan=2, sticky="w", **pad)
             row += 1
 
@@ -706,7 +837,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                    f"override(s) system/runtime environment variable(s) -- any command "
                    f"run_with_env launches later will see the vaulted value instead of "
                    f"the real system value.",
-                   fg="#ffb454", justify="left").grid(
+                   fg=WARNING, justify="left").grid(
                 row=row, column=0, columnspan=2, sticky="w", **pad)
             row += 1
 
@@ -716,8 +847,8 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
 
-        err = _label(container, "", fg="#ff6b6b")
-        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
+        err = _label(container, "", fg=DANGER)
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
         row += 1
 
         def on_allow():
@@ -792,11 +923,10 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
             show_step1()
 
         btns = tk.Frame(container, bg=WINDOW_BG)
-        btns.grid(row=row, column=0, columnspan=2, pady=12)
-        _button(btns, text="Back", width=10, command=on_back).pack(side="left", padx=4)
-        _button(btns, text="Deny", width=10, command=on_deny).pack(side="left", padx=4)
-        _button(btns, text="Allow", width=12, bg=ACCENT, fg="white",
-                activebackground=ACCENT, command=on_allow).pack(side="left", padx=4)
+        btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+        _button(btns, "Back", command=on_back).pack(side="left", padx=6)
+        _button(btns, "Deny", command=on_deny).pack(side="left", padx=6)
+        _button(btns, "Allow", command=on_allow, kind="primary").pack(side="left", padx=6)
         root.bind("<Escape>", lambda e: on_deny())
         # No <Return>-to-Allow here on purpose -- see remove_secret_dialog's
         # step 2 for why: no input field gates it, so a carried-over Enter
@@ -812,20 +942,33 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
     return outcome
 
 
-def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None):
-    """Used by the run_with_env MCP tool. Returns the decrypted secrets
-    dict, or None if denied/failed. Callers that pass only_vars are
-    expected to filter the returned dict down to those names themselves
-    -- this function still returns everything, since it has to decrypt
-    the whole vault anyway to get any of it.
+def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None,
+                          trust_note: str = None):
+    """Used by the run_with_env MCP tool. Returns an outcome dict:
+    {"secrets": dict_or_None, "trust": bool}. secrets is None if
+    denied/failed, in which case trust is always False. Callers that pass
+    only_vars are expected to filter the returned secrets dict down to
+    those names themselves -- this function still returns everything,
+    since it has to decrypt the whole vault anyway to get any of it.
+
+    trust is True only if the human both allowed the run AND checked
+    "Trust this exact command" -- see vault_lib/trust.py for what the
+    caller does with that (an in-memory-only, this-session-only cache,
+    never written to disk).
+
+    trust_note: optional text shown above the command box, e.g. an
+    explanation that a *previous* trust grant for this same command was
+    just revoked because a file it references changed. Purely
+    informational -- this function doesn't consult vault_lib.trust
+    itself, the caller decides when a note is warranted.
 
     No separate "Requested by" line here -- unlike the other dialogs, this
     one already shows exactly what's about to run in the Command box
     below, so a second line repeating the same command would just be a
     redundant wall of the same long text twice.
     """
-    outcome = {"secrets": None}
-    pad = {"padx": 14, "pady": 5}
+    outcome = {"secrets": None, "trust": False}
+    pad = {"padx": 18, "pady": 7}
 
     root = tk.Tk()
     root.title("llm-env-vault")
@@ -848,8 +991,13 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
 
     row = 0
     _label(root, "Unlock Vault to Run Command", font=FONT_TITLE).grid(
-        row=row, column=0, columnspan=2, sticky="w", **pad)
+        row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(pad["pady"], 14))
     row += 1
+
+    if trust_note:
+        _label(root, _safe_display(trust_note, 300), fg=WARNING,
+               justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
 
     if var_names:
         _label(root, f"Will expose {len(var_names)} variable(s) to this command: "
@@ -866,38 +1014,38 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
 
     cmd_frame = tk.Frame(root, bg=WINDOW_BG)
     cmd_text = tk.Text(cmd_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
-                        highlightthickness=1, highlightbackground="#444",
+                        highlightthickness=1, highlightbackground=BORDER,
                         selectbackground=ACCENT, insertbackground=FG,
                         height=3, width=52, wrap="none")
-    cmd_xscroll = tk.Scrollbar(cmd_frame, orient="horizontal", command=cmd_text.xview)
+    cmd_xscroll = _scrollbar(cmd_frame, orient="horizontal", command=cmd_text.xview)
     cmd_text.config(xscrollcommand=cmd_xscroll.set)
     cmd_text.insert("end", _collapse_whitespace(command_str))
     cmd_text.config(state="disabled")
     cmd_text.grid(row=0, column=0, sticky="we")
     cmd_xscroll.grid(row=1, column=0, sticky="ew")
     cmd_frame.grid_columnconfigure(0, weight=1)
-    cmd_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=14)
+    cmd_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
     row += 1
 
     if materialize_path:
-        _label(root, f"Also writes real values to:", fg="#9a9a9a").grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(5, 0))
+        _label(root, f"Also writes real values to:", fg=FG_MUTED).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(6, 0))
         row += 1
         path_frame = tk.Frame(root, bg=WINDOW_BG)
         path_text = tk.Text(path_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
-                            highlightthickness=1, highlightbackground="#444",
+                            highlightthickness=1, highlightbackground=BORDER,
                             selectbackground=ACCENT, insertbackground=FG,
                             height=2, width=52, wrap="none")
-        path_xscroll = tk.Scrollbar(path_frame, orient="horizontal", command=path_text.xview)
+        path_xscroll = _scrollbar(path_frame, orient="horizontal", command=path_text.xview)
         path_text.config(xscrollcommand=path_xscroll.set)
         path_text.insert("end", _collapse_whitespace(str(materialize_path)))
         path_text.config(state="disabled")
         path_text.grid(row=0, column=0, sticky="we")
         path_xscroll.grid(row=1, column=0, sticky="ew")
         path_frame.grid_columnconfigure(0, weight=1)
-        path_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=14)
+        path_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
         row += 1
-        _label(root, "(deleted the moment the command exits)", fg="#9a9a9a").grid(
+        _label(root, "(deleted the moment the command exits)", fg=FG_MUTED).grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
 
@@ -906,8 +1054,18 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     pw.grid(row=row, column=1, **pad)
     row += 1
 
-    err = _label(root, "", fg="#ff6b6b")
-    err.grid(row=row, column=0, columnspan=2, sticky="w", padx=14)
+    trust_var = tk.BooleanVar(value=False)
+    trust_check = tk.Checkbutton(
+        root, text="Trust this exact command for the rest of this session "
+                   "(auto-runs with no prompt while its files stay unchanged)",
+        variable=trust_var, bg=WINDOW_BG, fg=FG, font=FONT_BODY,
+        selectcolor=FIELD_BG, activebackground=WINDOW_BG, activeforeground=FG,
+        highlightthickness=0, wraplength=480, justify="left", anchor="w")
+    trust_check.grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 6))
+    row += 1
+
+    err = _label(root, "", fg=DANGER)
+    err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
     row += 1
 
     def on_allow():
@@ -923,20 +1081,20 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
         except (FileNotFoundError, ValueError) as e:
             _show_error(root, err, f"Vault error: {e}")
             return
+        outcome["trust"] = trust_var.get()
         root.destroy()
 
     def on_deny():
         root.destroy()
 
     btns = tk.Frame(root, bg=WINDOW_BG)
-    btns.grid(row=row, column=0, columnspan=2, pady=12)
-    _button(btns, text="Cancel", width=12, command=on_deny).pack(side="left", padx=6)
-    _button(btns, text="Unlock && Run", width=14, bg=ACCENT, fg="white",
-              activebackground=ACCENT, command=on_allow).pack(side="left", padx=6)
+    btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+    _button(btns, "Cancel", command=on_deny).pack(side="left", padx=6)
+    _button(btns, "Unlock && Run", command=on_allow, kind="primary").pack(side="left", padx=6)
 
     root.bind("<Escape>", lambda e: on_deny())
     root.bind("<Return>", lambda e: on_allow())
     pw.focus_force()
     _center(root)
     root.mainloop()
-    return outcome["secrets"]
+    return outcome
