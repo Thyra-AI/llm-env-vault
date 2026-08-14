@@ -13,6 +13,15 @@ Run directly for local testing:
 Register with an MCP-aware client via a config entry pointing at this
 file and this venv's python.exe -- see README.md.
 """
+import sys
+
+# Set before importing vault_lib: when this runs as an installed plugin, the
+# import below resolves out of ${CLAUDE_PLUGIN_ROOT} -- a version-scoped
+# directory the plugin manager owns and treats as immutable. Without this,
+# Python drops a vault_lib/__pycache__ into it on every start. Must stay above
+# the vault_lib import; after it, it's a no-op.
+sys.dont_write_bytecode = True
+
 import os
 import signal
 import subprocess
@@ -25,7 +34,27 @@ from mcp.server.fastmcp import FastMCP
 
 from vault_lib import gui, store, trust
 
-mcp = FastMCP("llm-env-vault")
+# Standing policy handed to every client that connects, so it applies
+# unconditionally rather than depending on a skill trigger firing at the exact
+# moment an agent is about to open a .env.
+_AGENT_INSTRUCTIONS = """\
+This server exists so you can work with .env variable NAMES without ever \
+seeing the real VALUES. To keep that guarantee:
+
+- Never read vault.enc, vault.salt, or any .env file this server manages. \
+Their real values are not yours to see, and vault.enc is ciphertext anyway. \
+Call vault_status() to learn which variables exist.
+- Never ask the user to type or paste the master password (or any secret \
+value) into the chat. Every tool that needs it opens a native dialog the \
+human types into directly -- that is the only correct path.
+- When running a command with run_with_env, pass only_vars to scope the \
+exposure to the variables that command actually needs. Injecting the whole \
+vault when two variables would do is the main avoidable risk here.
+- run_with_env output can contain real secret values if the command prints \
+its own configuration. Do not echo that output back verbatim.
+"""
+
+mcp = FastMCP("llm-env-vault", instructions=_AGENT_INSTRUCTIONS)
 
 # How old a background-run log has to be before opportunistic cleanup
 # deletes it. Generous on purpose -- this only ever removes a log from a

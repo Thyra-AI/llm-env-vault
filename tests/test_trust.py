@@ -33,8 +33,8 @@ afterward, so nothing here ever reads or writes this repo's real
 vault.enc / vault.salt / vault_index.json / llm.env. gui.unlock_for_run_dialog
 is monkeypatched per-test so no real Tkinter window ever opens.
 
-Runs under pytest (`pytest test_trust.py -q`) or standalone
-(`python test_trust.py`), matching test_install_migrate_robustness.py.
+Runs under pytest (`pytest tests/test_trust.py -q`) or standalone
+(`python tests/test_trust.py`), matching test_install_migrate_robustness.py.
 """
 import contextlib
 import os
@@ -44,11 +44,11 @@ import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import mcp_server  # noqa: E402
 from vault_lib import gui, store, trust  # noqa: E402
-REPO_ROOT = Path(__file__).parent  # noqa: E402
+REPO_ROOT = Path(__file__).parent.parent  # noqa: E402
 
 TEST_PASSWORD = "regression-test-password-123"
 BASE_SECRETS = {"DOCKER_TEST_TOKEN": "tok-abc-123", "OTHER_SECRET": "other-xyz-789"}

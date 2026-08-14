@@ -34,11 +34,17 @@ The vault lives as a small set of files, in one of two places depending on how y
 
 | File | Contains | Safe to commit? | Agent may read? |
 |---|---|---|---|
-| `llm.env` | `VAR_NAME="value N"` placeholders, auto-generated | Yes | Yes |
-| `vault_index.json` | `VAR_NAME → placeholder number` map (no secrets) | Yes | Yes |
+| `llm.env` | `VAR_NAME="value N"` placeholders, auto-generated | No secrets — but gitignored here, see below | Yes |
+| `vault_index.json` | `VAR_NAME → placeholder number` map (no secrets) | No secrets — but gitignored here, see below | Yes |
 | `vault.enc` | Real values, Fernet-encrypted | No (gitignored) | **No** |
 | `vault.salt` | 16-byte PBKDF2 salt | No (gitignored) | **No** |
 | `targets.json` | Paths of migrated `.env` files | No (gitignored — machine-local paths, not secret) | No |
+
+`llm.env` and `vault_index.json` contain no secrets, and a migrated project's own placeholder-only
+`.env` is genuinely safe (and often useful) to commit — it documents which variables the project
+needs. **This repo** gitignores its own copies anyway, because here they are generated artifacts of
+whichever vault happens to be local: committing them would ship one developer's variable names to
+everyone who installs the plugin.
 
 Key properties:
 
@@ -69,9 +75,11 @@ claude plugin install llm-env-vault@llm-env-vault --scope user
 
 `--scope user` (the default) makes it available in **every** project you open — which is the point, since it protects other projects' `.env` files, not just this repo's.
 
+**Platform support: Windows is the tested and supported platform.** That's where the test suite runs and the only platform where dependencies install from the hash-pinned lockfile. The plugin's `.mcp.json` launches the launcher with a bare `python`, so on macOS and Linux you need a **`python`** on your PATH — `python3` alone is not enough, and if that's all you have the server fails to start with an unhelpful "MCP server not connected". Everything else is cross-platform (the dialogs are stdlib Tkinter), but treat non-Windows as untested. `/llm-env-vault:doctor` diagnoses exactly this case.
+
 **Restart Claude Code Desktop (CCD) after installing.** A running CCD session doesn't pick up newly-registered MCP servers automatically — restart CCD (or reload the window) after `/plugin install`, or `llm-env-vault`'s tools won't show up as available yet.
 
-**First run is slower on purpose:** Claude Code auto-installs Node.js plugin dependencies but has no equivalent for Python, so the plugin ships a launcher (`plugin_launcher.py`) that, on first run, creates a venv in the plugin's persistent data directory (`${CLAUDE_PLUGIN_DATA}`, survives updates), installs dependencies into it (from `requirements-lock.txt` on Windows — hash-pinned via `pip install --require-hashes` — or `requirements.txt` elsewhere), and then execs the real server from that venv. A stamp file means it only reinstalls when the plugin is actually updated (a new version-scoped install directory) — every subsequent run is instant, and a plain local edit to the requirements file doesn't trigger anything on its own. The only prerequisite is a `python` on your PATH.
+**First run is slower on purpose:** Claude Code auto-installs Node.js plugin dependencies but has no equivalent for Python, so the plugin ships a launcher (`plugin_launcher.py`) that, on first run, creates a venv in the plugin's persistent data directory (`${CLAUDE_PLUGIN_DATA}`, survives updates), installs dependencies into it (from `requirements-lock.txt` on Windows — hash-pinned via `pip install --require-hashes` — or `requirements.txt` elsewhere), and then execs the real server from that venv. A stamp file means it only reinstalls when the plugin is actually updated (a new version-scoped install directory) — every subsequent run is instant, and a plain local edit to the requirements file doesn't trigger anything on its own. The only prerequisite is a `python` on your PATH — see the platform note above, since on macOS/Linux that specifically means `python` and not just `python3`.
 
 Update / remove like any plugin:
 
@@ -203,6 +211,30 @@ Every result includes an `auto_allowed` flag, plus a `trust_note` whenever trust
 
 ---
 
+## Commands
+
+Two slash commands ship with the plugin. Everything else is done by asking normally — the tools
+above are the interface, and wrapping each one in a command would just make it longer to type.
+
+### `/llm-env-vault:protect`
+
+Finds every `.env` in the current project and walks them through `install_migrate` one at a time.
+This exists because `install_migrate` takes one path and does no discovery of its own — and
+because "just check my `.env` files" is exactly the request that would otherwise have an agent
+open a file still full of live credentials. The command's `allowed-tools` deliberately excludes
+every file-reading tool, so its discovery path *cannot* read a candidate's contents even if asked
+to. It reports paths, migrates each one behind the usual dialog, resyncs if more than one file
+moved, and tells you which now-placeholder-only files are safe to commit.
+
+### `/llm-env-vault:doctor`
+
+Diagnoses a server that didn't start: checks whether the tools are present at all, finds and reads
+`provision.log`, verifies there's a usable `python` on PATH and that it has `tkinter`, and
+explains the two known startup failures (provisioning interrupted by a startup timeout, and CCD
+not restarted after install). This is the one thing that can't be a tool — when provisioning
+fails, every tool disappears, and nothing that runs *through* the server can report on the
+server's own absence. Commands are read by Claude Code directly, so this still works.
+
 ## Trusted commands (session-only auto-allow)
 
 Typing your password twenty times a session for the same `docker compose up` gets old. The `run_with_env` unlock dialog has a checkbox: **"Trust this exact command for the rest of this session."** Check it, click Allow once, and identical future calls auto-run with no dialog.
@@ -228,6 +260,7 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
 
 - **Threat model:** protects against an AI agent (or anyone with filesystem read access) harvesting real values from files. Does **not** protect against someone who already has your master password, or an agent granted the ability to type into GUI windows on your behalf (e.g. computer-use tooling) — don't grant that.
 - **"The agent can edit this tool's own source" is a sharper non-boundary than it sounds — mitigated, not eliminated.** `plugin_launcher.py` used to re-run `pip install -r requirements.txt` automatically whenever that file's content hash changed, on every server start — meaning an agent with filesystem write access to an *installed* plugin's `requirements.txt` (the same access the "don't protect against editing source" threat model already excludes) could get it silently pip-installed on the very next restart, with no real `claude plugin update` involved. Two reductions, both confirmed by a red-team audit: (1) the installed-plugin trigger is now keyed on `CLAUDE_PLUGIN_ROOT`'s own path, not the requirements content — a real update always moves the plugin to a new version-scoped directory, so editing `requirements.txt` alone no longer triggers anything; (2) on Windows, dependencies install from `requirements-lock.txt`, a hash-pinned lockfile (every package and transitive dependency pinned to an exact version with sha256 hashes for every published artifact) via `pip install --require-hashes`, closing the separate supply-chain risk of a compromised/typosquatted PyPI upload being pulled in silently. Neither makes "an agent can edit this tool's own source" a real boundary — an agent with that access can still edit `plugin_launcher.py` itself, or any other file — but both shrink the auto-triggered, no-real-event attack surface that existed on top of it.
+- **Dependency pinning is Windows-only.** The hash-pinned `requirements-lock.txt` described above is scoped to Windows, because `pywin32` (a transitive `mcp[cli]` dependency) only publishes wheels there and a lockfile that can't resolve is worse than none. On macOS and Linux the launcher installs from the unpinned `requirements.txt` instead, so **those installs get no hash verification** and the supply-chain mitigation above does not apply to them. This is the concrete security cost of the Windows-first scoping, not just a packaging detail.
 - **Never paste the master password (or any secret value) into chat with an AI assistant.** Type them only into the vault's own GUI windows.
 - **`run_with_env` output can contain real secrets.** Secrets are in the command's real environment; a command that echoes its environment or prints its config on error leaks them into the result — and into the client's transcript. Use `only_vars` to scope injection, and know what your command prints.
 - This is not an "intercept every file access" system — that would require a kernel-level filter driver or virtual filesystem (elevated install, fragile). Instead: files are placeholder-only by default, and real values only exist at moments a human deliberately triggered, each gated by the password prompt.
@@ -240,22 +273,49 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
 - **`resync_targets` needs no password and trusts `targets.json`/`vault_index.json`.** Both are validated on read (types, names, no control characters), but a sufficiently crafted plaintext file could still point it at an unintended path. Treat write access to this repo's directory as equivalent to write access to the vault.
 - **`resync_targets`' line-matcher isn't multi-line-aware** (unlike `install_migrate`'s initial parser). A managed variable name that also appears inside an unrelated real multi-line value in the same file (a PEM body, embedded JSON) could get that line incorrectly rewritten.
 - **A resync normalizes the whole file's line endings** to its dominant terminator and ensures a trailing newline, even when nothing else changed — harmless to meaning, but can show up as a full-file diff under strict VCS line-ending settings.
-- **Background run logs aren't cleaned up.** Each `background=True` call leaves an `llm-env-vault-run-*.log` file in the system temp directory, never auto-deleted. Since a log can contain the process's real environment if it prints its config, periodically clear old ones out yourself.
+- **Background run logs linger for up to 7 days.** Each `background=True` call leaves an `llm-env-vault-run-*.log` file in the system temp directory. These are reaped opportunistically once they're older than 7 days, but only when a later run happens to trigger the sweep — so a log can sit there indefinitely if you stop using the tool. Since a log can contain the process's real environment if the command prints its config, clear old ones out yourself if that matters to you.
+- **Windows is the only tested platform.** The suite runs on Windows and dependencies are hash-pinned only there (see Security notes). The code is stdlib-portable and the dialogs are plain Tkinter, but macOS and Linux are untested — and the plugin's `.mcp.json` launches a bare `python`, which many such systems don't provide at all. Run `/llm-env-vault:doctor` if the tools don't appear.
 - **One dialog at a time.** GUI prompts run on the server's main thread; concurrent tool calls queue behind an open dialog.
+
+## Troubleshooting
+
+Run `/llm-env-vault:doctor` first — it performs every check below and reports one diagnosis.
+
+**The tools don't appear at all.** In order of likelihood:
+
+1. **CCD wasn't restarted after install.** A running session doesn't pick up newly-registered MCP
+   servers. Restart it.
+2. **No bare `python` on PATH.** The plugin's `.mcp.json` launches `python`, not `python3`. On
+   macOS and Linux that often doesn't resolve, and the server never starts. See the platform note
+   under Installation.
+3. **Provisioning was interrupted.** The first run builds a venv and pip-installs into it; if the
+   client's MCP startup timeout fired mid-install, the venv is left half-built. The launcher
+   detects this and rebuilds on the next start, so restart and give it time. `provision.log` in
+   the plugin's data directory records every attempt, including full pip output.
+
+**The tools appear, but anything touching a secret fails.** Almost always a Python without
+`tkinter` — the consent dialogs are Tkinter, so the server starts fine and then fails at the
+moment of use. `python -c "import tkinter"` confirms it; on Debian/Ubuntu install `python3-tk`.
+
+**A trusted command started prompting again.** That's by design: trust is revoked when a file the
+command references changes, when the executable itself changes, or when the vault's contents
+change. The dialog says which. See Trusted commands above.
 
 ## Tests
 
-32 tests across two hand-rolled test scripts (no pytest required, though they also run under pytest):
+66 tests across two hand-rolled test scripts (no pytest required, though they also run under pytest):
 
-- `test_trust.py` — 28 tests covering the trusted-commands / drift-detection feature, including two true end-to-end tests that spawn a real child process and assert the actual secret value is injected on both the fresh-unlock and auto-allowed paths. Fully isolates the real vault (temp dir, no real Tkinter window) — running the tests never touches your actual vault.
-- `test_install_migrate_robustness.py` — 4 regression tests for OSError robustness (unreachable UNC paths, nonexistent paths, physical drive paths on Windows all return clean error dicts instead of crashing).
+- `tests/test_trust.py` — 55 tests covering the trusted-commands / drift-detection feature, the vault's storage and padding behaviour, and the plugin launcher's venv provisioning and reprovisioning logic. Includes two true end-to-end tests that spawn a real child process and assert the actual secret value is injected on both the fresh-unlock and auto-allowed paths. Fully isolates the real vault (temp dir, no real Tkinter window) — running the tests never touches your actual vault.
+- `tests/test_install_migrate_robustness.py` — 11 regression tests: OSError robustness (unreachable UNC paths, nonexistent paths, physical drive paths on Windows all return clean error dicts instead of crashing), `sync_target_file`'s guard against mass-removing every managed line at once, and the assertion that credential-shaped text swallowed during a migration is redacted rather than leaked into a warning message.
 
 Run from the project venv:
 
 ```bash
-python test_trust.py
-python test_install_migrate_robustness.py
+python tests/test_trust.py
+python tests/test_install_migrate_robustness.py
 ```
+
+Or all at once with `pytest` from the repo root.
 
 Both pass 100%.
 

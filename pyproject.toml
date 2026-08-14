@@ -1,0 +1,9 @@
+# Config only -- llm-env-vault is not a packaged distribution. The plugin ships
+# as a git clone (Claude Code copies the repo into its plugin cache), so there
+# is deliberately no [project] table and nothing here builds a wheel.
+#
+# This file exists so that a bare `pytest` from the repo root still finds the
+# suites after they moved into tests/.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

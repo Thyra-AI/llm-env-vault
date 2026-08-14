@@ -9,7 +9,8 @@
     {
       "name": "llm-env-vault",
       "source": "./",
-      "description": "Lets an AI coding assistant work with .env variable NAMES without ever seeing the real VALUES."
+      "description": "Lets an AI coding assistant work with .env variable NAMES without ever seeing the real VALUES.",
+      "license": "MIT"
     }
   ]
 }

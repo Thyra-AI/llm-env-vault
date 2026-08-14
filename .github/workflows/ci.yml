@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # The path users actually get: Windows, dependencies installed from the
+  # hash-pinned lockfile via --require-hashes, exactly as plugin_launcher.py
+  # does on first run. If this job breaks, installs break.
+  tests-shipped-path:
+    name: tests (windows, hash-pinned lockfile)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install pinned dependencies
+        run: python -m pip install --require-hashes -r requirements-lock.txt
+
+      - name: Install pytest
+        run: python -m pip install pytest
+
+      # Both runners, because they collect differently: the standalone scripts
+      # sweep globals() for callables named test_*, pytest uses its own
+      # collection. A test can pass under one and not be seen by the other.
+      - name: Run standalone
+        run: |
+          python tests/test_trust.py
+          python tests/test_install_migrate_robustness.py
+
+      - name: Run under pytest
+        run: python -m pytest -q
+
+      # tkinter is imported by vault_lib.gui at module scope; tk.Tk() is only
+      # called inside the dialog functions, which the suite monkeypatches. This
+      # asserts the import works headlessly -- if it ever stops, every
+      # secret-touching tool breaks at point of use rather than at startup.
+      - name: Assert tkinter imports headlessly
+        run: python -c "import tkinter; print('tkinter ok')"
+
+  # Broader Python compatibility, unpinned -- this mirrors what non-Windows
+  # installs get (see the dependency-pinning note in README's Security notes).
+  # Not the shipped path; a failure here is a compatibility signal, not a
+  # broken release.
+  tests-compat:
+    name: tests (py${{ matrix.python-version }}, unpinned)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+
+      - name: Run under pytest
+        run: python -m pytest -q
+
+  # Local file check, no auth needed -- catches a malformed manifest before a
+  # user hits it at install time.
+  validate-plugin:
+    name: validate plugin manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Validate plugin manifest
+        run: claude plugin validate .claude-plugin/plugin.json --strict
+
+      - name: Validate marketplace manifest
+        run: claude plugin validate . --strict
+
+      # The plugin ships as a git clone, so anything tracked is shipped.
+      - name: Assert no generated artifacts are tracked
+        run: |
+          if git ls-files --error-unmatch llm.env 2>/dev/null; then
+            echo "::error::llm.env is tracked and would ship to every install"
+            exit 1
+          fi
+          echo "ship list clean"

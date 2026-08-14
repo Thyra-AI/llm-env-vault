@@ -2,13 +2,14 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "llm-env-vault",
   "displayName": "LLM Env Vault",
-  "version": "1.1.0",
-  "description": "Lets an AI coding assistant work with .env variable NAMES without ever seeing the real VALUES. Real secrets stay encrypted in a local vault, gated behind a human-typed master password in a native dialog for every operation that touches them.",
+  "version": "1.2.0",
+  "description": "Lets an AI coding assistant work with .env variable NAMES without ever seeing the real VALUES. Real secrets stay encrypted in a local vault, gated behind a human-typed master password in a native dialog for every operation that touches them. Windows is the tested and supported platform; macOS and Linux need a `python` on PATH.",
   "author": {
     "name": "Thyra AI",
     "url": "https://github.com/Thyra-AI"
   },
   "homepage": "https://github.com/Thyra-AI/llm-env-vault",
   "repository": "https://github.com/Thyra-AI/llm-env-vault",
+  "license": "MIT",
   "keywords": ["secrets", "env", "dotenv", "security", "vault", "mcp"]
 }

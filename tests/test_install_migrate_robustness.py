@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 # Make sure the worktree root is importable regardless of cwd
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import mcp_server
 from vault_lib import store
