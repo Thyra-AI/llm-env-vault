@@ -34,8 +34,21 @@ from pathlib import Path
 PLUGIN_ROOT = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", Path(__file__).resolve().parent))
 DATA_DIR = Path(os.environ.get("CLAUDE_PLUGIN_DATA", PLUGIN_ROOT / ".venv-data"))
 VENV_DIR = DATA_DIR / "venv"
-REQUIREMENTS = PLUGIN_ROOT / "requirements.txt"
+
+# The hash-pinned lockfile is Windows-only (the platform pywin32 -- a
+# transitive mcp[cli] dependency -- actually has wheels for, and this
+# project's tested/primary platform). Falls back to the unpinned
+# requirements.txt everywhere else rather than risk a hash-pinned file
+# that silently can't resolve on a platform it wasn't verified against.
+_LOCKFILE = PLUGIN_ROOT / "requirements-lock.txt"
+REQUIREMENTS = _LOCKFILE if sys.platform == "win32" and _LOCKFILE.exists() \
+    else PLUGIN_ROOT / "requirements.txt"
+
 STAMP_FILE = DATA_DIR / "requirements.sha256"
+
+# Only set when actually running as an installed plugin (Claude Code
+# exports it into every MCP server subprocess automatically).
+_IS_INSTALLED_PLUGIN = "CLAUDE_PLUGIN_ROOT" in os.environ
 
 
 def _venv_python() -> Path:
@@ -48,28 +61,63 @@ def _requirements_hash() -> str:
     return hashlib.sha256(REQUIREMENTS.read_bytes()).hexdigest()
 
 
+def _install_marker() -> str:
+    """What decides whether the venv needs (re)provisioning.
+
+    Installed plugin (CLAUDE_PLUGIN_ROOT set): keyed on CLAUDE_PLUGIN_ROOT's
+    own resolved path, NOT requirements.txt's content hash. A real `claude
+    plugin update` always moves the plugin to a new version-scoped
+    directory -- that's the same fact behind vault_lib/store.py's ROOT
+    relocation: an update orphans whatever was in the OLD version's
+    directory precisely because it creates a new one. So a path change IS
+    a genuine update event, and requirements.txt's content is replaced
+    wholesale as part of that same update -- nothing legitimate is missed
+    by keying off the path instead of the hash. What this closes: content-
+    hash-based triggering meant an agent with filesystem write access to
+    an *installed* plugin's requirements.txt could get it automatically
+    pip-installed on the very next server restart, with no real update
+    having happened at all -- an auto-triggered, persistent code-execution
+    path a red-team audit flagged as sharper than "the agent can edit this
+    tool's source" plainly implies. Editing requirements.txt alone, with
+    no update, no longer triggers anything.
+
+    Manual/dev install (no CLAUDE_PLUGIN_ROOT): unchanged, still the
+    content hash. There's no "version" to key off in a local checkout, and
+    immediate reinstall-on-edit is exactly the iterative workflow a
+    developer testing a dependency change wants -- this is the
+    maintainer's own trusted working copy, not the threat this is about.
+    """
+    if _IS_INSTALLED_PLUGIN:
+        return str(PLUGIN_ROOT)
+    return _requirements_hash()
+
+
 def _ensure_venv() -> Path:
-    """Creates (or recreates, if requirements.txt changed since last time)
-    the venv in the plugin's persistent data directory. A no-op stat/hash
-    check on every normal startup once it's already provisioned."""
+    """Creates (or recreates, if the install marker -- see _install_marker
+    -- changed since last time) the venv in the plugin's persistent data
+    directory. A no-op stat check on every normal startup once it's
+    already provisioned."""
     python = _venv_python()
-    current_hash = _requirements_hash()
+    current_marker = _install_marker()
     up_to_date = (
         python.exists()
         and STAMP_FILE.exists()
-        and STAMP_FILE.read_text().strip() == current_hash
+        and STAMP_FILE.read_text().strip() == current_marker
     )
     if up_to_date:
         return python
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     print(f"[llm-env-vault] Setting up its Python environment in {VENV_DIR} "
-          f"(first run, or requirements.txt changed since last run) -- this "
+          f"(first run, or dependencies changed since last run) -- this "
           f"can take a little while the first time.", file=sys.stderr, flush=True)
     subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)], check=True)
-    subprocess.run([str(python), "-m", "pip", "install", "--quiet",
-                     "-r", str(REQUIREMENTS)], check=True)
-    STAMP_FILE.write_text(current_hash)
+    pip_cmd = [str(python), "-m", "pip", "install", "--quiet"]
+    if REQUIREMENTS is _LOCKFILE:
+        pip_cmd.append("--require-hashes")
+    pip_cmd += ["-r", str(REQUIREMENTS)]
+    subprocess.run(pip_cmd, check=True)
+    STAMP_FILE.write_text(current_marker)
     return python
 
 

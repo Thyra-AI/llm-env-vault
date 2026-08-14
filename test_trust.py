@@ -778,6 +778,81 @@ def test_create_secrets_vault_refuses_inside_plugin_cache_without_plugin_data() 
 
 
 # ---------------------------------------------------------------------------
+# NEW-4 hardening: plugin_launcher.py's auto-pip-install trigger. Keyed on
+# requirements.txt's content hash, a plain edit to that file inside an
+# INSTALLED plugin -- no real `claude plugin update` involved -- got
+# automatically pip-installed on the very next server restart: an
+# auto-triggered, persistent code-execution path into the process holding
+# decrypted secrets. Now keyed on CLAUDE_PLUGIN_ROOT's own path when
+# running as an installed plugin (a real update always changes it, since
+# that's the same version-scoped-directory fact NEW-1 relies on); the
+# content-hash trigger is kept only for manual/dev mode, where there's no
+# "version" to key off and immediate reinstall-on-edit is the workflow a
+# developer testing a dependency change actually wants. Each test imports
+# plugin_launcher in a fresh subprocess (its config is computed once at
+# import time from environment variables) without calling _ensure_venv()
+# itself, so these stay fast and don't require real network/pip access.
+# ---------------------------------------------------------------------------
+
+def _run_plugin_launcher_probe(env_overrides: dict, expr: str) -> str:
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PLUGIN_ROOT"}
+    env.update(env_overrides)
+    proc = subprocess.run(
+        [sys.executable, "-c", f"import plugin_launcher; print({expr})"],
+        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, check=True)
+    return proc.stdout.strip()
+
+
+def test_requirements_selection_uses_lockfile_on_windows_when_present() -> None:
+    if sys.platform != "win32" or not (REPO_ROOT / "requirements-lock.txt").exists():
+        return  # nothing to verify on a platform/checkout without the lockfile
+    result = _run_plugin_launcher_probe({}, "plugin_launcher.REQUIREMENTS.name")
+    assert result == "requirements-lock.txt"
+
+
+def test_install_marker_is_requirements_hash_in_manual_mode() -> None:
+    marker = _run_plugin_launcher_probe({}, "plugin_launcher._install_marker()")
+    real_hash = _run_plugin_launcher_probe({}, "plugin_launcher._requirements_hash()")
+    assert marker == real_hash, (
+        "manual/dev mode (no CLAUDE_PLUGIN_ROOT) must key off the requirements hash")
+
+
+def test_install_marker_is_plugin_root_when_installed() -> None:
+    with tempfile.TemporaryDirectory(prefix="fake_plugin_root_") as fake_root:
+        marker = _run_plugin_launcher_probe(
+            {"CLAUDE_PLUGIN_ROOT": fake_root}, "plugin_launcher._install_marker()")
+        assert marker == str(Path(fake_root)), (
+            "REGRESSION (NEW-4): installed-plugin mode must key off "
+            "CLAUDE_PLUGIN_ROOT's path, not requirements.txt's content")
+
+
+def test_install_marker_unaffected_by_requirements_content_when_installed() -> None:
+    """The actual regression this closes: editing requirements.txt inside
+    an installed plugin must not change the install marker at all -- only
+    a genuine CLAUDE_PLUGIN_ROOT change (a real update) should."""
+    with tempfile.TemporaryDirectory(prefix="fake_plugin_root_") as fake_root:
+        fake_root_path = Path(fake_root)
+        for name in ("plugin_launcher.py", "requirements.txt"):
+            (fake_root_path / name).write_bytes((REPO_ROOT / name).read_bytes())
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PLUGIN_ROOT"}
+        env["CLAUDE_PLUGIN_ROOT"] = str(fake_root_path)
+
+        def marker() -> str:
+            proc = subprocess.run(
+                [sys.executable, "-c",
+                 "import plugin_launcher; print(plugin_launcher._install_marker())"],
+                cwd=str(fake_root_path), env=env, capture_output=True, text=True, check=True)
+            return proc.stdout.strip()
+
+        before = marker()
+        (fake_root_path / "requirements.txt").write_text("some-package==9.9.9\n")
+        after = marker()
+        assert before == after, (
+            "REGRESSION (NEW-4): editing requirements.txt inside an installed "
+            "plugin changed the install marker with no real update event")
+
+
+# ---------------------------------------------------------------------------
 # Ciphertext-length padding: vault.enc's length used to reveal the
 # aggregate byte size of every real secret value combined. save_secrets
 # now pads to a block multiple before encrypting; load_secrets must still
