@@ -41,6 +41,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -742,6 +743,80 @@ def test_load_index_rejects_duplicate_placeholder_numbers() -> None:
             msg = str(e)
         assert raised, "REGRESSION (NEW-3): duplicate placeholder numbers were accepted"
         assert "NAME_A" in msg and "NAME_B" in msg and "1" in msg
+
+
+# ---------------------------------------------------------------------------
+# Ciphertext-length padding: vault.enc's length used to reveal the
+# aggregate byte size of every real secret value combined. save_secrets
+# now pads to a block multiple before encrypting; load_secrets must still
+# read an OLDER, unpadded vault.enc correctly (no format version flag
+# exists, so this is the only thing standing between this fix and
+# corrupting every vault that predates it).
+# ---------------------------------------------------------------------------
+
+def test_save_then_load_round_trips_through_padding() -> None:
+    with isolated_vault(secrets={}):
+        secrets = {"A": "short", "B": "a considerably longer value than the other one"}
+        store.save_secrets(TEST_PASSWORD, secrets)
+        assert store.load_secrets(TEST_PASSWORD) == secrets
+
+
+def test_saved_ciphertext_length_is_coarsened_across_different_value_sizes() -> None:
+    """Two secrets dicts of noticeably different byte size should be able
+    to land in the same padded-length bucket -- proves padding is actually
+    applied, not merely present as unused code."""
+    with isolated_vault(secrets={}):
+        store.save_secrets(TEST_PASSWORD, {"A": "x"})
+        short_len = store.SECRETS_FILE.stat().st_size
+        store.save_secrets(TEST_PASSWORD, {"A": "x" * 10})
+        long_len = store.SECRETS_FILE.stat().st_size
+        assert short_len == long_len, (
+            f"REGRESSION: a 9-byte difference in real value length changed the "
+            f"ciphertext length ({short_len} vs {long_len}) -- padding isn't "
+            f"coarsening it")
+
+
+def test_load_secrets_still_reads_an_older_unpadded_vault() -> None:
+    """Simulates a vault.enc written by the pre-padding code -- crypto.encrypt
+    called directly on unpadded JSON, exactly what save_secrets used to do."""
+    with isolated_vault(secrets={}):
+        import json
+        from vault_lib import crypto
+        legacy_secrets = {"OLD_STYLE": "still-must-load-correctly"}
+        salt = store.SALT_FILE.read_bytes()
+        unpadded_token = crypto.encrypt(
+            TEST_PASSWORD, salt, json.dumps(legacy_secrets).encode("utf-8"))
+        store.SECRETS_FILE.write_bytes(unpadded_token)
+        assert store.load_secrets(TEST_PASSWORD) == legacy_secrets, (
+            "REGRESSION: an older, unpadded vault.enc failed to load")
+
+
+# ---------------------------------------------------------------------------
+# Stale background-run log cleanup: opportunistic, best-effort deletion of
+# old llm-env-vault-run-*.log files from a prior session's background=True
+# calls -- previously never cleaned up at all (documented limitation).
+# ---------------------------------------------------------------------------
+
+def test_cleanup_stale_run_logs_removes_old_ones_keeps_recent_ones() -> None:
+    with tempfile.TemporaryDirectory() as fake_temp:
+        old_path = Path(fake_temp) / "llm-env-vault-run-old.log"
+        recent_path = Path(fake_temp) / "llm-env-vault-run-recent.log"
+        unrelated_path = Path(fake_temp) / "some-other-file.log"
+        for p in (old_path, recent_path, unrelated_path):
+            p.write_text("x")
+        old_cutoff = time.time() - (mcp_server._STALE_RUN_LOG_AGE_SECONDS + 3600)
+        os.utime(old_path, (old_cutoff, old_cutoff))
+
+        original_gettempdir = tempfile.gettempdir
+        tempfile.gettempdir = lambda: fake_temp
+        try:
+            mcp_server._cleanup_stale_run_logs()
+        finally:
+            tempfile.gettempdir = original_gettempdir
+
+        assert not old_path.exists(), "REGRESSION: a stale run log was not cleaned up"
+        assert recent_path.exists(), "REGRESSION: a recent run log was incorrectly deleted"
+        assert unrelated_path.exists(), "REGRESSION: a non-matching file was incorrectly deleted"
 
 
 # ---------------------------------------------------------------------------

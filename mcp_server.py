@@ -17,6 +17,7 @@ import os
 import signal
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +26,32 @@ from mcp.server.fastmcp import FastMCP
 from vault_lib import gui, store, trust
 
 mcp = FastMCP("llm-env-vault")
+
+# How old a background-run log has to be before opportunistic cleanup
+# deletes it. Generous on purpose -- this only ever removes a log from a
+# run that finished long ago, never one from a process that might still be
+# writing to it.
+_STALE_RUN_LOG_AGE_SECONDS = 7 * 24 * 60 * 60  # 7 days
+
+
+def _cleanup_stale_run_logs() -> None:
+    """Best-effort deletion of old background=True run logs in the system
+    temp directory. These can contain a run's real environment if the
+    command printed its own config (documented in README's Known
+    limitations) and were previously never cleaned up at all. Called
+    opportunistically right before a new background run creates its own
+    log -- never allowed to fail the actual run it's piggybacking on."""
+    try:
+        temp_dir = Path(tempfile.gettempdir())
+        cutoff = time.time() - _STALE_RUN_LOG_AGE_SECONDS
+        for log_path in temp_dir.glob("llm-env-vault-run-*.log"):
+            try:
+                if log_path.stat().st_mtime < cutoff:
+                    log_path.unlink()
+            except OSError:
+                continue  # another process may hold it open, or it's already gone -- skip, don't fail the run
+    except OSError:
+        pass
 
 # GUI-opening tools are deliberately plain, synchronous functions -- NOT
 # offloaded to a worker thread via asyncio.to_thread. That was tried: it
@@ -475,6 +502,7 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
         # inject its own output as garbage into the protocol stream (and
         # corrupt/kill the session for as long as it runs) or steal bytes
         # meant for this server. Redirect explicitly; never inherit.
+        _cleanup_stale_run_logs()
         log_fd, log_path = tempfile.mkstemp(suffix=".log", prefix="llm-env-vault-run-")
         os.close(log_fd)
         try:

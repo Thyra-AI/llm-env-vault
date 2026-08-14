@@ -637,17 +637,61 @@ def write_materialized_env(path: Path, secrets: dict) -> None:
     _atomic_write_text(path, render_env_text(secrets), mode=0o600)
 
 
+# Coarsens vault.enc's ciphertext length to a multiple of this many bytes
+# before encryption, via PKCS7-style padding. Fernet's CBC mode leaks the
+# plaintext length rounded up to its own 16-byte block size; since variable
+# NAMES are already public by design (vault_index.json), the only thing
+# this narrows further is the aggregate byte size of every real VALUE
+# combined -- a weak signal (not per-value, not content), but free to
+# reduce. A red-team audit called this out as worth doing "if you care."
+_PAD_BLOCK = 64
+
+
+def _pkcs7_pad(data: bytes, block_size: int = _PAD_BLOCK) -> bytes:
+    pad_len = block_size - (len(data) % block_size)
+    return data + bytes([pad_len]) * pad_len
+
+
+def _pkcs7_unpad(data: bytes, block_size: int = _PAD_BLOCK) -> bytes:
+    """Best-effort strip: only removes trailing bytes that actually look
+    like this module's own padding (in-range count, every padding byte
+    matching that count). Anything else is returned unchanged -- this is
+    what lets load_secrets tell a genuinely padded vault apart from an
+    older, unpadded one without a format version flag (see load_secrets)."""
+    if not data:
+        return data
+    pad_len = data[-1]
+    if not (1 <= pad_len <= block_size) or pad_len > len(data):
+        return data
+    if data[-pad_len:] != bytes([pad_len]) * pad_len:
+        return data
+    return data[:-pad_len]
+
+
 def load_secrets(password: str) -> dict:
     salt = SALT_FILE.read_bytes()
     token = SECRETS_FILE.read_bytes()
     plaintext = crypto.decrypt(password, salt, token)
+    # Padding was added after vaults already existed in the wild (including
+    # this repo's own), so decryption has to accept both shapes: try the
+    # raw bytes first (an older, unpadded vault is exactly valid JSON as-is
+    # and this succeeds immediately with no fallback needed), and only fall
+    # back to stripping padding if that fails. A vault written by the
+    # current code will fail the first parse (trailing pad bytes break JSON)
+    # and succeed on the second. Every vault gets padded on its next save
+    # regardless of which path loaded it.
     try:
         return json.loads(plaintext.decode("utf-8"))
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    try:
+        return json.loads(_pkcs7_unpad(plaintext).decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
         raise ValueError("Decrypted vault contents are corrupted.") from None
 
 
 def save_secrets(password: str, secrets: dict) -> None:
     salt = SALT_FILE.read_bytes()
-    token = crypto.encrypt(password, salt, json.dumps(secrets).encode("utf-8"))
+    plaintext = _pkcs7_pad(json.dumps(secrets).encode("utf-8"))
+    token = crypto.encrypt(password, salt, plaintext)
     _atomic_write_bytes(SECRETS_FILE, token)
