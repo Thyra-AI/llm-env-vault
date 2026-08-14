@@ -301,20 +301,34 @@ def _provision(python: Path, current_marker: str) -> None:
         pass
     venv_functional = same_target_as_last_attempt and _venv_is_functional(python)
 
-    if python.exists() and not STAMP_FILE.exists():
-        if not same_target_as_last_attempt:
-            _log("Found an existing venv, but this attempt targets a different "
-                 "install (a real update, or a changed requirements.txt) than "
-                 "whatever last touched it -- wiping and recreating from scratch "
-                 "rather than reusing it, so nothing stale from the old target "
-                 "can survive.")
-        else:
-            _log("Found a venv with no completed-install stamp -- a previous "
-                 "provisioning attempt likely didn't finish (killed by a startup "
-                 "timeout, ran out of disk, etc.). " +
-                 ("Reinstalling dependencies." if venv_functional else
-                  "The interpreter itself looks incomplete too (no working pip) "
-                  "-- recreating the venv from scratch."))
+    # Always log WHY this attempt is happening -- not just for the
+    # interrupted-attempt case. The most common real trigger is actually a
+    # genuine update (a completed prior install, now targeting something
+    # different), and that case has to explain itself too: otherwise, if
+    # the update's own pip install then fails, the log shows the pip
+    # output with no line saying why a full wipe/recreate was attempted in
+    # the first place, which is exactly the "leave a diagnosable trail"
+    # goal this whole feature exists for.
+    stamped_marker = STAMP_FILE.read_text().strip() if STAMP_FILE.exists() else None
+    if stamped_marker is not None:
+        _log("A prior install completed successfully, but this attempt targets a "
+             "different install (a real update, or an edited requirements.txt) -- "
+             "wiping and recreating from scratch so nothing stale from the "
+             "previous target can survive.")
+    elif python.exists() and same_target_as_last_attempt:
+        _log("Found a venv with no completed-install stamp -- a previous "
+             "provisioning attempt for this exact target likely didn't finish "
+             "(killed by a startup timeout, ran out of disk, etc.). " +
+             ("Reinstalling dependencies." if venv_functional else
+              "The interpreter itself looks incomplete too (no working pip) "
+              "-- recreating the venv from scratch."))
+    elif python.exists():
+        _log("Found an existing venv, but this attempt targets a different "
+             "install than whatever last touched it -- wiping and recreating "
+             "from scratch rather than reusing it.")
+    else:
+        _log("No existing venv found -- first-time setup.")
+
     print(f"[llm-env-vault] Setting up its Python environment in {VENV_DIR} "
           f"(first run, or dependencies changed since last run) -- this "
           f"can take a little while the first time. Progress: {INSTALL_LOG}",
