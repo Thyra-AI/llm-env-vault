@@ -2,6 +2,7 @@ vault.enc
 vault.salt
 targets.json
 targets.json.lock
+vault_index.json
 .venv/
 .venv-data/
 __pycache__/
