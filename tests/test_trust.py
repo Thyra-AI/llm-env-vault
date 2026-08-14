@@ -93,7 +93,13 @@ def isolated_vault(secrets=None):
     repo vault."""
     secrets = dict(secrets) if secrets is not None else dict(BASE_SECRETS)
     with tempfile.TemporaryDirectory(prefix="llm_vault_test_") as tmp:
-        tmp_path = Path(tmp)
+        # .resolve() matters: on Windows, mkdtemp hands back the 8.3 short form
+        # when the username is over 8 characters (a CI runner's
+        # C:\Users\RUNNER~1\... vs C:\Users\runneradmin\...). trust.py resolves
+        # the paths it reports, so a test comparing an unresolved path against a
+        # trust message compares two spellings of the same file and fails on the
+        # machine but not on a dev box with a short username.
+        tmp_path = Path(tmp).resolve()
         originals = _isolate_store_paths(tmp_path)
         _reset_trust_state()
         try:
