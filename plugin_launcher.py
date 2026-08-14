@@ -83,7 +83,43 @@ def _log(message: str) -> None:
         pass
 
 
-def _run_logged(cmd: list, step: str) -> None:
+def _reset_log() -> None:
+    """Starts a fresh provision.log for this attempt instead of appending
+    forever -- across a machine's lifetime of repeated interrupted
+    installs (the exact scenario this file exists to diagnose), an
+    append-only log would grow unbounded. Only the most recent attempt is
+    ever relevant to "why isn't this working right now," so that's all
+    that's kept."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        INSTALL_LOG.write_text("", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _venv_is_functional(python: Path) -> bool:
+    """python.exists() alone isn't proof the venv is usable: `python -m
+    venv` copies the interpreter binary before running ensurepip, so an
+    attempt interrupted between those two steps -- the same startup-
+    timeout failure mode this whole module defends against, just landing
+    one step earlier -- leaves a python.exe with no pip module. The retry
+    path skips recreating the venv when it's already functional (the slow
+    part was never venv creation); skipping it based on python.exists()
+    alone would get permanently stuck on that half-built state instead --
+    every retry would keep failing the dependency-install step with 'No
+    module named pip' and never repair itself, since nothing would ever
+    re-run `python -m venv`."""
+    if not python.exists():
+        return False
+    try:
+        result = subprocess.run([str(python), "-m", "pip", "--version"],
+                                 capture_output=True, timeout=10)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _run_logged(cmd: list[str], step: str) -> None:
     """Runs `cmd`, logs its full output to provision.log regardless of
     outcome, and raises a clean RuntimeError pointing at that log on
     failure -- never a bare, unlogged CalledProcessError. Used for BOTH
@@ -155,12 +191,16 @@ def _ensure_venv() -> Path:
     created (fast) but `pip install` never finishes, and no error surfaces
     anywhere a user would think to look. STAMP_FILE only being written
     AFTER a successful install already meant the next run would retry
-    rather than silently trust a half-finished venv -- but a python.exe
-    that already works is skipped on retry instead of being recreated
-    (faster on a retry, and the actual slow part was never venv creation),
-    and every attempt's pip output -- success or failure -- goes to
-    provision.log, so a repeatedly-interrupted install is diagnosable
-    without inspecting internal files by hand.
+    rather than silently trust a half-finished venv. A venv that's
+    _venv_is_functional (not just python.exists()) is skipped on retry
+    instead of being recreated (faster, and the actual slow part was never
+    venv creation) -- but one interrupted even earlier, mid ensurepip, IS
+    recreated rather than left permanently stuck failing "No module named
+    pip" forever. provision.log is reset at the start of each attempt and
+    captures that attempt's full output -- success or failure -- so a
+    repeatedly-interrupted install is diagnosable without inspecting
+    internal files by hand, and doesn't grow unbounded over the plugin's
+    lifetime.
     """
     python = _venv_python()
     current_marker = _install_marker()
@@ -172,17 +212,21 @@ def _ensure_venv() -> Path:
     if up_to_date:
         return python
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _reset_log()
+    venv_functional = _venv_is_functional(python)
     if python.exists() and not STAMP_FILE.exists():
         _log("Found a venv with no completed-install stamp -- a previous "
              "provisioning attempt likely didn't finish (killed by a startup "
-             "timeout, ran out of disk, etc.). Retrying.")
+             "timeout, ran out of disk, etc.). " +
+             ("Reinstalling dependencies." if venv_functional else
+              "The interpreter itself looks incomplete too (no working pip) "
+              "-- recreating the venv from scratch."))
     print(f"[llm-env-vault] Setting up its Python environment in {VENV_DIR} "
           f"(first run, or dependencies changed since last run) -- this "
           f"can take a little while the first time. Progress: {INSTALL_LOG}",
           file=sys.stderr, flush=True)
 
-    if not python.exists():
+    if not venv_functional:
         _run_logged([sys.executable, "-m", "venv", str(VENV_DIR)], "venv creation")
 
     pip_cmd = [str(python), "-m", "pip", "install"]
