@@ -459,6 +459,38 @@ def sync_target_file(path: Path, index: dict, managed_names, force_names=None) -
     newline = _dominant_newline(raw)
     lines = raw.splitlines()
 
+    # Anomaly guard: a legitimate resync comments out managed variables one
+    # at a time -- each remove_secret call removes exactly one name from
+    # the index, so at most one previously-live line per target typically
+    # goes stale between resyncs. If EVERY currently-live managed
+    # placeholder in this file would be commented out in a single call,
+    # that's a far more likely sign the vault/index was replaced, restored
+    # from an old backup, or corrupted out from under this file than that
+    # a human genuinely removed every one of this target's secrets in the
+    # same breath. resync_targets needs no password by design specifically
+    # because it can only ever touch placeholder text -- but silently
+    # wiping every managed line in a file at once is still a real,
+    # unattended data-loss event worth refusing rather than applying.
+    currently_live, would_be_removed = set(), set()
+    for line in lines:
+        m = ENV_LINE_RE.match(line)
+        if m and m.group("name") in managed_names:
+            name = m.group("name")
+            if PLACEHOLDER_VALUE_RE.match(m.group("value").strip()):
+                currently_live.add(name)
+                if name not in index and name not in force_names:
+                    would_be_removed.add(name)
+    if len(currently_live) >= 2 and would_be_removed == currently_live:
+        raise ValueError(
+            f"Refusing to resync {path}: this would comment out ALL "
+            f"{len(currently_live)} currently-managed variable(s) "
+            f"({', '.join(sorted(currently_live))}) in this file at once, which "
+            f"looks like the vault/index was replaced or corrupted rather than "
+            f"a genuine one-at-a-time remove_secret. Re-run install_migrate to "
+            f"re-confirm this target with a human in the loop, or fix the "
+            f"vault/index first if this is unexpected."
+        )
+
     out_lines = []
     seen = set()
     conflicts = []

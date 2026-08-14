@@ -94,6 +94,57 @@ def test_physical_drive_does_not_raise() -> None:
 
 
 # ---------------------------------------------------------------------------
+# sync_target_file mass-removal guard: a genuine remove_secret call takes
+# out one variable at a time, so a resync legitimately comments out one
+# previously-live managed line at most. If a vault/index gets replaced or
+# corrupted out from under a registered target (confirmed via a real
+# red-team exercise against this tool), the old code would silently
+# comment out EVERY managed line in that file in one no-password call.
+# ---------------------------------------------------------------------------
+
+def test_sync_target_file_refuses_to_wipe_every_managed_line_at_once() -> None:
+    content = 'STRIPE_SECRET_KEY="value 2"\nDATABASE_PASSWORD="value 3"\n'
+    tmp_path = _write_temp_env(content)
+    try:
+        # Neither name is in this index -- simulates the index having been
+        # replaced/corrupted out from under a target that still references
+        # both of its previously-live variables.
+        try:
+            store.sync_target_file(Path(tmp_path), index={}, managed_names={
+                "STRIPE_SECRET_KEY", "DATABASE_PASSWORD"})
+            raised = False
+        except ValueError as e:
+            raised = True
+            msg = str(e)
+        assert raised, "expected sync_target_file to refuse a total wipeout"
+        assert "STRIPE_SECRET_KEY" in msg and "DATABASE_PASSWORD" in msg
+        # Refusal must mean nothing was written -- file stays exactly as it was.
+        assert Path(tmp_path).read_text() == content, (
+            "REGRESSION: file was rewritten despite the refusal")
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_sync_target_file_still_removes_a_single_variable_normally() -> None:
+    """Regression guard: the mass-removal refusal must not block the
+    ordinary, legitimate one-at-a-time removal this behavior exists for."""
+    content = 'STRIPE_SECRET_KEY="value 2"\nDATABASE_PASSWORD="value 3"\n'
+    tmp_path = _write_temp_env(content)
+    try:
+        # Only STRIPE_SECRET_KEY is missing from the index -- a normal,
+        # single remove_secret -- DATABASE_PASSWORD stays live.
+        conflicts = store.sync_target_file(
+            Path(tmp_path), index={"DATABASE_PASSWORD": 3},
+            managed_names={"STRIPE_SECRET_KEY", "DATABASE_PASSWORD"})
+        assert conflicts == []
+        result = Path(tmp_path).read_text()
+        assert "STRIPE_SECRET_KEY was removed from the vault" in result
+        assert 'DATABASE_PASSWORD="value 3"' in result
+    finally:
+        os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
 # Residual secret leak in unrecognized_name/swallowed warnings: everything
 # before the first '=' on a line was carried verbatim with no check that
 # it's actually a plausible name -- for a swallowed URL-with-credentials
@@ -175,6 +226,8 @@ if __name__ == "__main__":
         test_nonexistent_normal_path_returns_does_not_exist,
         test_real_file_passes_preamble,
         test_physical_drive_does_not_raise,
+        test_sync_target_file_refuses_to_wipe_every_managed_line_at_once,
+        test_sync_target_file_still_removes_a_single_variable_normally,
         test_swallowed_credential_shaped_line_is_redacted_not_leaked,
         test_unrecognized_hyphenated_name_still_shown_unredacted,
         test_install_migrate_warnings_never_contain_leaked_credential_text,
