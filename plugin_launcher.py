@@ -33,6 +33,7 @@ outside that looks identical to the server simply never having started,
 with no error visible anywhere else. provision.log captures the exact pip
 output for whichever attempt ran last, successful or not.
 """
+import contextlib
 import hashlib
 import os
 import subprocess
@@ -55,6 +56,12 @@ REQUIREMENTS = _LOCKFILE if sys.platform == "win32" and _LOCKFILE.exists() \
     else PLUGIN_ROOT / "requirements.txt"
 
 STAMP_FILE = DATA_DIR / "requirements.sha256"
+# Written before an attempt starts (unlike STAMP_FILE, which is only
+# written after one succeeds) -- see _ensure_venv for why this exists
+# separately: it's what lets a retry tell "this is the same target as the
+# last, interrupted attempt" apart from "the target itself changed."
+ATTEMPT_FILE = DATA_DIR / "requirements.attempt"
+LOCK_FILE = DATA_DIR / "provision.lock"
 
 # Only set when actually running as an installed plugin (Claude Code
 # exports it into every MCP server subprocess automatically).
@@ -95,6 +102,50 @@ def _reset_log() -> None:
         INSTALL_LOG.write_text("", encoding="utf-8")
     except OSError:
         pass
+
+
+@contextlib.contextmanager
+def _provision_lock():
+    """Cross-process lock around an entire provisioning attempt. Two
+    Claude Code sessions can trigger first-run provisioning against the
+    same persistent CLAUDE_PLUGIN_DATA at the same time (e.g. two project
+    windows opened right after installing the plugin) -- without this,
+    concurrent `pip install` calls into the same venv, and concurrent
+    writers to the same (now truncate-on-start) provision.log, can
+    interleave or clobber each other. Blocks rather than failing fast: if
+    another process is genuinely mid-install, the right thing to do is
+    wait for it to finish (then re-check whether provisioning is even
+    still needed -- see _ensure_venv), not duplicate the work.
+
+    Self-contained (no import from vault_lib, which has its own
+    dependencies plugin_launcher's whole job is to install in the first
+    place -- it cannot import anything not-yet-installed itself)."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_RDWR)
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            while True:
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.2)
+            try:
+                yield
+            finally:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _venv_is_functional(python: Path) -> bool:
@@ -196,38 +247,91 @@ def _ensure_venv() -> Path:
     instead of being recreated (faster, and the actual slow part was never
     venv creation) -- but one interrupted even earlier, mid ensurepip, IS
     recreated rather than left permanently stuck failing "No module named
-    pip" forever. provision.log is reset at the start of each attempt and
-    captures that attempt's full output -- success or failure -- so a
-    repeatedly-interrupted install is diagnosable without inspecting
-    internal files by hand, and doesn't grow unbounded over the plugin's
-    lifetime.
+    pip" forever.
+
+    Reuse is gated on more than "is the venv functional," though: it only
+    ever applies when this attempt targets the exact same marker as the
+    last (incomplete) one, via ATTEMPT_FILE. Without that check, reusing a
+    functional-but-stale venv across a genuine target change (a real
+    update, or a real requirements.txt edit in dev mode) would run plain
+    `pip install -r requirements` against it -- which only adds/upgrades,
+    never uninstalls a package the NEW requirements.txt no longer lists --
+    silently breaking the "requirements.txt's content is replaced
+    wholesale" guarantee _install_marker's own docstring makes. So: same
+    target as last attempt -> safe to reuse a functional venv. Different
+    target (or no prior attempt at all) -> always a full wipe/recreate,
+    exactly like before this retry optimization existed.
+
+    provision.log is reset at the start of each attempt and captures that
+    attempt's full output -- success or failure -- so a repeatedly-
+    interrupted install is diagnosable without inspecting internal files
+    by hand, and doesn't grow unbounded over the plugin's lifetime.
     """
     python = _venv_python()
     current_marker = _install_marker()
-    up_to_date = (
+    if _is_up_to_date(python, current_marker):
+        return python
+
+    with _provision_lock():
+        # Re-check after acquiring: another process may have finished
+        # provisioning while this one waited for the lock.
+        if _is_up_to_date(python, current_marker):
+            return python
+        _provision(python, current_marker)
+    return python
+
+
+def _is_up_to_date(python: Path, current_marker: str) -> bool:
+    return (
         python.exists()
         and STAMP_FILE.exists()
         and STAMP_FILE.read_text().strip() == current_marker
     )
-    if up_to_date:
-        return python
 
+
+def _provision(python: Path, current_marker: str) -> None:
+    """The actual (re)install, called with _provision_lock held."""
     _reset_log()
-    venv_functional = _venv_is_functional(python)
+    last_attempt_marker = ATTEMPT_FILE.read_text().strip() if ATTEMPT_FILE.exists() else None
+    same_target_as_last_attempt = last_attempt_marker == current_marker
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        ATTEMPT_FILE.write_text(current_marker)
+    except OSError:
+        pass
+    venv_functional = same_target_as_last_attempt and _venv_is_functional(python)
+
     if python.exists() and not STAMP_FILE.exists():
-        _log("Found a venv with no completed-install stamp -- a previous "
-             "provisioning attempt likely didn't finish (killed by a startup "
-             "timeout, ran out of disk, etc.). " +
-             ("Reinstalling dependencies." if venv_functional else
-              "The interpreter itself looks incomplete too (no working pip) "
-              "-- recreating the venv from scratch."))
+        if not same_target_as_last_attempt:
+            _log("Found an existing venv, but this attempt targets a different "
+                 "install (a real update, or a changed requirements.txt) than "
+                 "whatever last touched it -- wiping and recreating from scratch "
+                 "rather than reusing it, so nothing stale from the old target "
+                 "can survive.")
+        else:
+            _log("Found a venv with no completed-install stamp -- a previous "
+                 "provisioning attempt likely didn't finish (killed by a startup "
+                 "timeout, ran out of disk, etc.). " +
+                 ("Reinstalling dependencies." if venv_functional else
+                  "The interpreter itself looks incomplete too (no working pip) "
+                  "-- recreating the venv from scratch."))
     print(f"[llm-env-vault] Setting up its Python environment in {VENV_DIR} "
           f"(first run, or dependencies changed since last run) -- this "
           f"can take a little while the first time. Progress: {INSTALL_LOG}",
           file=sys.stderr, flush=True)
 
     if not venv_functional:
-        _run_logged([sys.executable, "-m", "venv", str(VENV_DIR)], "venv creation")
+        # --clear: `python -m venv` on an already-existing directory does
+        # NOT wipe previously-installed packages on its own -- it only
+        # ensures the core venv structure (interpreter, pip) is present,
+        # leaving old site-packages alone. Without --clear, "recreate from
+        # scratch" for a genuine target change would be a no-op for
+        # already-installed packages, silently defeating the whole point
+        # of not reusing a stale venv across an update (confirmed by
+        # actually testing it: a package removed from requirements.txt
+        # stayed importable after a simulated update without this flag).
+        _run_logged([sys.executable, "-m", "venv", "--clear", str(VENV_DIR)],
+                    "venv creation")
 
     pip_cmd = [str(python), "-m", "pip", "install"]
     if REQUIREMENTS is _LOCKFILE:
@@ -237,7 +341,6 @@ def _ensure_venv() -> Path:
 
     _log("Provisioning succeeded.")
     STAMP_FILE.write_text(current_marker)
-    return python
 
 
 def main() -> None:

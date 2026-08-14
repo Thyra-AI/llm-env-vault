@@ -853,6 +853,132 @@ def test_install_marker_unaffected_by_requirements_content_when_installed() -> N
 
 
 # ---------------------------------------------------------------------------
+# plugin_launcher's provisioning retry/self-repair logic. A code-review
+# pass on the retry optimization itself (not just the original interrupted-
+# install bug) found two real regressions before this ever shipped: a venv
+# with a working interpreter but no pip module (interrupted mid-ensurepip)
+# would get stuck failing forever instead of self-healing, and reusing a
+# functional-but-stale venv across a genuine target change (a real update)
+# would silently leave packages the new requirements.txt no longer lists
+# still installed, since plain `pip install -r` never uninstalls.
+# ---------------------------------------------------------------------------
+
+def _make_fake_plugin_root(path: Path, requirements_content: str) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "plugin_launcher.py").write_bytes(
+        (REPO_ROOT / "plugin_launcher.py").read_bytes())
+    (path / "requirements.txt").write_text(requirements_content)
+
+
+def test_venv_is_functional_detects_a_venv_with_no_pip() -> None:
+    with tempfile.TemporaryDirectory(prefix="venv_functional_") as tmp:
+        venv_dir = Path(tmp) / "venv"
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv_dir)],
+                        check=True)
+        python = venv_dir / "Scripts" / "python.exe" if sys.platform == "win32" \
+            else venv_dir / "bin" / "python"
+        import plugin_launcher
+        assert plugin_launcher._venv_is_functional(python) is False
+
+
+def test_venv_is_functional_true_for_a_normal_venv() -> None:
+    with tempfile.TemporaryDirectory(prefix="venv_functional_") as tmp:
+        venv_dir = Path(tmp) / "venv"
+        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+        python = venv_dir / "Scripts" / "python.exe" if sys.platform == "win32" \
+            else venv_dir / "bin" / "python"
+        import plugin_launcher
+        assert plugin_launcher._venv_is_functional(python) is True
+
+
+def test_run_logged_raises_clean_runtime_error_and_writes_log() -> None:
+    with tempfile.TemporaryDirectory(prefix="run_logged_") as tmp:
+        env = {**os.environ, "CLAUDE_PLUGIN_DATA": tmp}
+        env.pop("CLAUDE_PLUGIN_ROOT", None)
+        script = (
+            "import plugin_launcher as pl\n"
+            "try:\n"
+            "    pl._run_logged([r'" + sys.executable + "', '-c', "
+            "'import sys; sys.exit(1)'], 'test step')\n"
+            "    print('NO_ERROR')\n"
+            "except RuntimeError as e:\n"
+            "    print('GOT_RUNTIME_ERROR:' + str(e))\n"
+        )
+        proc = subprocess.run([sys.executable, "-c", script], cwd=str(REPO_ROOT),
+                               env=env, capture_output=True, text=True, check=True)
+        assert "GOT_RUNTIME_ERROR" in proc.stdout, proc.stdout
+        assert "test step" in proc.stdout
+        log = (Path(tmp) / "provision.log").read_text()
+        assert "FAILED (test step)" in log
+
+
+def test_ensure_venv_reuses_functional_venv_on_same_target_retry() -> None:
+    """An interrupted-then-retried attempt at the SAME target must skip
+    venv recreation (fast) and just reinstall -- confirmed by checking
+    provision.log names the dependency-install step but not venv creation
+    on the second call."""
+    with tempfile.TemporaryDirectory(prefix="fake_plugin_") as root, \
+         tempfile.TemporaryDirectory(prefix="fake_data_") as data:
+        _make_fake_plugin_root(Path(root), "colorama==0.4.6\n")
+        env = {**os.environ, "CLAUDE_PLUGIN_ROOT": root, "CLAUDE_PLUGIN_DATA": data}
+        subprocess.run([sys.executable, "-c", "import plugin_launcher; plugin_launcher._ensure_venv()"],
+                        cwd=root, env=env, capture_output=True, text=True, check=True)
+        (Path(data) / "requirements.sha256").unlink()  # simulate an interrupted retry
+        subprocess.run([sys.executable, "-c", "import plugin_launcher; plugin_launcher._ensure_venv()"],
+                        cwd=root, env=env, capture_output=True, text=True, check=True)
+        log = (Path(data) / "provision.log").read_text()
+        assert "dependency install" in log
+        assert "venv creation" not in log, (
+            "REGRESSION: a same-target retry recreated the venv instead of reusing it")
+
+
+def test_ensure_venv_wipes_stale_venv_on_genuine_target_change() -> None:
+    """The actual regression a code review caught: reusing a functional
+    venv across a real target change (here, CLAUDE_PLUGIN_ROOT pointing at
+    a different requirements.txt -- the same signal a real `claude plugin
+    update` gives) must not leave a package the new requirements.txt no
+    longer lists still importable."""
+    with tempfile.TemporaryDirectory(prefix="fake_plugin_v1_") as root1, \
+         tempfile.TemporaryDirectory(prefix="fake_plugin_v2_") as root2, \
+         tempfile.TemporaryDirectory(prefix="fake_data_") as data:
+        _make_fake_plugin_root(Path(root1), "colorama==0.4.6\n")
+        _make_fake_plugin_root(Path(root2), "\n")  # v2 drops colorama entirely
+
+        env1 = {**os.environ, "CLAUDE_PLUGIN_ROOT": root1, "CLAUDE_PLUGIN_DATA": data}
+        subprocess.run([sys.executable, "-c", "import plugin_launcher; plugin_launcher._ensure_venv()"],
+                        cwd=root1, env=env1, capture_output=True, text=True, check=True)
+        python = Path(data) / "venv" / "Scripts" / "python.exe"
+        r = subprocess.run([str(python), "-c", "import colorama"], capture_output=True, text=True)
+        assert r.returncode == 0, "setup failed: colorama should be present after v1"
+
+        env2 = {**os.environ, "CLAUDE_PLUGIN_ROOT": root2, "CLAUDE_PLUGIN_DATA": data}
+        subprocess.run([sys.executable, "-c", "import plugin_launcher; plugin_launcher._ensure_venv()"],
+                        cwd=root2, env=env2, capture_output=True, text=True, check=True)
+        r = subprocess.run([str(python), "-c", "import colorama"], capture_output=True, text=True)
+        assert r.returncode != 0, (
+            "REGRESSION: colorama survived a genuine target change that dropped it "
+            "from requirements.txt -- the venv was reused instead of wiped")
+
+
+def test_ensure_venv_recreates_a_stuck_no_pip_venv() -> None:
+    """The other regression a code review caught: a venv interrupted mid-
+    ensurepip (interpreter present, pip missing) must be detected and
+    recreated, not trusted just because python.exe exists."""
+    with tempfile.TemporaryDirectory(prefix="fake_plugin_") as root, \
+         tempfile.TemporaryDirectory(prefix="fake_data_") as data:
+        _make_fake_plugin_root(Path(root), "\n")
+        venv_dir = Path(data) / "venv"
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv_dir)], check=True)
+        env = {**os.environ, "CLAUDE_PLUGIN_ROOT": root, "CLAUDE_PLUGIN_DATA": data}
+        subprocess.run([sys.executable, "-c", "import plugin_launcher; plugin_launcher._ensure_venv()"],
+                        cwd=root, env=env, capture_output=True, text=True, check=True)
+        python = venv_dir / "Scripts" / "python.exe"
+        r = subprocess.run([str(python), "-m", "pip", "--version"], capture_output=True, text=True)
+        assert r.returncode == 0, (
+            "REGRESSION: a venv with no pip module was not recreated/repaired")
+
+
+# ---------------------------------------------------------------------------
 # Ciphertext-length padding: vault.enc's length used to reveal the
 # aggregate byte size of every real secret value combined. save_secrets
 # now pads to a block multiple before encrypting; load_secrets must still
