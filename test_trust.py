@@ -76,7 +76,8 @@ def _restore_store_paths(originals: dict) -> None:
 
 def _reset_trust_state() -> None:
     trust._trusted.clear()
-    trust._cached_secrets = None
+    trust._cached_secrets.clear()
+    trust._cache_keys.clear()
     trust._cached_vault_fingerprint = None
 
 
@@ -168,7 +169,7 @@ def test_check_true_for_unchanged_trusted_signature() -> None:
     with isolated_vault():
         sig = trust.make_signature(_py(), None, None, None, False)
         trust.trust(sig, trust.referenced_file_hashes(_py(), None))
-        trust.cache_secrets(dict(BASE_SECRETS))
+        trust.cache_secrets(sig, dict(BASE_SECRETS))
         ok, reason = trust.check(sig, _py(), None)
         assert ok is True and reason is None
 
@@ -180,7 +181,7 @@ def test_check_detects_content_change() -> None:
         cmd = _py(str(ref))
         sig = trust.make_signature(cmd, str(tmp), None, None, False)
         trust.trust(sig, trust.referenced_file_hashes(cmd, str(tmp)))
-        trust.cache_secrets(dict(BASE_SECRETS))
+        trust.cache_secrets(sig, dict(BASE_SECRETS))
 
         ref.write_text("v2 -- different content")
         ok, reason = trust.check(sig, cmd, str(tmp))
@@ -197,7 +198,7 @@ def test_check_detects_disappearance() -> None:
         cmd = _py(str(ref))
         sig = trust.make_signature(cmd, str(tmp), None, None, False)
         trust.trust(sig, trust.referenced_file_hashes(cmd, str(tmp)))
-        trust.cache_secrets(dict(BASE_SECRETS))
+        trust.cache_secrets(sig, dict(BASE_SECRETS))
 
         ref.unlink()
         ok, reason = trust.check(sig, cmd, str(tmp))
@@ -214,7 +215,7 @@ def test_check_detects_new_file_appearing() -> None:
         approved_hashes = trust.referenced_file_hashes(cmd, str(tmp))
         assert approved_hashes == {}, "file shouldn't be tracked before it exists"
         trust.trust(sig, approved_hashes)
-        trust.cache_secrets(dict(BASE_SECRETS))
+        trust.cache_secrets(sig, dict(BASE_SECRETS))
 
         ref.write_text("now it exists")
         ok, reason = trust.check(sig, cmd, str(tmp))
@@ -229,7 +230,7 @@ def test_check_message_lists_all_changed_files_for_multi_file_command() -> None:
         cmd = _py(str(a), str(b))
         sig = trust.make_signature(cmd, str(tmp), None, None, False)
         trust.trust(sig, trust.referenced_file_hashes(cmd, str(tmp)))
-        trust.cache_secrets(dict(BASE_SECRETS))
+        trust.cache_secrets(sig, dict(BASE_SECRETS))
 
         a.write_text("a2")  # only `a` changes; `b` stays identical
         ok, reason = trust.check(sig, cmd, str(tmp))
@@ -246,6 +247,51 @@ def test_candidate_paths_dedups_same_file_referenced_twice() -> None:
         cmd = _fake_cmd(str(ref), "dup.txt")
         hashes = trust.referenced_file_hashes(cmd, str(tmp))
         assert len(hashes) == 1, f"expected exactly one entry, got {hashes}"
+
+
+# ---------------------------------------------------------------------------
+# Executable-planting: the program itself (argv[0]), not just its arguments,
+# must be resolved (PATH/PATHEXT-aware) and drift-monitored -- otherwise a
+# bare command name like "python" is invisible to _candidate_paths and a
+# decoy binary planted at that name after trust is granted goes undetected.
+# ---------------------------------------------------------------------------
+
+def test_argv0_resolved_via_path_is_hashed_and_monitored() -> None:
+    with isolated_vault() as tmp:
+        exe = tmp / "fakepy_test_tool.exe"
+        exe.write_bytes(b"not a real executable, just bytes to hash")
+        cmd = ["fakepy_test_tool", "some", "args"]
+        hashes = trust.referenced_file_hashes(cmd, str(tmp))
+        assert str(exe.resolve()) in hashes, (
+            f"REGRESSION: argv0 resolved via PATH/PATHEXT was not hashed/monitored, "
+            f"got {hashes}")
+
+
+def test_argv0_content_change_revokes_trust() -> None:
+    with isolated_vault() as tmp:
+        exe = tmp / "fakepy_test_tool.exe"
+        exe.write_bytes(b"version 1")
+        cmd = ["fakepy_test_tool"]
+        sig = trust.make_signature(cmd, str(tmp), None, None, False)
+        trust.trust(sig, trust.referenced_file_hashes(cmd, str(tmp)))
+        trust.cache_secrets(sig, dict(BASE_SECRETS))
+
+        exe.write_bytes(b"version 2 -- a planted decoy binary")
+        ok, reason = trust.check(sig, cmd, str(tmp))
+        assert ok is False, (
+            "REGRESSION: planting a decoy at the resolved argv0 path did not "
+            "revoke trust")
+        assert reason is not None and "changed" in reason.lower()
+
+
+def test_unresolvable_argv0_flagged_in_unmonitored_warning() -> None:
+    with isolated_vault() as tmp:
+        cmd = _fake_cmd()  # "definitely-not-a-real-executable-xyzzy" -- guaranteed unresolvable
+        warning = trust.unmonitored_file_warning(cmd, str(tmp))
+        assert warning is not None, (
+            "REGRESSION: an argv0 that can't be resolved to a file should be "
+            "disclosed, not silently unflagged")
+        assert "xyzzy" in warning and "not" in warning.lower() and "drift-monitored" in warning.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +502,29 @@ def test_n1_denial_after_revocation_still_surfaces_the_reason() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Disclosure/injection desync: unlock_for_run_dialog's "Will expose N
+# variable(s)" list (built from vault_index.json) must not silently
+# under-report what run_with_env actually injects (built from vault.enc),
+# if the two have ever diverged. _disclosure_mismatch is pure/Tkinter-free,
+# so it's tested directly here rather than through a real dialog.
+# ---------------------------------------------------------------------------
+
+def test_disclosure_matches_when_index_and_vault_agree() -> None:
+    assert gui._disclosure_mismatch(["A", "B"], ["A", "B"]) is None
+    assert gui._disclosure_mismatch([], []) is None
+
+
+def test_disclosure_mismatch_detects_undisclosed_extra_secret() -> None:
+    msg = gui._disclosure_mismatch(["A"], ["A", "UNDISCLOSED"])
+    assert msg is not None and "UNDISCLOSED" in msg
+
+
+def test_disclosure_mismatch_detects_disclosed_but_missing_secret() -> None:
+    msg = gui._disclosure_mismatch(["A", "GHOST"], ["A"])
+    assert msg is not None and "GHOST" in msg
+
+
+# ---------------------------------------------------------------------------
 # Unmonitored-file warnings (new alongside the fixes)
 # ---------------------------------------------------------------------------
 
@@ -558,11 +627,11 @@ def test_allow_without_checking_trust_does_not_grant_trust() -> None:
 
 
 def test_auto_allow_still_respects_only_vars_filtering() -> None:
-    """The cache holds the FULL decrypted vault, but each call's own
-    only_vars must still gate what actually reaches the child process --
-    the signature match already guarantees only_vars is identical to
-    what was disclosed at grant time, but this locks in that the filter
-    is still applied on the cached path, not just the fresh-unlock path."""
+    """The cache holds only the subset scoped to each signature's own
+    only_vars -- not the full decrypted vault -- so this locks in both
+    that the cache itself never holds more than was approved, and that
+    the injection-time filter still applies on the cached path (belt and
+    suspenders alongside the cache already being pre-scoped)."""
     with isolated_vault():
         cmd = [sys.executable, "-c",
                "import os; print('HAS_TOKEN=' + str('DOCKER_TEST_TOKEN' in os.environ)); "
@@ -572,11 +641,35 @@ def test_auto_allow_still_respects_only_vars_filtering() -> None:
             assert "HAS_TOKEN=True" in r1["stdout"]
             assert "HAS_OTHER=False" in r1["stdout"]
 
+            sig = trust.make_signature(cmd, None, ["DOCKER_TEST_TOKEN"], None, False)
+            cached = trust.cached_secrets(sig)
+            assert cached is not None and set(cached) == {"DOCKER_TEST_TOKEN"}, (
+                "REGRESSION: the trust cache holds more than what was approved "
+                f"for this signature, got {cached and set(cached)}")
+
             r2 = mcp_server._run_with_env_impl(list(cmd), None, False, None, ["DOCKER_TEST_TOKEN"])
             assert len(calls) == 1 and r2.get("auto_allowed") is True
             assert "HAS_TOKEN=True" in r2["stdout"]
             assert "HAS_OTHER=False" in r2["stdout"], (
                 "auto-allowed run leaked a secret outside its approved only_vars")
+
+
+def test_cached_secret_is_obfuscated_not_plaintext_in_the_cache_dict() -> None:
+    """Cached values must not sit as recognizable plaintext bytes in
+    _cached_secrets -- proves the XOR obfuscation actually runs (not
+    present-but-unused), while cached_secrets() still round-trips to the
+    real value via the matching key in _cache_keys."""
+    with isolated_vault():
+        cmd = _py()
+        with fake_dialog(_allow(trust_it=True)):
+            mcp_server._run_with_env_impl(list(cmd), None, False, None, ["DOCKER_TEST_TOKEN"])
+
+        sig = trust.make_signature(cmd, None, ["DOCKER_TEST_TOKEN"], None, False)
+        stored = trust._cached_secrets[sig]["DOCKER_TEST_TOKEN"]
+        plaintext_bytes = BASE_SECRETS["DOCKER_TEST_TOKEN"].encode("utf-8")
+        assert stored != plaintext_bytes, (
+            "REGRESSION: cached secret is stored as raw plaintext bytes")
+        assert trust.cached_secrets(sig)["DOCKER_TEST_TOKEN"] == BASE_SECRETS["DOCKER_TEST_TOKEN"]
 
 
 def test_real_docker_test_token_value_is_actually_injected() -> None:

@@ -18,6 +18,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import mcp_server
+from vault_lib import store
+
+
+def _write_temp_env(content: str) -> str:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".env", delete=False, prefix="llm_vault_test_"
+    ) as fh:
+        fh.write(content)
+        return fh.name
 
 
 def test_unreachable_unc_path_does_not_raise() -> None:
@@ -85,6 +94,64 @@ def test_physical_drive_does_not_raise() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Residual secret leak in unrecognized_name/swallowed warnings: everything
+# before the first '=' on a line was carried verbatim with no check that
+# it's actually a plausible name -- for a swallowed URL-with-credentials
+# continuation line, that "name" can itself BE the secret.
+# ---------------------------------------------------------------------------
+
+def test_swallowed_credential_shaped_line_is_redacted_not_leaked() -> None:
+    """A URL-with-credentials line swallowed inside an unterminated-quote
+    continuation must not leak the credential into the parsed tuple."""
+    content = 'SECRET="unterminated value\nhttps://user:secretpass@host/path?a=b\nend"\n'
+    tmp_path = _write_temp_env(content)
+    try:
+        parsed = store.parse_env_file(Path(tmp_path))
+        swallowed = [item for item in parsed if item[0] == "swallowed"]
+        assert swallowed, f"expected a 'swallowed' entry, got: {parsed}"
+        for _, key in swallowed:
+            assert "secretpass" not in key, (
+                f"REGRESSION: credential leaked into swallowed key: {key!r}")
+            assert key.startswith("(line ") and "withheld" in key, (
+                f"expected a withheld placeholder, got: {key!r}")
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_unrecognized_hyphenated_name_still_shown_unredacted() -> None:
+    """Regression guard against over-redaction: a top-level hyphenated
+    name is exactly the kind of non-identifier-but-plausible-name text
+    unrecognized_name exists to surface unredacted, for the human to fix."""
+    content = "MY-VAR=somevalue\n"
+    tmp_path = _write_temp_env(content)
+    try:
+        parsed = store.parse_env_file(Path(tmp_path))
+        assert ("unrecognized_name", "MY-VAR") in parsed, (
+            f"expected unredacted 'MY-VAR', got: {parsed}")
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_install_migrate_warnings_never_contain_leaked_credential_text() -> None:
+    """End-to-end: _install_migrate_impl's returned warnings must not
+    contain the leaked credential for the same crafted repro file."""
+    content = (
+        "MY-VAR=somevalue\n"
+        'SECRET="unterminated value\n'
+        "https://user:secretpass@host/path?a=b\n"
+        'end"\n'
+    )
+    tmp_path = _write_temp_env(content)
+    try:
+        result = mcp_server._install_migrate_impl(tmp_path)
+        joined = " ".join(result.get("warnings", []))
+        assert "secretpass" not in joined, (
+            f"REGRESSION: credential leaked into install_migrate warnings: {joined!r}")
+    finally:
+        os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
 # Test runner (no pytest dependency required)
 # ---------------------------------------------------------------------------
 
@@ -108,6 +175,9 @@ if __name__ == "__main__":
         test_nonexistent_normal_path_returns_does_not_exist,
         test_real_file_passes_preamble,
         test_physical_drive_does_not_raise,
+        test_swallowed_credential_shaped_line_is_redacted_not_leaked,
+        test_unrecognized_hyphenated_name_still_shown_unredacted,
+        test_install_migrate_warnings_never_contain_leaked_credential_text,
     ]
 
     passed = [t for t in tests if _run(t)]

@@ -333,6 +333,30 @@ LOOKS_LIKE_ASSIGNMENT_RE = re.compile(r"^\s*(?:export\s+)?[^\s#=]+\s*=")
 # secret values never propagate into warning messages.
 _KEY_EXTRACTOR_RE = re.compile(r"^\s*(?:export\s+)?([^\s#=]+)\s*=")
 
+# Deliberately looser than VAR_NAME_RE -- still allows the intentionally-
+# invalid-but-name-like text (hyphens, a leading digit) that
+# unrecognized_name/swallowed exist to surface as a useful, unredacted
+# diagnostic. Only rejects text that clearly isn't a name at all: contains
+# ':', '/', '@', '?', or whitespace (the shape of a URL or credential
+# string), or is implausibly long for a variable name.
+_PLAUSIBLE_KEY_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
+
+
+def _safe_extracted_key(key: str, line_no: int) -> str:
+    """Returns `key` verbatim only if it plausibly IS a name. Guards
+    against the case _KEY_EXTRACTOR_RE's "everything before the first '='"
+    capture isn't actually a name -- e.g. a URL or credential string
+    swallowed from inside a multi-line value, where the text before the
+    first '=' can itself BE the secret (https://user:secretpass@host/path?a=b
+    extracts as 'https://user:secretpass@host/path?a'). Withholding this
+    instead of the extracted text protects the one channel
+    (unrecognized_name/swallowed) that's meant to carry only a name, never
+    a value, into a warning the caller returns to the AI agent with no
+    password or dialog."""
+    if _PLAUSIBLE_KEY_RE.fullmatch(key):
+        return key
+    return f"(line {line_no}, contents withheld)"
+
 
 def parse_env_file(path: Path) -> list:
     """Returns each line as one of:
@@ -379,7 +403,7 @@ def parse_env_file(path: Path) -> list:
         if not m:
             if LOOKS_LIKE_ASSIGNMENT_RE.match(line):
                 _km = _KEY_EXTRACTOR_RE.match(line)
-                _key = _km.group(1) if _km else "(unparseable name)"
+                _key = _safe_extracted_key(_km.group(1), i + 1) if _km else "(unparseable name)"
                 parsed.append(("unrecognized_name", _key))
             else:
                 parsed.append(("raw", line))
@@ -394,7 +418,7 @@ def parse_env_file(path: Path) -> list:
                 cont = lines[i]
                 if LOOKS_LIKE_ASSIGNMENT_RE.match(cont):
                     _km2 = _KEY_EXTRACTOR_RE.match(cont)
-                    _key2 = _km2.group(1) if _km2 else "(unparseable name)"
+                    _key2 = _safe_extracted_key(_km2.group(1), i + 1) if _km2 else "(unparseable name)"
                     parsed.append(("swallowed", _key2))
                 else:
                     parsed.append(("raw", cont))

@@ -383,12 +383,15 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
     auto_ok, invalidated_reason = trust.check(signature, command, cwd)
     trust_info = {}
 
-    # trust.check()'s own contract guarantees cached_secrets() is non-None
-    # whenever it returns auto_ok=True, so this should be unreachable in
-    # practice -- kept as a cheap belt-and-suspenders fallback to the real
-    # dialog rather than trusting that invariant to hold forever (e.g.
-    # across a future change to how/whether tool calls can overlap).
-    raw_secrets = trust.cached_secrets() if auto_ok else None
+    # trust.check()'s own contract guarantees cached_secrets(signature) is
+    # non-None whenever it returns auto_ok=True, so this should be
+    # unreachable in practice -- kept as a cheap belt-and-suspenders
+    # fallback to the real dialog rather than trusting that invariant to
+    # hold forever (e.g. across a future change to how/whether tool calls
+    # can overlap). On this path, raw_secrets is already the subset scoped
+    # to this signature's own only_vars, not the full vault -- see
+    # trust.cache_secrets()'s caller below, which filters before caching.
+    raw_secrets = trust.cached_secrets(signature) if auto_ok else None
 
     if auto_ok and raw_secrets is not None:
         trust_info["auto_allowed"] = True
@@ -414,7 +417,14 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
             return result
         if outcome["trust"]:
             trust.trust(signature, pre_hashes)
-            trust.cache_secrets(raw_secrets)
+            # Cache only what was actually approved for this signature, not
+            # the whole vault raw_secrets holds -- a command trusted with a
+            # narrow only_vars must not leave every other secret resident
+            # in memory for the rest of the session. Mirrors the filter
+            # applied below to what's actually injected.
+            to_cache = ({k: v for k, v in raw_secrets.items() if k in only_vars}
+                        if only_vars is not None else raw_secrets)
+            trust.cache_secrets(signature, to_cache)
             granted_note = (
                 "This exact command is now trusted for the rest of this session -- "
                 "future identical runs auto-allow with no password prompt, as long as "

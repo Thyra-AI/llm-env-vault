@@ -22,6 +22,7 @@ import re
 import sys
 import tkinter as tk
 import tkinter.font as tkfont
+from typing import Optional
 
 from . import store
 from .crypto import WrongPassword
@@ -245,6 +246,23 @@ def _center(root):
     root.geometry(f"{w}x{h}+{x}+{y}")
 
 
+def _branding_footer(parent):
+    """Small, muted, static 'Powered by Thyra AI' label -- the one
+    deliberate promotional touch in an otherwise strictly functional
+    consent UI. Deliberately non-interactive: no click target, no cursor
+    change, no hover feedback. A clickable link right below Allow/Deny in
+    a password-entry dialog would train users to expect clickable content
+    in these windows -- exactly the habit a lookalike phishing dialog
+    could exploit -- and risks stealing focus mid-password-entry. Returns
+    the frame un-packed/un-gridded; the caller places it with whichever
+    geometry manager its own window already uses.
+    """
+    frame = tk.Frame(parent, bg=WINDOW_BG)
+    label = tk.Label(frame, text="Powered by Thyra AI", font=(FONT_FAMILY, 9), fg=FG_MUTED, bg=WINDOW_BG)
+    label.pack(pady=(4, 10))
+    return frame
+
+
 def _show_error(root, err_label, text):
     # _center() was already called once when this screen was first laid
     # out, based on whatever text `err_label` held then (usually empty).
@@ -281,6 +299,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
 
     container = tk.Frame(root, bg=WINDOW_BG)
     container.pack()
+    _branding_footer(root).pack(side="bottom", fill="x")
 
     def clear():
         for w in container.winfo_children():
@@ -476,6 +495,7 @@ def remove_secret_dialog(var_name: str, placeholder: int):
 
     container = tk.Frame(root, bg=WINDOW_BG)
     container.pack()
+    _branding_footer(root).pack(side="bottom", fill="x")
 
     def clear():
         for w in container.winfo_children():
@@ -646,6 +666,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
 
     container = tk.Frame(root, bg=WINDOW_BG)
     container.pack()
+    _branding_footer(root).pack(side="bottom", fill="x")
 
     def clear():
         for w in container.winfo_children():
@@ -942,6 +963,41 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
     return outcome
 
 
+def _disclosure_mismatch(disclosed_names, actual_secret_names) -> Optional[str]:
+    """None if what was disclosed to the human matches what's actually in
+    the vault; otherwise a human-facing message naming the difference.
+
+    Exists because unlock_for_run_dialog's "Will expose N variable(s)" list
+    (for the only_vars=None, "expose everything" case) is necessarily built
+    from vault_index.json BEFORE the password is entered -- decrypting
+    upfront just to compute a disclosure list would defeat the point of
+    having a plaintext index at all. If vault.enc and vault_index.json have
+    ever diverged (e.g. a prior add_secret call where save_secrets
+    succeeded but save_index then failed -- reported as a partial_failure
+    at the time, but the desync itself isn't auto-reconciled), a variable
+    present in the vault but absent from the index would otherwise get
+    injected into the child process without ever having appeared in what
+    the human approved. This is the one point both sources are known --
+    right after decryption, before injection -- so it's the one place this
+    can be caught.
+
+    Pure and Tkinter-free on purpose, so it's directly unit-testable
+    without spinning up a real dialog."""
+    disclosed, actual = set(disclosed_names), set(actual_secret_names)
+    if disclosed == actual:
+        return None
+    parts = []
+    extra = sorted(actual - disclosed)
+    missing = sorted(disclosed - actual)
+    if extra:
+        parts.append(f"in the vault but not disclosed above: {', '.join(extra)}")
+    if missing:
+        parts.append(f"disclosed above but no longer in the vault: {', '.join(missing)}")
+    return ("The vault and vault_index.json have diverged -- refusing to run until this "
+            "is fixed (call sync_llm_env, or re-run add_secret/remove_secret for the "
+            "affected name(s)): " + "; ".join(parts))
+
+
 def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None,
                           trust_note: str = None):
     """Used by the run_with_env MCP tool. Returns an outcome dict:
@@ -1074,13 +1130,25 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
             _show_error(root, err, "Password cannot be empty.")
             return
         try:
-            outcome["secrets"] = store.load_secrets(password)
+            secrets = store.load_secrets(password)
         except WrongPassword as e:
             _show_error(root, err, str(e))
             return
         except (FileNotFoundError, ValueError) as e:
             _show_error(root, err, f"Vault error: {e}")
             return
+        if only_vars is None:
+            # Only meaningful for the "expose everything" case -- when
+            # only_vars is set, injection is already explicitly scoped by
+            # the caller, so a desync in the unused rest of the vault is
+            # irrelevant here. See _disclosure_mismatch's docstring for why
+            # this check has to happen here (the one point both the
+            # disclosed names and the real decrypted keys are known).
+            mismatch = _disclosure_mismatch(var_names, secrets.keys())
+            if mismatch:
+                _show_error(root, err, mismatch)
+                return
+        outcome["secrets"] = secrets
         outcome["trust"] = trust_var.get()
         root.destroy()
 
@@ -1091,6 +1159,9 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
     _button(btns, "Cancel", command=on_deny).pack(side="left", padx=6)
     _button(btns, "Unlock && Run", command=on_allow, kind="primary").pack(side="left", padx=6)
+    row += 1
+
+    _branding_footer(root).grid(row=row, column=0, columnspan=2)
 
     root.bind("<Escape>", lambda e: on_deny())
     root.bind("<Return>", lambda e: on_allow())
