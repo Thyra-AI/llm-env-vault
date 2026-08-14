@@ -30,7 +30,7 @@ your-project/.env          →  install_migrate  →   placeholders only
 run_with_env(["docker", "compose", "up"])  →  GUI password prompt  →  real env vars injected
 ```
 
-The vault lives in the llm-env-vault directory as a small set of files:
+The vault lives as a small set of files, in one of two places depending on how you installed: for a **manual setup**, next to this repo; for the **Claude Code plugin**, under `${CLAUDE_PLUGIN_DATA}/vault` — the one directory Claude Code documents as surviving `claude plugin update` (the same directory `plugin_launcher.py` already uses for its venv). This matters: a version-scoped plugin install directory does *not* survive an update, so the vault deliberately never lives there.
 
 | File | Contains | Safe to commit? | Agent may read? |
 |---|---|---|---|
@@ -227,6 +227,7 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
 ## Security notes
 
 - **Threat model:** protects against an AI agent (or anyone with filesystem read access) harvesting real values from files. Does **not** protect against someone who already has your master password, or an agent granted the ability to type into GUI windows on your behalf (e.g. computer-use tooling) — don't grant that.
+- **"The agent can edit this tool's own source" is a sharper non-boundary than it sounds.** `plugin_launcher.py` re-runs `pip install -r requirements.txt` automatically whenever that file's content changes, on every server start, in the persistent plugin data directory — a change survives a restart and a plugin update, not just the current process. An agent with filesystem write access to the installed plugin's files (the same access the "don't protect against editing source" threat model already excludes) can use that as a standing, auto-triggered code-execution path into the process that holds decrypted secrets, not a one-off edit. Confirmed by a red-team audit; not a new gap in the model, just worth naming explicitly.
 - **Never paste the master password (or any secret value) into chat with an AI assistant.** Type them only into the vault's own GUI windows.
 - **`run_with_env` output can contain real secrets.** Secrets are in the command's real environment; a command that echoes its environment or prints its config on error leaks them into the result — and into the client's transcript. Use `only_vars` to scope injection, and know what your command prints.
 - This is not an "intercept every file access" system — that would require a kernel-level filter driver or virtual filesystem (elevated install, fragile). Instead: files are placeholder-only by default, and real values only exist at moments a human deliberately triggered, each gated by the password prompt.

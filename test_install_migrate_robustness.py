@@ -125,6 +125,38 @@ def test_sync_target_file_refuses_to_wipe_every_managed_line_at_once() -> None:
         os.unlink(tmp_path)
 
 
+def test_sync_target_file_refuses_majority_removal_even_with_one_survivor() -> None:
+    """A red-team audit defeated the original all-or-nothing guard: an
+    index that happened to still share ONE overlapping name with a
+    target's managed set let 3 of 4 previously-live lines be wiped with no
+    refusal at all. The guard must fire on a majority removal, not only a
+    complete one."""
+    content = (
+        'STRIPE_SECRET_KEY="value 2"\n'
+        'DATABASE_PASSWORD="value 3"\n'
+        'OPENAI_API_KEY="value 4"\n'
+        'LOG_LEVEL="value 5"\n'
+    )
+    tmp_path = _write_temp_env(content)
+    try:
+        # Only LOG_LEVEL survives in the index -- 3 of 4 would be wiped.
+        try:
+            store.sync_target_file(
+                Path(tmp_path), index={"LOG_LEVEL": 5},
+                managed_names={"STRIPE_SECRET_KEY", "DATABASE_PASSWORD",
+                                "OPENAI_API_KEY", "LOG_LEVEL"})
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, (
+            "REGRESSION (NEW-2): a majority removal (3 of 4) with one "
+            "surviving overlapping name was not refused")
+        assert Path(tmp_path).read_text() == content, (
+            "REGRESSION: file was rewritten despite the refusal")
+    finally:
+        os.unlink(tmp_path)
+
+
 def test_sync_target_file_still_removes_a_single_variable_normally() -> None:
     """Regression guard: the mass-removal refusal must not block the
     ordinary, legitimate one-at-a-time removal this behavior exists for."""
@@ -227,6 +259,7 @@ if __name__ == "__main__":
         test_real_file_passes_preamble,
         test_physical_drive_does_not_raise,
         test_sync_target_file_refuses_to_wipe_every_managed_line_at_once,
+        test_sync_target_file_refuses_majority_removal_even_with_one_survivor,
         test_sync_target_file_still_removes_a_single_variable_normally,
         test_swallowed_credential_shaped_line_is_redacted_not_leaked,
         test_unrecognized_hyphenated_name_still_shown_unredacted,

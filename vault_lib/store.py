@@ -26,7 +26,28 @@ from pathlib import Path
 
 from . import crypto
 
-ROOT = Path(__file__).resolve().parent.parent
+# When installed as a Claude Code plugin, __file__ resolves inside a
+# version-scoped cache directory (e.g.
+# ~/.claude/plugins/cache/llm-env-vault/llm-env-vault/1.0.0/) that does NOT
+# survive `claude plugin update` -- confirmed by a red-team audit to
+# silently orphan vault.enc AND vault.salt in the old version's directory
+# on a routine update, with no warning and no recovery path (the salt goes
+# with it, so even a surviving vault.enc becomes permanently
+# undecryptable). CLAUDE_PLUGIN_DATA is exported by Claude Code into every
+# MCP server subprocess's environment automatically and is the one
+# directory documented to survive plugin updates -- plugin_launcher.py
+# already uses it for the venv, for exactly this reason. Store the vault
+# in a subdirectory of it whenever it's set, so the vault survives updates
+# the same way the venv does.
+#
+# Falls back to the old next-to-the-module location for a manual/dev
+# install (running mcp_server.py directly, no CLAUDE_PLUGIN_DATA set),
+# which was never affected by plugin updates in the first place.
+_PLUGIN_DATA_DIR = os.environ.get("CLAUDE_PLUGIN_DATA")
+ROOT = (Path(_PLUGIN_DATA_DIR).resolve() / "vault") if _PLUGIN_DATA_DIR \
+    else Path(__file__).resolve().parent.parent
+ROOT.mkdir(parents=True, exist_ok=True)
+
 SALT_FILE = ROOT / "vault.salt"
 SECRETS_FILE = ROOT / "vault.enc"
 INDEX_FILE = ROOT / "vault_index.json"
@@ -119,10 +140,24 @@ def load_index() -> dict:
         raise ValueError(f"vault_index.json is corrupted: {e}") from None
     if not isinstance(data, dict):
         raise ValueError("vault_index.json must contain a JSON object of VAR_NAME -> number.")
+    seen_placeholders = {}
     for name, placeholder in data.items():
         validate_var_name(name)
         if not isinstance(placeholder, int) or isinstance(placeholder, bool) or placeholder < 1:
             raise ValueError(f"vault_index.json: {name!r} has a non-positive-integer placeholder.")
+        # Two names sharing one placeholder number would make llm.env's
+        # VAR="value N" lines ambiguous -- both names would read as the
+        # same value, silently breaking the one-to-one mapping the whole
+        # placeholder scheme depends on (found by a red-team audit: a
+        # hand-edited or corrupted index with a duplicate number validated
+        # cleanly and produced exactly this).
+        if placeholder in seen_placeholders:
+            raise ValueError(
+                f"vault_index.json: placeholder number {placeholder} is used by both "
+                f"{seen_placeholders[placeholder]!r} and {name!r} -- each variable must "
+                f"have its own unique placeholder number."
+            )
+        seen_placeholders[placeholder] = name
     return data
 
 
@@ -462,15 +497,25 @@ def sync_target_file(path: Path, index: dict, managed_names, force_names=None) -
     # Anomaly guard: a legitimate resync comments out managed variables one
     # at a time -- each remove_secret call removes exactly one name from
     # the index, so at most one previously-live line per target typically
-    # goes stale between resyncs. If EVERY currently-live managed
-    # placeholder in this file would be commented out in a single call,
-    # that's a far more likely sign the vault/index was replaced, restored
-    # from an old backup, or corrupted out from under this file than that
-    # a human genuinely removed every one of this target's secrets in the
-    # same breath. resync_targets needs no password by design specifically
-    # because it can only ever touch placeholder text -- but silently
-    # wiping every managed line in a file at once is still a real,
-    # unattended data-loss event worth refusing rather than applying.
+    # goes stale between resyncs. If a LARGE FRACTION of the currently-live
+    # managed placeholders in this file would be commented out in a single
+    # call, that's a far more likely sign the vault/index was replaced,
+    # restored from an old backup, or corrupted out from under this file
+    # than that a human genuinely removed most of this target's secrets in
+    # the same breath. resync_targets needs no password by design
+    # specifically because it can only ever touch placeholder text -- but
+    # silently wiping most of a file's managed lines at once is still a
+    # real, unattended data-loss event worth refusing rather than applying.
+    #
+    # Deliberately a fraction (at least half), not "every single one" --
+    # confirmed by a red-team audit that an all-or-nothing check is trivial
+    # to defeat: an index that happens to still share even one overlapping
+    # name with this target's managed set (e.g. a corrupted/replaced index
+    # that coincidentally retains one old name) let 3 of 4 lines be wiped
+    # with no refusal. A single genuine removal (1 of N, however small N
+    # is) must still always pass -- that's the behavior this guard exists
+    # to leave alone -- so the fraction check is gated on at least 2
+    # removals to begin with.
     currently_live, would_be_removed = set(), set()
     for line in lines:
         m = ENV_LINE_RE.match(line)
@@ -480,15 +525,15 @@ def sync_target_file(path: Path, index: dict, managed_names, force_names=None) -
                 currently_live.add(name)
                 if name not in index and name not in force_names:
                     would_be_removed.add(name)
-    if len(currently_live) >= 2 and would_be_removed == currently_live:
+    if len(would_be_removed) >= 2 and len(would_be_removed) * 2 >= len(currently_live):
         raise ValueError(
-            f"Refusing to resync {path}: this would comment out ALL "
-            f"{len(currently_live)} currently-managed variable(s) "
-            f"({', '.join(sorted(currently_live))}) in this file at once, which "
-            f"looks like the vault/index was replaced or corrupted rather than "
-            f"a genuine one-at-a-time remove_secret. Re-run install_migrate to "
-            f"re-confirm this target with a human in the loop, or fix the "
-            f"vault/index first if this is unexpected."
+            f"Refusing to resync {path}: this would comment out "
+            f"{len(would_be_removed)} of {len(currently_live)} currently-managed "
+            f"variable(s) ({', '.join(sorted(would_be_removed))}) in this file at "
+            f"once, which looks like the vault/index was replaced or corrupted "
+            f"rather than a genuine one-at-a-time remove_secret. Re-run "
+            f"install_migrate to re-confirm this target with a human in the loop, "
+            f"or fix the vault/index first if this is unexpected."
         )
 
     out_lines = []

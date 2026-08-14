@@ -38,6 +38,7 @@ Runs under pytest (`pytest test_trust.py -q`) or standalone
 """
 import contextlib
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -46,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import mcp_server  # noqa: E402
 from vault_lib import gui, store, trust  # noqa: E402
+REPO_ROOT = Path(__file__).parent  # noqa: E402
 
 TEST_PASSWORD = "regression-test-password-123"
 BASE_SECRETS = {"DOCKER_TEST_TOKEN": "tok-abc-123", "OTHER_SECRET": "other-xyz-789"}
@@ -684,6 +686,62 @@ def test_real_docker_test_token_value_is_actually_injected() -> None:
             r2 = mcp_server._run_with_env_impl(list(cmd), None, False, None, ["DOCKER_TEST_TOKEN"])
             assert r2.get("auto_allowed") is True
             assert r2["stdout"].strip() == BASE_SECRETS["DOCKER_TEST_TOKEN"]
+
+
+# ---------------------------------------------------------------------------
+# NEW-1: when installed as a plugin, the vault must live under
+# CLAUDE_PLUGIN_DATA (the one directory Claude Code documents as surviving
+# `claude plugin update`) instead of next to the module -- a red-team audit
+# found the old behavior silently orphans vault.enc/vault.salt in a
+# version-scoped plugin cache directory on a routine update, with no
+# warning and no recovery. Run in a real subprocess (not importlib.reload
+# in-process) so this exercises exactly what a fresh plugin_launcher.py ->
+# mcp_server.py process actually sees, and so it can't perturb the
+# already-imported `store` module the rest of this suite depends on.
+# ---------------------------------------------------------------------------
+
+def test_root_uses_plugin_data_dir_when_set() -> None:
+    with tempfile.TemporaryDirectory(prefix="fake_plugin_data_") as data_dir:
+        env = {**os.environ, "CLAUDE_PLUGIN_DATA": data_dir}
+        proc = subprocess.run(
+            [sys.executable, "-c", "from vault_lib import store; print(store.ROOT)"],
+            cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, check=True)
+        root = proc.stdout.strip()
+        expected = str(Path(data_dir).resolve() / "vault")
+        assert root == expected, (
+            f"REGRESSION (NEW-1): with CLAUDE_PLUGIN_DATA set, store.ROOT should "
+            f"live under it, got {root!r}, expected {expected!r}")
+        assert Path(root).is_dir(), "store.py must create ROOT if it doesn't exist yet"
+
+
+def test_root_falls_back_to_module_location_without_plugin_data_dir() -> None:
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PLUGIN_DATA"}
+    proc = subprocess.run(
+        [sys.executable, "-c", "from vault_lib import store; print(store.ROOT)"],
+        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, check=True)
+    root = proc.stdout.strip()
+    assert root == str(REPO_ROOT.resolve()), (
+        f"REGRESSION: manual/dev install (no CLAUDE_PLUGIN_DATA) must keep "
+        f"the old next-to-the-module vault location, got {root!r}")
+
+
+# ---------------------------------------------------------------------------
+# NEW-3: two variable names sharing one placeholder number must be rejected
+# on load, not silently accepted -- a duplicate number makes llm.env's
+# VAR="value N" lines ambiguous between the two names.
+# ---------------------------------------------------------------------------
+
+def test_load_index_rejects_duplicate_placeholder_numbers() -> None:
+    with isolated_vault():
+        store.INDEX_FILE.write_text('{"NAME_A": 1, "NAME_B": 1}')
+        try:
+            store.load_index()
+            raised = False
+        except ValueError as e:
+            raised = True
+            msg = str(e)
+        assert raised, "REGRESSION (NEW-3): duplicate placeholder numbers were accepted"
+        assert "NAME_A" in msg and "NAME_B" in msg and "1" in msg
 
 
 # ---------------------------------------------------------------------------
