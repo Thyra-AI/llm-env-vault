@@ -746,6 +746,38 @@ def test_load_index_rejects_duplicate_placeholder_numbers() -> None:
 
 
 # ---------------------------------------------------------------------------
+# NEW-1 hardening: if CLAUDE_PLUGIN_DATA ever went unset for a real plugin
+# install, ROOT would silently fall back to the update-destroying plugin
+# cache location -- the exact NEW-1 failure, reintroduced. create_secrets_vault
+# refuses rather than silently creating a new vault there.
+# ---------------------------------------------------------------------------
+
+def test_looks_like_plugin_cache_path_detects_the_real_layout() -> None:
+    assert store._looks_like_plugin_cache_path(
+        Path.home() / ".claude" / "plugins" / "cache" / "llm-env-vault" /
+        "llm-env-vault" / "1.0.0" / "vault_lib" / "store.py")
+    assert not store._looks_like_plugin_cache_path(REPO_ROOT / "vault_lib" / "store.py")
+
+
+def test_create_secrets_vault_refuses_inside_plugin_cache_without_plugin_data() -> None:
+    with tempfile.TemporaryDirectory(prefix="fake_repo_") as fake_repo:
+        fake_plugin_dir = Path(fake_repo) / "plugins" / "cache" / "llm-env-vault" / "1.0.0"
+        fake_vault_lib = fake_plugin_dir / "vault_lib"
+        fake_vault_lib.mkdir(parents=True)
+        for name in ("__init__.py", "store.py", "crypto.py"):
+            (fake_vault_lib / name).write_bytes((REPO_ROOT / "vault_lib" / name).read_bytes())
+        (fake_plugin_dir / "mcp_server.py").touch()  # not imported, just makes the layout plausible
+
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PLUGIN_DATA"}
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             "from vault_lib import store; store.create_secrets_vault('irrelevant-password')"],
+            cwd=str(fake_plugin_dir), env=env, capture_output=True, text=True)
+        assert proc.returncode != 0, "REGRESSION (NEW-1 hardening): vault creation was not refused"
+        assert "CLAUDE_PLUGIN_DATA" in proc.stderr and "plugins/cache" in proc.stderr.replace("\\", "/")
+
+
+# ---------------------------------------------------------------------------
 # Ciphertext-length padding: vault.enc's length used to reveal the
 # aggregate byte size of every real secret value combined. save_secrets
 # now pads to a block multiple before encrypting; load_secrets must still
@@ -789,6 +821,21 @@ def test_load_secrets_still_reads_an_older_unpadded_vault() -> None:
         store.SECRETS_FILE.write_bytes(unpadded_token)
         assert store.load_secrets(TEST_PASSWORD) == legacy_secrets, (
             "REGRESSION: an older, unpadded vault.enc failed to load")
+
+
+def test_round_trips_across_every_possible_pad_length() -> None:
+    """Sweeps enough value lengths to hit every pad_len from 1 to 64,
+    including the four (9, 10, 13, 32) that collide with JSON whitespace
+    bytes (tab/LF/CR/space) -- those make the padded bytes parse as valid
+    JSON on the FIRST try (trailing whitespace is legal), not the fallback
+    path, per a code review that flagged this as worth pinning down
+    explicitly rather than leaving implicit in the other padding tests."""
+    with isolated_vault(secrets={}):
+        for value_len in range(0, 80):
+            secrets = {"V": "x" * value_len}
+            store.save_secrets(TEST_PASSWORD, secrets)
+            assert store.load_secrets(TEST_PASSWORD) == secrets, (
+                f"REGRESSION: round-trip failed for value_len={value_len}")
 
 
 # ---------------------------------------------------------------------------

@@ -576,6 +576,22 @@ def sync_target_file(path: Path, index: dict, managed_names, force_names=None) -
     return conflicts
 
 
+def _looks_like_plugin_cache_path(path: Path) -> bool:
+    """True if `path` sits inside a Claude Code plugin cache directory
+    (".../plugins/cache/...") -- the version-scoped location that does NOT
+    survive `claude plugin update` (see the ROOT comment above this
+    module's globals). Used only as a last-resort safety net in
+    create_secrets_vault: if CLAUDE_PLUGIN_DATA isn't set (so ROOT fell
+    back to next to the module) AND the module itself is running from
+    inside a plugin cache path, creating a brand-new vault there would
+    silently repeat the exact update-destroying failure the ROOT
+    relocation exists to close -- refuse instead of doing it quietly, in
+    case a future Claude Code version ever stops exporting
+    CLAUDE_PLUGIN_DATA (or exports it under a different name)."""
+    parts = {p.lower() for p in path.parts}
+    return "plugins" in parts and "cache" in parts
+
+
 def create_secrets_vault(password: str) -> None:
     """First-time setup: new salt, empty encrypted secrets store.
 
@@ -584,6 +600,17 @@ def create_secrets_vault(password: str) -> None:
     surviving backup copy of vault.enc permanently undecryptable, even
     with the correct password.
     """
+    if not _PLUGIN_DATA_DIR and _looks_like_plugin_cache_path(Path(__file__).resolve()):
+        raise RuntimeError(
+            "Refusing to create a new vault here: this looks like a Claude Code "
+            "plugin install (running from inside a plugins/cache directory), but "
+            "CLAUDE_PLUGIN_DATA isn't set in this process's environment. Creating "
+            "the vault next to the module in that state would silently place it "
+            "somewhere `claude plugin update` destroys later -- exactly the "
+            "failure this project's vault-location logic exists to avoid. If "
+            "you're intentionally running a manual/dev copy from inside that "
+            "path, move it outside .claude/plugins/cache first."
+        )
     if SALT_FILE.exists():
         raise RuntimeError(
             "vault.salt already exists but vault.enc is missing. Refusing to "
@@ -676,9 +703,14 @@ def load_secrets(password: str) -> dict:
     # this repo's own), so decryption has to accept both shapes: try the
     # raw bytes first (an older, unpadded vault is exactly valid JSON as-is
     # and this succeeds immediately with no fallback needed), and only fall
-    # back to stripping padding if that fails. A vault written by the
-    # current code will fail the first parse (trailing pad bytes break JSON)
-    # and succeed on the second. Every vault gets padded on its next save
+    # back to stripping padding if that fails. Not "the current code always
+    # takes the second path" -- when the padding length happens to equal a
+    # JSON whitespace byte (tab/LF/CR/space -- 9, 10, 13, or 32), the padded
+    # bytes are indistinguishable from ordinary trailing whitespace and the
+    # FIRST parse already succeeds with the correct value; the fallback only
+    # fires for the other ~94% of possible padding lengths. Either path
+    # returns the same correct dict -- this is a code-path note, not a
+    # correctness distinction. Every vault gets padded on its next save
     # regardless of which path loaded it.
     try:
         return json.loads(plaintext.decode("utf-8"))

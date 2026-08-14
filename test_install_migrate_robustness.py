@@ -125,6 +125,23 @@ def test_sync_target_file_refuses_to_wipe_every_managed_line_at_once() -> None:
         os.unlink(tmp_path)
 
 
+def test_sync_target_file_removes_the_only_managed_variable_normally() -> None:
+    """Edge case a code review flagged explicitly: a target with exactly
+    ONE managed variable, now removed from the vault -- a single genuine
+    removal of 1-of-1 must still always pass, the same as 1-of-N for any
+    other N, never treated as a 100%-wiped anomaly."""
+    content = 'ONLY_VAR="value 1"\n'
+    tmp_path = _write_temp_env(content)
+    try:
+        conflicts = store.sync_target_file(
+            Path(tmp_path), index={}, managed_names={"ONLY_VAR"})
+        assert conflicts == []
+        result = Path(tmp_path).read_text()
+        assert "ONLY_VAR was removed from the vault" in result
+    finally:
+        os.unlink(tmp_path)
+
+
 def test_sync_target_file_refuses_majority_removal_even_with_one_survivor() -> None:
     """A red-team audit defeated the original all-or-nothing guard: an
     index that happened to still share ONE overlapping name with a
@@ -259,6 +276,7 @@ if __name__ == "__main__":
         test_real_file_passes_preamble,
         test_physical_drive_does_not_raise,
         test_sync_target_file_refuses_to_wipe_every_managed_line_at_once,
+        test_sync_target_file_removes_the_only_managed_variable_normally,
         test_sync_target_file_refuses_majority_removal_even_with_one_survivor,
         test_sync_target_file_still_removes_a_single_variable_normally,
         test_swallowed_credential_shaped_line_is_redacted_not_leaked,
