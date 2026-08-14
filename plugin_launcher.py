@@ -24,16 +24,26 @@ script doesn't need them passed as args, and doesn't do anything if
 they're absent (falls back to running next to itself, so `python
 plugin_launcher.py` still works for local testing outside a plugin
 install).
+
+If the plugin's tools never show up as available, check
+${CLAUDE_PLUGIN_DATA}/provision.log first. Confirmed to happen in
+practice: an MCP client's server-startup timeout can kill this launcher
+mid-install (venv created, but `pip install` never finishes) -- from the
+outside that looks identical to the server simply never having started,
+with no error visible anywhere else. provision.log captures the exact pip
+output for whichever attempt ran last, successful or not.
 """
 import hashlib
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 PLUGIN_ROOT = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", Path(__file__).resolve().parent))
 DATA_DIR = Path(os.environ.get("CLAUDE_PLUGIN_DATA", PLUGIN_ROOT / ".venv-data"))
 VENV_DIR = DATA_DIR / "venv"
+INSTALL_LOG = DATA_DIR / "provision.log"
 
 # The hash-pinned lockfile is Windows-only (the platform pywin32 -- a
 # transitive mcp[cli] dependency -- actually has wheels for, and this
@@ -59,6 +69,48 @@ def _venv_python() -> Path:
 
 def _requirements_hash() -> str:
     return hashlib.sha256(REQUIREMENTS.read_bytes()).hexdigest()
+
+
+def _log(message: str) -> None:
+    """Appends a timestamped line to provision.log. Best-effort -- a
+    logging failure (e.g. DATA_DIR unwritable) must never take down
+    provisioning itself, so this only ever swallows OSError, never raises."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(INSTALL_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+    except OSError:
+        pass
+
+
+def _run_logged(cmd: list, step: str) -> None:
+    """Runs `cmd`, logs its full output to provision.log regardless of
+    outcome, and raises a clean RuntimeError pointing at that log on
+    failure -- never a bare, unlogged CalledProcessError. Used for BOTH
+    venv creation and the pip install, so a venv-creation failure (disk
+    full, missing ensurepip, permission denied on DATA_DIR) gets the same
+    diagnosable trail as a dependency-install failure, not a raw traceback
+    while the log stays empty.
+
+    `text=True` decoding is pinned to UTF-8 with errors replaced rather
+    than the platform default (on Windows, the ANSI codepage) -- otherwise
+    non-ASCII bytes in the subprocess's own output (an accented username
+    in a path, non-ASCII text in a dependency's error message) could raise
+    an uncaught UnicodeDecodeError before this function ever gets a chance
+    to log anything, defeating the entire point of it existing."""
+    _log(f"Running ({step}): {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace")
+    if result.stdout:
+        _log(result.stdout.rstrip())
+    if result.returncode != 0:
+        if result.stderr:
+            _log(result.stderr.rstrip())
+        _log(f"FAILED ({step}) with exit code {result.returncode}")
+        raise RuntimeError(
+            f"llm-env-vault: {step} failed (exit code {result.returncode}). "
+            f"Full output in {INSTALL_LOG}."
+        )
 
 
 def _install_marker() -> str:
@@ -96,7 +148,20 @@ def _ensure_venv() -> Path:
     """Creates (or recreates, if the install marker -- see _install_marker
     -- changed since last time) the venv in the plugin's persistent data
     directory. A no-op stat check on every normal startup once it's
-    already provisioned."""
+    already provisioned.
+
+    Confirmed in practice (not hypothetical): an MCP client's server-
+    startup timeout can kill this process mid-install -- the venv gets
+    created (fast) but `pip install` never finishes, and no error surfaces
+    anywhere a user would think to look. STAMP_FILE only being written
+    AFTER a successful install already meant the next run would retry
+    rather than silently trust a half-finished venv -- but a python.exe
+    that already works is skipped on retry instead of being recreated
+    (faster on a retry, and the actual slow part was never venv creation),
+    and every attempt's pip output -- success or failure -- goes to
+    provision.log, so a repeatedly-interrupted install is diagnosable
+    without inspecting internal files by hand.
+    """
     python = _venv_python()
     current_marker = _install_marker()
     up_to_date = (
@@ -108,15 +173,25 @@ def _ensure_venv() -> Path:
         return python
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if python.exists() and not STAMP_FILE.exists():
+        _log("Found a venv with no completed-install stamp -- a previous "
+             "provisioning attempt likely didn't finish (killed by a startup "
+             "timeout, ran out of disk, etc.). Retrying.")
     print(f"[llm-env-vault] Setting up its Python environment in {VENV_DIR} "
           f"(first run, or dependencies changed since last run) -- this "
-          f"can take a little while the first time.", file=sys.stderr, flush=True)
-    subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)], check=True)
-    pip_cmd = [str(python), "-m", "pip", "install", "--quiet"]
+          f"can take a little while the first time. Progress: {INSTALL_LOG}",
+          file=sys.stderr, flush=True)
+
+    if not python.exists():
+        _run_logged([sys.executable, "-m", "venv", str(VENV_DIR)], "venv creation")
+
+    pip_cmd = [str(python), "-m", "pip", "install"]
     if REQUIREMENTS is _LOCKFILE:
         pip_cmd.append("--require-hashes")
     pip_cmd += ["-r", str(REQUIREMENTS)]
-    subprocess.run(pip_cmd, check=True)
+    _run_logged(pip_cmd, "dependency install")
+
+    _log("Provisioning succeeded.")
     STAMP_FILE.write_text(current_marker)
     return python
 
