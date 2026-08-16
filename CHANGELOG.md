@@ -7,6 +7,35 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.4.1] — 2026-08-17
+
+Follow-up to 1.4.0 from hands-on use: the executable-only trust warning fired on almost every
+command, and a warning nobody reads is a warning that is not there.
+
+### Added
+
+- **Implicit config files are now drift-monitored.** Tools that read configuration from the working
+  directory without naming it on the command line — `docker`/`docker compose` (compose files,
+  `.env`, `Dockerfile`), `make` (`Makefile`), `npm`/`pnpm`/`yarn` (`package.json`), `cargo`, `go`,
+  `terraform`, `pytest`, `poetry`, `gradle`, `mvn` and others — have those files hashed alongside
+  the executable. Editing one now revokes trust. This closes the B1 gap itself rather than only
+  reporting it: previously `docker compose up` monitored the `docker` binary and nothing else, so
+  the file that decides what the command actually does could be rewritten under a live grant.
+
+### Changed
+
+- **The amber "only the executable is monitored" warning is now reserved for cases that warrant
+  it.** Executable-only coverage is unremarkable for `ls`, `git push` or `python -c "..."` — none
+  read project configuration, so there is nothing a human could wrongly believe is protected.
+  Alarming on all of them trains people to dismiss the warning, and then it is gone for the one
+  case it exists for. It now fires only when a tool known to read config is run with no config file
+  found to monitor, which means either the command is running somewhere unexpected or its config
+  lives somewhere not covered. **The grant note still enumerates exactly what is monitored for
+  every command** — quieting the alarm does not cost accuracy, only volume.
+
+Honest limit: a custom tool with its own config file gets no amber warning, because it cannot be
+recognised. That is the price of not crying wolf, and why the enumeration stays unconditional.
+
 ## [1.4.0] — 2026-08-16
 
 **Vault format change.** v2 is the format for all new vaults. Existing v1 vaults keep working
@@ -200,6 +229,7 @@ Pre-1.0.0 history is a long series of security fixes found by repeated red-team 
 credential-shaped text in parse warnings, consent before registering unowned targets, and honest
 reporting of partial writes. See `git log` for the full sequence.
 
+[1.4.1]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.4.1
 [1.4.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.4.0
 [1.3.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.3.0
 [1.2.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.2.0

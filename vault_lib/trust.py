@@ -190,6 +190,84 @@ def _resolve_argv0(command, cwd) -> Optional[Path]:
         return None
 
 
+# Tools that conventionally read configuration from the working directory
+# without ever naming it on the command line, mapped to the filenames they
+# look for. `docker compose up` is the canonical case and the one that
+# motivated all of this: the compose file decides what the command actually
+# does, and nothing on the command line points at it.
+#
+# These files are hashed alongside the executable, so editing one DOES revoke
+# trust. That is strictly better than warning that we cannot see it: the
+# original B1 fix made the grant note honest about the gap, and this closes
+# the gap itself for the cases we can recognise.
+#
+# Deliberately conservative. A name here means "changing this file changes
+# what the command does", so a wrong entry costs the user spurious
+# re-prompts. Unknown tools simply get no implicit coverage -- the grant note
+# still enumerates exactly what is monitored, so nothing is misrepresented.
+_IMPLICIT_CONFIG_FILES = {
+    "docker": ("docker-compose.yml", "docker-compose.yaml", "compose.yml",
+               "compose.yaml", "docker-compose.override.yml",
+               "docker-compose.override.yaml", ".env", "Dockerfile"),
+    "docker-compose": ("docker-compose.yml", "docker-compose.yaml",
+                       "compose.yml", "compose.yaml",
+                       "docker-compose.override.yml", ".env"),
+    "podman": ("docker-compose.yml", "compose.yml", "compose.yaml",
+               "Containerfile", "Dockerfile", ".env"),
+    "podman-compose": ("docker-compose.yml", "compose.yml", "compose.yaml", ".env"),
+    "npm": ("package.json", ".npmrc"),
+    "npx": ("package.json", ".npmrc"),
+    "pnpm": ("package.json", "pnpm-workspace.yaml", ".npmrc"),
+    "yarn": ("package.json", ".yarnrc.yml", ".yarnrc"),
+    "make": ("Makefile", "makefile", "GNUmakefile"),
+    "cargo": ("Cargo.toml",),
+    "go": ("go.mod",),
+    "terraform": ("main.tf", "terraform.tfvars", "variables.tf"),
+    "pytest": ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"),
+    "tox": ("tox.ini", "pyproject.toml"),
+    "poetry": ("pyproject.toml", "poetry.lock"),
+    "gradle": ("build.gradle", "build.gradle.kts", "gradle.properties"),
+    "mvn": ("pom.xml",),
+    "ansible-playbook": ("ansible.cfg",),
+    "serverless": ("serverless.yml", "serverless.yaml"),
+    "vagrant": ("Vagrantfile",),
+    "skaffold": ("skaffold.yaml", "skaffold.yml"),
+}
+
+
+def _implicit_config_paths(command, cwd):
+    """Config files this command reads from cwd without naming them.
+
+    Only files that actually exist are returned -- a name that is merely
+    conventional but absent is not monitored, because a file that does not
+    exist cannot drift and adding it would just make the monitored list lie
+    in the other direction.
+    """
+    if not command:
+        return []
+    stem = Path(command[0]).stem.lower()
+    names = _IMPLICIT_CONFIG_FILES.get(stem)
+    if not names:
+        return []
+    base = Path(cwd) if cwd else Path.cwd()
+    found = []
+    for name in names:
+        candidate = base / name
+        try:
+            if candidate.is_file():
+                found.append(candidate.resolve())
+        except OSError:
+            continue
+    return found
+
+
+def _reads_implicit_config(command) -> bool:
+    """True if this is a tool known to read config it does not name."""
+    if not command:
+        return False
+    return Path(command[0]).stem.lower() in _IMPLICIT_CONFIG_FILES
+
+
 def _candidate_paths(command, cwd):
     """Returns (paths, truncated). paths is every command argument that
     resolves to an existing regular file, PLUS the resolved program being
@@ -216,6 +294,15 @@ def _candidate_paths(command, cwd):
         if resolved not in seen:
             seen.add(resolved)
             paths.append(resolved)
+    # Config the command reads without naming it -- a compose file, a
+    # Makefile, a package.json. Monitoring these is what makes trust on
+    # `docker compose up` mean something: without it the only thing watched
+    # is the docker binary, and the file that decides what the command
+    # actually does could be rewritten freely under a live grant.
+    for extra in _implicit_config_paths(command, cwd):
+        if extra not in seen:
+            seen.add(extra)
+            paths.append(extra)
     argv0 = _resolve_argv0(command, cwd)
     if argv0 is not None and argv0 not in seen:
         seen.add(argv0)
@@ -285,16 +372,15 @@ def monitored_summary(command, cwd) -> tuple:
     to, including the resolved argv0 when found).
 
     is_executable_only: True when the ONLY monitored path is the resolved
-    argv0 and zero command-line file arguments resolved to real files.  This
-    is the "docker compose up" shape -- the compose file is not named on the
-    command line, so drift detection covers only the executable binary.
-    False in all other cases:
-      - monitored_paths is empty (nothing monitored at all -- a distinct
-        condition that unmonitored_file_warning already reports separately);
-      - at least one non-argv0 file argument is also monitored.
-    Lane 4 uses this flag to decide whether to show an "only the executable
-    is monitored" amber warning; an unresolvable argv0 (paths==[]) must not
-    take that branch.
+    argv0 and nothing else resolved -- no file argument, no recognised
+    implicit config. False when monitored_paths is empty (nothing monitored
+    at all, which unmonitored_file_warning reports separately) or when
+    anything besides the binary is covered.
+
+    NOTE: this is a statement of fact about coverage, and the grant note uses
+    it to enumerate honestly. It is NOT the trigger for the amber consent
+    warning -- see should_warn_executable_only() for that, and why the two
+    differ.
     """
     paths, _ = _candidate_paths(command, cwd)
     if not paths:
@@ -309,6 +395,35 @@ def monitored_summary(command, cwd) -> tuple:
         and paths[0] == argv0
     )
     return monitored_strs, is_executable_only
+
+
+def should_warn_executable_only(command, cwd) -> bool:
+    """Whether the amber "only the executable is monitored" consent warning
+    is worth showing for this command.
+
+    Separate from is_executable_only on purpose. Executable-only coverage is
+    the NORMAL, unremarkable case for most commands: `ls`, `git push`,
+    `echo hello`, `python -c "..."` read no project configuration, so there
+    is nothing a human could wrongly believe is protected. Alarming on all of
+    them trains people to click past the warning -- and then it is no longer
+    there for the one case that matters, which defeats the fix it came from.
+
+    The warning is meaningful only where the human plausibly assumes coverage
+    they do not have. That is the tool-reads-config-it-does-not-name shape,
+    and for the tools we recognise the config is now monitored outright, so
+    the warning fires in the leftover case: a known config-reading tool where
+    no config file was found to watch. That is genuinely worth a second look
+    -- either the command runs somewhere unexpected, or its config lives
+    somewhere we are not covering.
+
+    Unrecognised tools are deliberately silent here. The grant note still
+    enumerates precisely what is monitored, so nothing is misrepresented; we
+    simply do not raise an alarm we cannot justify. The cost of that choice is
+    a custom tool with its own config file getting no amber warning, which is
+    why the enumeration in the note stays unconditional.
+    """
+    _paths, is_executable_only = monitored_summary(command, cwd)
+    return is_executable_only and _reads_implicit_config(command)
 
 
 def _vault_fingerprint() -> Optional[str]:

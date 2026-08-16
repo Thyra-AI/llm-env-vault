@@ -871,11 +871,19 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
         _dialog_parts = []
         if invalidated_reason:
             _dialog_parts.append(invalidated_reason)
-        if is_executable_only:
+        # Warn only where a human could plausibly believe in coverage that is
+        # not there. Executable-only monitoring is unremarkable for `ls`,
+        # `git push` or `python -c "..."` -- alarming on every one of those
+        # teaches people to dismiss the warning, and then it is gone for the
+        # case it exists for. trust.should_warn_executable_only() draws that
+        # line; the grant note below still enumerates unconditionally, so the
+        # quieter dialog never costs accuracy.
+        if trust.should_warn_executable_only(command, cwd):
             _dialog_parts.append(
-                "Note: only the executable binary is drift-monitored for this "
-                "command -- no config files are named on the command line, so "
-                "changes to compose files or scripts will NOT revoke trust.")
+                "Note: this command reads configuration from its working "
+                "directory, but no such config file was found to monitor. Only "
+                "the executable binary is drift-monitored, so changes to "
+                "whatever config it does load will NOT revoke trust.")
         dialog_trust_note = " ".join(_dialog_parts) if _dialog_parts else None
         outcome = gui.unlock_for_run_dialog(subprocess.list2cmdline(command),
                                              materialize_path=str(materialized_path)
@@ -901,17 +909,25 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
             # Derive the TTL string from the constant so it can't drift.
             _ttl_hours = trust._TRUST_TTL_SECONDS // 3600
             if is_executable_only:
-                # "docker compose up" shape: only the binary is tracked.
-                # Make the limited coverage explicit in the tool result.
+                # Only the binary is tracked. State that plainly either way --
+                # the enumeration is unconditional so the note never overstates
+                # coverage -- but reserve the pointed warning for tools that
+                # actually read config, so it stays worth reading.
                 _exe_path = monitored_paths[0]
+                _coverage = (
+                    "This command reads configuration from its working "
+                    "directory, but no such config file was found to monitor, "
+                    "so changes to whatever it does load will NOT revoke trust."
+                    if trust.should_warn_executable_only(command, cwd) else
+                    "Nothing else on this command line resolved to a file, so "
+                    "nothing else is monitored.")
                 granted_note = (
                     f"This exact command is now trusted for the next "
                     f"{_ttl_hours} hours (or until this server restarts, "
                     f"whichever comes first). "
                     f"Future identical runs auto-allow with no password prompt. "
                     f"Drift-monitored: only the executable ({_exe_path}). "
-                    f"No config files are named on this command line -- changes "
-                    f"to compose files or scripts will NOT revoke trust.")
+                    f"{_coverage}")
             elif monitored_paths:
                 _path_list = ", ".join(monitored_paths)
                 granted_note = (

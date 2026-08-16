@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 import mcp_server  # noqa: E402
+from vault_lib import trust  # noqa: E402
 from test_trust import (  # noqa: E402
     isolated_vault,
     fake_dialog,
@@ -292,40 +293,100 @@ def test_integration_straddling_boundary_is_redacted() -> None:
 # the checkbox) and the tool-result trust_note say so explicitly.
 # ---------------------------------------------------------------------------
 
-def test_b1_executable_only_grant_note_names_binary_and_warns() -> None:
-    """A 'docker compose up'-shaped command -- argv0 resolves but the remaining
-    args ('compose', 'up') are not real files -- must produce a grant note that
-    (a) names the resolved executable path and (b) explicitly warns that no
-    config files are monitored and that changes to compose files or scripts will
-    NOT revoke trust.  Uses sys.executable so the test is not Docker-dependent.
+def test_b1_grant_note_always_enumerates_what_is_monitored() -> None:
+    """The grant note must name exactly what is drift-monitored, for ANY
+    command -- that is the B1 fix and it is unconditional.
 
-    Old broken behaviour: the note claimed 'its referenced file(s) stay
-    unchanged' without specifying what those were, implying compose-file coverage
-    the grant did not actually provide."""
+    Old broken behaviour: the note claimed "its referenced file(s) stay
+    unchanged" without saying what those were, implying compose-file coverage
+    the grant did not provide.
+    """
     with isolated_vault():
-        cmd = [sys.executable, "compose", "up"]
-        with fake_dialog(_allow(trust_it=True)) as calls:
+        cmd = [sys.executable, "-c", "print('ok')"]
+        with fake_dialog(_allow(trust_it=True)):
             r = mcp_server._run_with_env_impl(list(cmd), None, False, None, None)
         note = r.get("trust_note", "")
         exe_resolved = str(Path(sys.executable).resolve())
         assert exe_resolved in note, (
-            f"REGRESSION (B1): grant note does not name the monitored executable "
-            f"path -- human cannot see what is actually drift-monitored, "
-            f"got: {note!r}")
-        assert ("no config files" in note.lower()
-                or "only the executable" in note.lower()), (
-            f"REGRESSION (B1): grant note does not warn that no config files are "
-            f"monitored -- user is told they have coverage they don't have, "
-            f"got: {note!r}")
-        # The dialog itself must have received the executable-only warning via
-        # trust_note BEFORE the human ticked the checkbox.
+            f"REGRESSION (B1): grant note does not name the monitored executable, "
+            f"so the human cannot see what is actually covered. Got: {note!r}")
+        assert "only the executable" in note.lower(), (
+            f"REGRESSION (B1): grant note does not state that coverage is limited "
+            f"to the executable. Got: {note!r}")
+
+
+def test_ordinary_command_does_not_raise_the_amber_warning() -> None:
+    """Warning fatigue is a real failure mode, not a style preference.
+
+    Executable-only coverage is normal and unremarkable for `ls`, `git push`
+    or `python -c "..."` -- none of them read project configuration, so there
+    is nothing a human could wrongly believe is protected. Alarming on every
+    one of them teaches people to dismiss the warning, and then it is not
+    there for the case it was built for. The note still enumerates coverage;
+    only the alarm is withheld.
+    """
+    with isolated_vault():
+        cmd = [sys.executable, "-c", "print('ok')"]
+        with fake_dialog(_allow(trust_it=True)) as calls:
+            mcp_server._run_with_env_impl(list(cmd), None, False, None, None)
         dialog_note = calls[-1].get("trust_note") or ""
-        assert ("no config files" in dialog_note.lower()
-                or "only the executable" in dialog_note.lower()
-                or "not revoke trust" in dialog_note.lower()), (
-            f"REGRESSION (B1): executable-only warning was not passed to the "
-            f"dialog trust_note -- human never saw it before consenting, "
-            f"got dialog note: {dialog_note!r}")
+        assert "not revoke trust" not in dialog_note.lower(), (
+            f"REGRESSION: the amber executable-only warning fired for a command "
+            f"that reads no configuration. Firing it on everything is how it "
+            f"stops being read. Got: {dialog_note!r}")
+
+
+def test_config_reading_tool_gets_its_config_monitored() -> None:
+    """The stronger half of the fix: rather than warning that a compose file
+    is unmonitored, monitor it.
+
+    A fake `docker` on the command line plus a compose file in cwd must
+    produce a grant that actually covers the compose file, so editing it
+    revokes trust. Windows resolves argv0 against cwd, which is what lets this
+    run without Docker installed.
+    """
+    if sys.platform != "win32":
+        return
+    with isolated_vault() as tmp:
+        fake_docker = tmp / "docker.exe"
+        fake_docker.write_bytes(b"MZ fake binary, never executed")
+        compose = tmp / "docker-compose.yml"
+        compose.write_text("services: {}\n", encoding="utf-8")
+
+        cmd = ["docker", "compose", "up"]
+        paths, exe_only = trust.monitored_summary(cmd, str(tmp))
+        assert str(compose.resolve()) in paths, (
+            f"REGRESSION: the compose file that decides what this command does "
+            f"is not monitored, so it can be rewritten under a live trust "
+            f"grant. Monitored: {paths!r}")
+        assert not exe_only, (
+            "with the compose file monitored this is no longer executable-only")
+        assert not trust.should_warn_executable_only(cmd, str(tmp)), (
+            "no warning is warranted once the config file is actually covered")
+
+        # And drift on that file must actually revoke the grant.
+        sig = trust.make_signature(cmd, str(tmp), None, None, False)
+        trust.trust(sig, trust.referenced_file_hashes(cmd, str(tmp)))
+        trust.cache_secrets(sig, dict(BASE_SECRETS))
+        compose.write_text("services: {evil: {}}\n", encoding="utf-8")
+        ok, reason = trust.check(sig, cmd, str(tmp))
+        assert not ok, (
+            "REGRESSION: editing the compose file did not revoke trust -- this "
+            "is the exact B1 gap, reopened")
+        assert reason
+
+
+def test_config_tool_without_its_config_still_warns() -> None:
+    """The leftover case the amber warning is now reserved for: a tool known
+    to read config, with no config found to watch."""
+    if sys.platform != "win32":
+        return
+    with isolated_vault() as tmp:
+        (tmp / "docker.exe").write_bytes(b"MZ fake binary, never executed")
+        cmd = ["docker", "compose", "up"]
+        assert trust.should_warn_executable_only(cmd, str(tmp)), (
+            "a config-reading tool with no config file found is exactly when "
+            "the human should look twice")
 
 
 def test_b1_file_arg_grant_note_enumerates_file_and_not_executable_only() -> None:

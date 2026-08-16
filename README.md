@@ -337,12 +337,20 @@ boundaries of the tracking, surfaced in the trust note when they apply:
 - Files over 64 MiB or unreadable are skipped from hashing (with a one-time warning at grant
   time).
 - Only the first 20 distinct referenced files are tracked.
-- Only files named *directly on the command line* are tracked — a Dockerfile pulled in indirectly
-  via a compose file's `context:` isn't and can't be followed.
-- **For commands like `docker compose up`, where no config file is named on the command line, the
-  only thing monitored is the resolved executable.** The trust-grant note warns explicitly when
-  the monitored set is executable-only, so you can decide whether that coverage is enough for your
-  use case.
+- Files named *directly on the command line* are tracked, **plus the conventional config files of
+  tools known to read config they do not name** — `docker`/`docker compose` (compose files, `.env`,
+  `Dockerfile`), `make` (`Makefile`), `npm`/`pnpm`/`yarn` (`package.json`), `cargo`, `go`,
+  `terraform`, `pytest`, `poetry`, `gradle`, `mvn` and similar. So editing the compose file behind
+  a trusted `docker compose up` **does** revoke trust.
+- A file pulled in indirectly by one of those — a Dockerfile referenced via a compose file's
+  `context:` — still isn't followed, and can't be.
+- **A tool we don't recognise gets no implicit coverage.** If your own script reads its own config
+  file, only the script (when named) and the executable are monitored. The trust-grant note always
+  enumerates exactly what is covered, for every command, so you can see this rather than assume.
+- The amber warning in the consent dialog is deliberately **not** shown for every executable-only
+  command — `ls`, `git push` and `python -c "..."` read no project config, and alarming on all of
+  them is how a warning stops being read. It appears when a tool known to read config is run with
+  no config file found to monitor.
 - If the executed program can't be resolved to a concrete file at all (an unusual PATH/PATHEXT
   setup, a shell builtin), it isn't drift-monitored — the trust-grant note says so explicitly
   when it applies.
