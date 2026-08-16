@@ -36,7 +36,8 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from vault_lib import gui, store, trust
-from vault_lib.crypto import WrongPassword
+from vault_lib.crypto import (WrongPassword, WrongRecoveryKey, MalformedRecoveryKey,
+                              NoRecoverySlot, VaultCorrupted, VaultTampered)
 
 # Standing policy handed to every client that connects, so it applies
 # unconditionally rather than depending on a skill trigger firing at the exact
@@ -51,6 +52,10 @@ Call vault_status() to learn which variables exist.
 - Never ask the user to type or paste the master password (or any secret \
 value) into the chat. Every tool that needs it opens a native dialog the \
 human types into directly -- that is the only correct path.
+- Never ask the user to type or paste a recovery key into the chat. Recovery \
+keys are displayed and confirmed exclusively in a native dialog the human \
+reads from their printed copy -- the chat is never the right channel for a \
+recovery key, and a key entered into chat is immediately compromised.
 - When running a command with run_with_env, pass only_vars to scope the \
 exposure to the variables that command actually needs. Injecting the whole \
 vault when two variables would do is the main avoidable risk here.
@@ -158,20 +163,42 @@ def _vault_status_impl() -> dict:
         targets = store.load_targets()
     except (OSError, UnicodeDecodeError, ValueError) as e:
         return {"error": str(e)}
-    return {
+
+    # format_version is cheap to compute (just reads the first bytes of vault.enc)
+    # and lets the agent suggest an upgrade to v2 when appropriate -- the human
+    # still decides and acts via manage_vault.
+    result = {
         "vault_exists": store.vault_exists(),
         "variables": index,
         "llm_env_path": str(store.ENV_FILE),
         "targets": targets,
+        "format_version": store.vault_format_version(),
     }
+
+    # Non-secret recovery-slot metadata so the agent can surface "you have no
+    # recovery slot set up" without ever touching private key material.
+    # vault_id is deliberately excluded: it is a random internal identifier that
+    # serves no purpose for the agent and could be misused to correlate vault
+    # files across backups or machines.
+    info = store.vault_info()
+    if "error" not in info:
+        result["recovery_key"] = {
+            "present": info.get("recovery_slot", False),
+            "id": info.get("recovery_slot_id"),
+            "created": info.get("recovery_slot_created"),
+        }
+
+    return result
 
 
 @mcp.tool()
 def vault_status() -> dict:
     """Read-only snapshot of the vault: which variables are managed, their
-    llm.env placeholder numbers, and which project files are registered
-    for resync_targets. Never touches vault.enc -- no password needed,
-    safe to call anytime."""
+    llm.env placeholder numbers, which project files are registered for
+    resync_targets, the vault format version, and whether a recovery slot
+    exists. Reads vault.enc headers for format metadata but never decrypts
+    -- no password needed, safe to call anytime. Secret values are never
+    returned; vault_id is deliberately omitted (internal identifier only)."""
     return _vault_status_impl()
 
 
@@ -430,14 +457,14 @@ def _change_password_impl() -> dict:
     if outcome["old"] is None or outcome["new"] is None:
         return {"applied": False, "message": "Cancelled by user."}
     try:
-        store.change_password(outcome["old"], outcome["new"])
+        new_key = store.change_password(outcome["old"], outcome["new"])
     except FileNotFoundError:
         return {"applied": False,
                 "error": "No vault found (vault.enc or vault.salt is missing). "
                          "Create a vault first before changing the password."}
     except WrongPassword:
         return {"applied": False, "error": "Incorrect current password."}
-    except RuntimeError:
+    except (RuntimeError, VaultCorrupted, VaultTampered):
         # Re-encryption or read-back verification failed; vault was rolled back.
         # Do NOT include the exception message: it could theoretically carry
         # password material under unexpected code paths, even though in
@@ -446,6 +473,31 @@ def _change_password_impl() -> dict:
                 "error": "Password change failed -- the vault has been restored "
                          "to its previous state. The password was NOT changed. "
                          "Try again or check for disk issues."}
+
+    if new_key is not None:
+        # The password change rotated the data encryption key and issued a new
+        # recovery key -- the old printed recovery key is now permanently
+        # invalid.  Show the new key in a native dialog so the human can write
+        # it down; NEVER put the key in the tool result (MCP tool results
+        # flow into the agent's context window and session logs).
+        info = store.vault_info()
+        slot_id = info.get("recovery_slot_id") or ""
+        key_written = gui.show_recovery_key_dialog(new_key, slot_id)
+        if not key_written:
+            # The human closed the dialog without confirming they wrote the key
+            # down.  The password HAS already changed -- that is irreversible.
+            # Report honestly: the key is gone, the old printout is invalid.
+            return {
+                "applied": True,
+                "warning": (
+                    "Master password changed successfully. "
+                    "The recovery key display was dismissed before confirming -- "
+                    "the new recovery key cannot be recovered. "
+                    "Your previous printed recovery key is now invalid. "
+                    "Use manage_vault to issue a replacement recovery key."
+                ),
+            }
+
     return {"applied": True, "message": "Master password changed successfully."}
 
 
@@ -457,8 +509,249 @@ def change_password() -> dict:
     logged. A cancelled dialog is a clean no-op. Three failure cases:
     wrong current password, no vault found, and a rare read-back failure
     (vault is automatically restored to its previous state in that last
-    case)."""
+    case). For v2 vaults with a recovery slot the password change also
+    rotates the data encryption key and issues a new recovery key --
+    a native dialog shows the new key so the human can write it down;
+    the key never appears in this tool's result."""
     return _change_password_impl()
+
+
+def _manage_vault_impl() -> dict:
+    """Dispatch vault management actions selected by the human in a GUI dialog.
+
+    gui.manage_vault_dialog() collects the action and all required parameters
+    (passwords, flags) without exposing them to the agent.  This function drives
+    the vault I/O and routes any recovery key through a separate native dialog
+    so the key is never written into the tool result or the agent's context.
+
+    Expected keys per action in the dialog response:
+      change_password  -- "old_password" (str), "new_password" (str)
+      setup_recovery   -- "password" (str)
+      reissue_recovery -- "password" (str)
+      upgrade_v2       -- "password" (str); "recovery" (bool, optional, defaults False)
+      None             -- cancelled; returns a clean no-change result
+
+    Recovery key handling contract: whenever a store call returns a key, it is
+    passed to gui.show_recovery_key_dialog and NEVER placed in the return dict.
+    If the human closes that dialog without confirming, the result says so
+    explicitly -- the credential change already occurred and is permanent.
+    """
+    outcome = gui.manage_vault_dialog()
+    action = outcome.get("action")
+
+    if action is None:
+        return {"applied": False, "message": "Cancelled by user."}
+
+    # ------------------------------------------------------------------ #
+    # change_password                                                      #
+    # ------------------------------------------------------------------ #
+    if action == "change_password":
+        old = outcome.get("old_password")
+        new = outcome.get("new_password")
+        if old is None or new is None:
+            return {"applied": False, "message": "Cancelled by user."}
+        try:
+            new_key = store.change_password(old, new)
+        except FileNotFoundError:
+            return {"applied": False,
+                    "error": "No vault found. Create a vault first before changing the password."}
+        except WrongPassword:
+            return {"applied": False, "error": "Incorrect current password."}
+        except (RuntimeError, VaultCorrupted, VaultTampered):
+            return {"applied": False,
+                    "error": "Password change failed -- vault restored to its previous state. "
+                             "The password was NOT changed. Try again or check for disk issues."}
+        if new_key is not None:
+            info = store.vault_info()
+            slot_id = info.get("recovery_slot_id") or ""
+            key_written = gui.show_recovery_key_dialog(new_key, slot_id)
+            if not key_written:
+                return {
+                    "applied": True,
+                    "action": "change_password",
+                    "warning": (
+                        "Master password changed successfully. "
+                        "The recovery key display was dismissed before confirming -- "
+                        "the new recovery key cannot be recovered. "
+                        "Your previous printed recovery key is now invalid. "
+                        "Use manage_vault to issue a replacement recovery key."
+                    ),
+                }
+        return {"applied": True, "action": "change_password",
+                "message": "Master password changed successfully."}
+
+    # ------------------------------------------------------------------ #
+    # setup_recovery / reissue_recovery                                   #
+    # Both use store.reissue_recovery_key: it adds a recovery slot if     #
+    # none exists, or replaces the existing slot with a fresh key.        #
+    # ------------------------------------------------------------------ #
+    if action in ("setup_recovery", "reissue_recovery"):
+        password = outcome.get("password")
+        if password is None:
+            return {"applied": False, "message": "Cancelled by user."}
+        try:
+            new_key = store.reissue_recovery_key(password)
+        except FileNotFoundError:
+            return {"applied": False, "error": "No vault found."}
+        except WrongPassword:
+            return {"applied": False, "error": "Incorrect password."}
+        except (RuntimeError, VaultCorrupted, VaultTampered):
+            return {"applied": False,
+                    "error": "Recovery key operation failed -- vault restored to its previous state."}
+        info = store.vault_info()
+        slot_id = info.get("recovery_slot_id") or ""
+        key_written = gui.show_recovery_key_dialog(new_key, slot_id)
+        if not key_written:
+            return {
+                "applied": True,
+                "action": action,
+                "warning": (
+                    "Recovery key issued but the display was dismissed before confirming -- "
+                    "the new key is unrecoverable. Use manage_vault to issue a replacement."
+                ),
+            }
+        return {"applied": True, "action": action,
+                "message": "Recovery key issued successfully."}
+
+    # ------------------------------------------------------------------ #
+    # upgrade_v2                                                          #
+    # ------------------------------------------------------------------ #
+    if action == "upgrade_v2":
+        password = outcome.get("password")
+        recovery = bool(outcome.get("recovery", False))
+        if password is None:
+            return {"applied": False, "message": "Cancelled by user."}
+        try:
+            new_key = store.upgrade_to_v2(password, recovery=recovery)
+        except FileNotFoundError:
+            return {"applied": False, "error": "No vault found."}
+        except WrongPassword:
+            return {"applied": False, "error": "Incorrect password."}
+        except (RuntimeError, VaultCorrupted, VaultTampered):
+            return {"applied": False,
+                    "error": "Upgrade to v2 failed -- vault restored to its previous state."}
+        if new_key is not None:
+            info = store.vault_info()
+            slot_id = info.get("recovery_slot_id") or ""
+            key_written = gui.show_recovery_key_dialog(new_key, slot_id)
+            if not key_written:
+                return {
+                    "applied": True,
+                    "action": "upgrade_v2",
+                    "warning": (
+                        "Vault upgraded to v2 format successfully. "
+                        "The recovery key display was dismissed before confirming -- "
+                        "the new recovery key is unrecoverable. "
+                        "Use manage_vault to issue a replacement recovery key."
+                    ),
+                }
+        return {"applied": True, "action": "upgrade_v2",
+                "message": "Vault upgraded to v2 format successfully."}
+
+    return {"applied": False, "error": f"Unrecognised action from vault management dialog."}
+
+
+@mcp.tool()
+def manage_vault() -> dict:
+    """Open the vault management dialog for password changes, recovery key
+    setup and reissue, and v1-to-v2 format upgrades. All sensitive input
+    (passwords, recovery keys) is collected exclusively through native
+    dialogs; nothing is returned to the agent. A cancelled dialog is a
+    clean no-op.
+
+    Actions the human can choose:
+      change_password  -- change the master password; on v2 vaults with a
+                          recovery slot the data key is rotated and a new
+                          recovery key is shown in a separate native dialog.
+      setup_recovery   -- add a recovery slot to a v2 vault that has none.
+      reissue_recovery -- replace an existing recovery key (e.g. after it
+                          was lost or potentially compromised).
+      upgrade_v2       -- upgrade a v1 vault to the v2 AES-256-GCM/scrypt
+                          format; optionally adds a recovery slot in the
+                          same operation.
+
+    Recovery keys are displayed in a dedicated write-it-down dialog and
+    never appear in this tool's result. If the human closes that dialog
+    before confirming, the result says so explicitly -- the credential
+    change already occurred and is permanent."""
+    return _manage_vault_impl()
+
+
+def _recover_vault_impl() -> dict:
+    """Drive gui.recover_dialog() -> store.recover_with_recovery_key().
+
+    Without this the recovery key is decorative: every other entry point
+    needs the master password, so a human who has actually forgotten it --
+    the one situation the paper key exists for -- would have no way to use
+    it. That is why this is a separate tool rather than an action inside
+    manage_vault, whose other actions all authenticate with the password.
+    """
+    if not store.vault_exists():
+        return {"applied": False, "error": "No vault found. Nothing to recover."}
+    outcome = gui.recover_dialog()
+    rk_text = outcome.get("recovery_key")
+    new_password = outcome.get("new_password")
+    if not rk_text or not new_password:
+        return {"applied": False, "message": "Cancelled by user."}
+    try:
+        new_key = store.recover_with_recovery_key(rk_text, new_password)
+    except MalformedRecoveryKey:
+        # Checksum caught it before any unwrap -- almost always a typo.
+        return {"applied": False,
+                "error": "That recovery key looks mistyped (its checksum does "
+                         "not match). Check it against your printed copy."}
+    except WrongRecoveryKey:
+        return {"applied": False,
+                "error": "That recovery key is not valid for this vault. If the "
+                         "password was changed since it was printed, the old key "
+                         "was invalidated and this printout is stale."}
+    except NoRecoverySlot:
+        return {"applied": False,
+                "error": "This vault has no recovery key configured, so it cannot "
+                         "be recovered without the master password."}
+    except (VaultCorrupted, VaultTampered):
+        return {"applied": False,
+                "error": "The vault file is damaged or has been tampered with. "
+                         "Restore vault.enc from a backup."}
+    except RuntimeError:
+        return {"applied": False,
+                "error": "Recovery failed -- the vault has been restored to its "
+                         "previous state. Nothing was changed."}
+    # Recovery always mints a fresh key: the one just used was typed from
+    # paper and may have been observed in the process.
+    if new_key:
+        info = store.vault_info()
+        shown = gui.show_recovery_key_dialog(new_key, info.get("recovery_slot_id", ""))
+        if not shown:
+            return {"applied": True,
+                    "warning": "Access was recovered and the new master password is "
+                               "set, but the replacement recovery key was not "
+                               "confirmed and cannot be shown again. The key you "
+                               "just used is now invalid. Run manage_vault and "
+                               "choose reissue_recovery to get a usable one."}
+    return {"applied": True,
+            "message": "Access recovered and a new master password set."}
+
+
+@mcp.tool()
+def recover_vault() -> dict:
+    """Regain access to the vault using the printed paper recovery key, when
+    the master password has been forgotten. Opens a dedicated native dialog
+    that collects the recovery key and a new master password; neither is ever
+    passed through this tool.
+
+    This is the only entry point that does not require the existing master
+    password -- every other operation authenticates with it, which is exactly
+    why a forgotten password would otherwise be unrecoverable.
+
+    Never ask the user to type or paste their recovery key into the chat. It
+    is a second full-power credential for the whole vault; the native dialog
+    is the only correct channel.
+
+    Recovering always issues a replacement recovery key (the one just used was
+    read aloud from paper and may have been observed) and shows it in the
+    write-it-down dialog. It never appears in this result."""
+    return _recover_vault_impl()
 
 
 class _Terminated(Exception):

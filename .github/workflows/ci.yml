@@ -37,6 +37,12 @@ jobs:
           python tests/test_store_hardening.py
           python tests/test_gui_helpers.py
           python tests/test_redaction.py
+          python tests/test_crypto_v2.py
+          python tests/test_vault_format.py
+          python tests/test_store_v2.py
+          python tests/test_gui_v2.py
+          python tests/test_manage_vault.py
+          python tests/test_integration_v2.py
 
       - name: Run under pytest
         run: python -m pytest -q

@@ -1,2 +1,2 @@
-cryptography>=41.0.0
+cryptography>=42
 mcp[cli]==1.29.0

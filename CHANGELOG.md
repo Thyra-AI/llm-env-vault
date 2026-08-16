@@ -7,6 +7,55 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.4.0] — 2026-08-16
+
+**Vault format change.** v2 is the format for all new vaults. Existing v1 vaults keep working
+unchanged until the human opts into an upgrade via `manage_vault`.
+
+### Added
+
+- **Versioned vault format (v2).** `vault.enc` gains a structured header:
+  `magic || version || hdr_len || header-JSON || nonce || body`. The header bytes as read from disk
+  are the body's AES-256-GCM **AAD**, binding format metadata to the ciphertext — tamper with any
+  header field and the body fails to authenticate before decryption is attempted.
+- **AES-256-GCM replaces Fernet for v2.** Fernet has no AAD slot, and a bolt-on HMAC could only be
+  checked after unwrapping — too late to protect the header that says how to unwrap. v1 vaults keep
+  the original Fernet path, frozen and byte-identical.
+- **scrypt for new vaults** (`n=2**16, r=8, p=1`, 64 MiB, ~114 ms on modern hardware). One notch
+  below OWASP's recommendation to stay clear of low-memory failure modes on interactive unlock.
+  Against a GPU rig this buys roughly one to two orders of magnitude over PBKDF2-480k — meaningful,
+  but worth less than a strong password.
+- **Envelope encryption.** A random data key (DEK) encrypts the vault body and is wrapped once per
+  credential — master password and recovery key can both open one vault without storing the body
+  twice. Every credential change rotates the DEK: a copied vault is ciphertext locked to the moment
+  of the copy and does not become an oracle for future bodies.
+- **Paper recovery key (opt-in).** 160 bits of entropy, Crockford base32, shown as `RK1` plus 8
+  groups of 4 characters and a 4-character checksum, with a 4-character slot id so a stale printout
+  is identifiable. Displayed only in a native dialog with no copy, save, or print control; the setup
+  ceremony requires re-entering the full key from paper before it is accepted. **Changing the master
+  password issues a new recovery key and invalidates the old printout.**
+- **`manage_vault()` tool.** Change master password, set up or reissue a recovery key, or upgrade a
+  v1 vault to v2. Each sub-operation opens its own consent dialog.
+- **`recover_vault()` tool.** The only entry point that does not require the master password — enter
+  the paper recovery key, set a new password, and access is restored. A new recovery key is issued on
+  completion; the old printout is invalidated.
+- **`vault_status()` additions:** `format_version`, and a non-secret `recovery_key` object
+  (`present`, `id`, `created`) when a recovery key is configured. `vault_id` is not exposed — it
+  would be a stable fingerprint correlating vault copies, with no agent use case.
+- **KDF parameter validation.** Parameters embedded in the v2 header are range-checked before use;
+  a hostile `n` is rejected rather than allowed to exhaust memory (ceiling: 256 MiB).
+- **`vault.enc.bak`** is written before every credential change and deleted once read-back
+  verification passes. Now gitignored.
+
+### Changed
+
+- **`cryptography` floor raised to `>=42`.** Older OpenSSL builds defaulted scrypt's `maxmem` to
+  32 MiB; the v2 KDF asks for 64 MiB, so an older pin fails at runtime on some installs.
+
+### Fixed
+
+- Stale README claim: "a paper recovery key is planned for 1.4.0" — it shipped.
+
 ## [1.3.0] — 2026-08-15
 
 Security hardening pass. No change to the vault format, the crypto, or the consent model —
@@ -131,6 +180,7 @@ Pre-1.0.0 history is a long series of security fixes found by repeated red-team 
 credential-shaped text in parse warnings, consent before registering unowned targets, and honest
 reporting of partial writes. See `git log` for the full sequence.
 
+[1.4.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.4.0
 [1.3.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.3.0
 [1.2.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.1.0

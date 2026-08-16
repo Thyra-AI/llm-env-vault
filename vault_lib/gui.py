@@ -32,7 +32,8 @@ import unicodedata
 from typing import Optional
 
 from . import store, trust
-from .crypto import WrongPassword
+from .crypto import (WrongPassword, MalformedRecoveryKey, NoRecoverySlot,
+                     format_recovery_key, new_recovery_key, parse_recovery_key)
 
 
 def _strip_hidden(text: str) -> str:
@@ -403,6 +404,47 @@ def _show_error(root, err_label, text):
     _center(root)
 
 
+def _create_v2_with_drill(password: str, offer_recovery: bool, err_label, root) -> None:
+    """Create the first-run v2 vault, running the write-it-down drill BEFORE
+    the recovery slot is committed.
+
+    The order is the point. The obvious flow -- create the vault with a
+    recovery slot, then show the key -- leaves a vault whose header advertises
+    recovery_slot: true even when the human bails out of the drill, for a key
+    that was never written down and can never be shown again. vault_info()
+    would then report protection the user does not have, and they would find
+    that out at the one moment it matters. Nothing in normal operation ever
+    exercises a recovery key, so the lie would keep indefinitely.
+
+    Since the key is generated locally, drilling first costs nothing and makes
+    the cancel path honest: no slot is written, and the vault is simply
+    password-only -- a fully supported state, not a degraded one.
+    """
+    raw_rk = new_recovery_key() if offer_recovery else None
+    try:
+        keep = False
+        if raw_rk is not None:
+            # Blank the parent's status line so "Working..." isn't sitting
+            # behind the drill window for however long the human takes.
+            err_label.config(text="", fg=FG_MUTED)
+            root.update_idletasks()
+            # slot_id is empty here: the store assigns it at write time, and it
+            # carries no staleness value at first run -- no earlier key exists
+            # to confuse this one with.
+            keep = show_recovery_key_dialog(format_recovery_key(bytes(raw_rk)), "")
+        err_label.config(text="Working...", fg=FG_MUTED)
+        root.update_idletasks()
+        if keep:
+            store.create_v2_vault(password, recovery_raw=bytes(raw_rk))
+        else:
+            store.create_v2_vault(password)
+    finally:
+        if raw_rk is not None:
+            # Best-effort in CPython; does not defeat a memory dump.
+            for _i in range(len(raw_rk)):
+                raw_rk[_i] = 0
+
+
 def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
                       is_sensitive: bool = False):
     """Step 1: master password. Step 2 (only after step 1 succeeds): the
@@ -418,7 +460,8 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
     """
     store.validate_var_name(var_name)
     outcome = {"approved": False, "partial_failure": None}
-    state = {"password": None, "secrets": None, "first_run": not store.vault_exists()}
+    state = {"password": None, "secrets": None, "first_run": not store.vault_exists(),
+             "offer_recovery": False}
     pad = {"padx": 18, "pady": 7}
 
     root = tk.Tk()
@@ -472,7 +515,21 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
             _button(container, "Generate passphrase", command=gen_passphrase_add).grid(
                 row=row, column=0, columnspan=2, pady=(0, 4))
             row += 1
+
+            # Recovery key opt-in: honest framing — it increases attack surface
+            # because it turns "needs something in your head" into "needs a piece
+            # of paper". A password-only vault is a fully valid choice.
+            rk_opt_var = tk.BooleanVar(value=False)
+            tk.Checkbutton(
+                container,
+                text="Set up a paper recovery key (optional — increases attack surface)",
+                variable=rk_opt_var, bg=WINDOW_BG, fg=FG_MUTED, font=FONT_BODY,
+                selectcolor=FIELD_BG, activebackground=WINDOW_BG, activeforeground=FG,
+                highlightthickness=0, wraplength=460, justify="left", anchor="w",
+            ).grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 4))
+            row += 1
         else:
+            rk_opt_var = None
             _label(container, "Master password:").grid(row=row, column=0, sticky="e", **pad)
             pw1 = _entry(container, show="*", width=30)
             pw1.grid(row=row, column=1, **pad)
@@ -495,6 +552,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
                 if password != pw2.get():
                     _show_error(root, err, "Passwords do not match.")
                     return
+                state["offer_recovery"] = rk_opt_var.get() if rk_opt_var is not None else False
                 state["password"] = password
                 state["secrets"] = {}
                 show_step2()
@@ -569,7 +627,14 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
             secrets_saved = False
             try:
                 if state["first_run"]:
-                    store.create_secrets_vault(state["password"])
+                    # Show a progress note before scrypt derivation — vault
+                    # creation runs one to two scrypt rounds and will visibly
+                    # freeze the window otherwise.
+                    err.config(text="Working...", fg=FG_MUTED)
+                    root.update_idletasks()
+                    _create_v2_with_drill(state["password"],
+                                          state.get("offer_recovery"), err, root)
+                    err.config(text="", fg=DANGER)
                     state["first_run"] = False
                     secrets = {}
                 else:
@@ -798,7 +863,8 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
     also_register = also_register or []
     sensitive_names = set(sensitive_names or ())
     outcome = {"approved": False, "partial_failure": None, "conflicts": []}
-    state = {"password": None, "secrets": None, "first_run": not store.vault_exists()}
+    state = {"password": None, "secrets": None, "first_run": not store.vault_exists(),
+             "offer_recovery": False}
     pad = {"padx": 18, "pady": 7}
 
     root = tk.Tk()
@@ -867,7 +933,20 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
             _button(container, "Generate passphrase", command=gen_passphrase_install).grid(
                 row=row, column=0, columnspan=2, pady=(0, 4))
             row += 1
+
+            # Recovery key opt-in: honest framing — increases attack surface.
+            # A password-only vault is a fully valid choice.
+            rk_opt_var = tk.BooleanVar(value=False)
+            tk.Checkbutton(
+                container,
+                text="Set up a paper recovery key (optional — increases attack surface)",
+                variable=rk_opt_var, bg=WINDOW_BG, fg=FG_MUTED, font=FONT_BODY,
+                selectcolor=FIELD_BG, activebackground=WINDOW_BG, activeforeground=FG,
+                highlightthickness=0, wraplength=460, justify="left", anchor="w",
+            ).grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 4))
+            row += 1
         else:
+            rk_opt_var = None
             _label(container, "Master password:").grid(row=row, column=0, sticky="e", **pad)
             pw1 = _entry(container, show="*", width=30)
             pw1.grid(row=row, column=1, **pad)
@@ -890,6 +969,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                 if password != pw2.get():
                     _show_error(root, err, "Passwords do not match.")
                     return
+                state["offer_recovery"] = rk_opt_var.get() if rk_opt_var is not None else False
                 state["password"] = password
                 state["secrets"] = {}
                 show_step2()
@@ -1029,7 +1109,12 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
             vault_saved = False
             try:
                 if state["first_run"]:
-                    store.create_secrets_vault(state["password"])
+                    # Show a progress note before scrypt derivation.
+                    err.config(text="Working...", fg=FG_MUTED)
+                    root.update_idletasks()
+                    _create_v2_with_drill(state["password"],
+                                          state.get("offer_recovery"), err, root)
+                    err.config(text="", fg=DANGER)
                     state["first_run"] = False
                     secrets = {}
                 else:
@@ -1149,6 +1234,79 @@ def _disclosure_mismatch(disclosed_names, actual_secret_names) -> Optional[str]:
     return ("The vault and vault_index.json have diverged -- refusing to run until this "
             "is fixed (call sync_llm_env, or re-run add_secret/remove_secret for the "
             "affected name(s)): " + "; ".join(parts))
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers — Tkinter-free, directly unit-testable
+# ---------------------------------------------------------------------------
+
+def _validate_password_fields(pw: str, confirm: str) -> Optional[str]:
+    """Validate a new-password pair. Returns an error string or None.
+    Pure and Tkinter-free so it can be unit-tested without a display."""
+    if not pw:
+        return "Password cannot be empty."
+    if len(pw) < MIN_PASSWORD_LEN:
+        return f"Use at least {MIN_PASSWORD_LEN} characters."
+    if pw != confirm:
+        return "Passwords do not match."
+    return None
+
+
+def _parse_rk_input(text: str):
+    """Try to parse and checksum-verify a recovery key string.
+
+    Returns (bytearray, None) on success, (None, friendly_error_str) on
+    failure.  The caller must zero the returned bytearray when done —
+    best-effort in CPython, does not defeat a memory dump.
+
+    The friendly error message for MalformedRecoveryKey deliberately says
+    'that looks like a typo' so users can distinguish a transcription error
+    from an entirely wrong key.  The raw exception message is included
+    (it never contains key material — only character counts and
+    mismatched checksum digests) to give actionable detail.
+
+    Pure and Tkinter-free so it can be unit-tested without a display."""
+    try:
+        raw = parse_recovery_key(text)
+        return raw, None
+    except MalformedRecoveryKey as exc:
+        return None, (
+            f"That looks like a typo — check what you entered ({exc})."
+        )
+    except Exception:
+        # Guard: never let unexpected exceptions surface key material.
+        return None, "Could not read recovery key (unexpected format)."
+
+
+def _applicable_manage_actions(info: dict) -> list:
+    """Return the list of manage_vault_dialog action IDs that make sense for
+    the current vault state described by *info* (from store.vault_info()).
+
+    Ordering matches the recommended display order.
+    Pure and Tkinter-free so it can be unit-tested without a display."""
+    if "error" in info:
+        return []
+    actions = ["change_password"]
+    fmt = info.get("format")
+    if fmt == 1:
+        actions.append("upgrade_v2")
+    if fmt == 2:
+        if info.get("recovery_slot"):
+            actions.append("reissue_recovery")
+        else:
+            actions.append("setup_recovery")
+    return actions
+
+
+def _manage_action_result_keys(action: str) -> frozenset:
+    """Return the frozenset of keys that manage_vault_dialog includes in its
+    result dict for *action*.  Used to test the contract without a display."""
+    base = {"action"}
+    if action == "change_password":
+        return frozenset(base | {"old_password", "new_password"})
+    if action in ("setup_recovery", "reissue_recovery", "upgrade_v2"):
+        return frozenset(base | {"password"})
+    return frozenset(base)
 
 
 def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None,
@@ -1462,5 +1620,538 @@ def change_password_dialog() -> dict:
     root.bind("<Return>", lambda e: on_change())
     old_pw.focus_force()
     _center(root)
+    root.mainloop()
+    return outcome
+
+
+def show_recovery_key_dialog(key_text: str, slot_id: str) -> bool:
+    """Display a newly issued recovery key and run the setup drill.
+
+    Security contract — enforced in code, not documentation:
+      * No copy-to-clipboard button: the Windows clipboard is readable by
+        every local process, and Clipboard History may sync to the cloud.
+      * No save-to-file button.  No print button.
+      * Returns bool, never the key text — callers cannot harvest it.
+      * key_text is never written to stdout or stderr.
+      * key_text never reaches an exception message (all key-using paths
+        are wrapped in try/except that surfaces only non-secret diagnostics).
+      * unlock_for_run_dialog is never involved; recovery-key entry lives
+        only here, in a dialog that is visually and structurally distinct
+        from the normal unlock prompt.
+      * Nothing auto-shows: reaching this dialog requires a deliberate
+        human action (requesting a recovery key from manage_vault_dialog
+        or completing a first-run vault creation with the opt-in checked).
+
+    The setup drill: the human must check 'I have written this down' AND
+    re-enter the FULL key from their paper.  Retyping four of thirty-six
+    characters proves nothing.  The re-entry is validated with
+    parse_recovery_key (checksum verified) and compared byte-for-byte
+    against the displayed key, so a bad transcription is caught here —
+    the only cheap defence against a key that was never correctly copied.
+
+    Returns True when both the checkbox and the full re-entry pass.
+    Returns False if the human closes or clicks 'I'll Set It Up Later'.
+    """
+    result = [False]
+    pad = {"padx": 18, "pady": 7}
+
+    root = tk.Tk()
+    root.title("llm-env-vault — Recovery Key")
+    root.resizable(False, False)
+    _style(root)
+
+    row = 0
+    _label(root, "Save Your Recovery Key", font=FONT_TITLE).grid(
+        row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"],
+        pady=(pad["pady"], 14))
+    row += 1
+
+    _label(root,
+           "Once this window closes the key cannot be shown again. "
+           "Write it down on paper and store it safely — this is the only "
+           "way to regain access if you forget your master password.",
+           fg=WARNING, justify="left").grid(
+        row=row, column=0, columnspan=2, sticky="w", **pad)
+    row += 1
+
+    # slot_id is empty when the drill runs BEFORE the slot is committed (the
+    # first-run path -- see add_secret_dialog/install_dialog), because the id
+    # is assigned by the store at write time. Showing "Slot ID:" with nothing
+    # after it would just look broken, and the id has no staleness value at
+    # first run anyway: no earlier key has ever existed to confuse it with.
+    if slot_id:
+        slot_line = (f"Slot ID: {_safe_display(slot_id)}  "
+                     f"— check this matches any saved printout to tell if it is stale.")
+        _label(root, slot_line, fg=FG_MUTED, justify="left").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+
+    # Key display: selectable (user can read letter-by-letter) but
+    # deliberately NO copy-to-clipboard button — clipboard is readable
+    # by every local process; Clipboard History syncs to the cloud.
+    key_frame = tk.Frame(root, bg=WINDOW_BG)
+    key_disp = tk.Text(key_frame, bg=FIELD_BG, fg=ACCENT,
+                       font=(FONT_FAMILY, 13, "bold"), relief="flat",
+                       highlightthickness=1, highlightbackground=BORDER,
+                       selectbackground=ACCENT, insertbackground=FG,
+                       height=3, width=46, wrap="word")
+    key_disp.insert("end", key_text)
+    key_disp.config(state="disabled")
+    key_disp.grid(row=0, column=0, sticky="we")
+    key_frame.grid_columnconfigure(0, weight=1)
+    key_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
+    row += 1
+
+    _label(root, "Groups of 4 characters separated by hyphens.  The last group is the checksum.",
+           fg=FG_MUTED, justify="left").grid(
+        row=row, column=0, columnspan=2, sticky="w", **pad)
+    row += 1
+
+    _divider(root).grid(row=row, column=0, columnspan=2, sticky="ew",
+                        padx=pad["padx"], pady=8)
+    row += 1
+
+    _label(root,
+           "Step 1 — once you have written the full key on paper, check the box below.",
+           justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+    row += 1
+
+    written_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(
+        root, text="I have written this down on paper",
+        variable=written_var, bg=WINDOW_BG, fg=FG, font=FONT_BODY,
+        selectcolor=FIELD_BG, activebackground=WINDOW_BG, activeforeground=FG,
+        highlightthickness=0, anchor="w",
+    ).grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 6))
+    row += 1
+
+    _label(root,
+           "Step 2 — re-enter the FULL key from your paper below to confirm it was "
+           "written correctly.  Verifying only a few characters proves nothing.",
+           justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+    row += 1
+
+    reentry = _entry(root, width=46)
+    reentry.grid(row=row, column=0, columnspan=2, padx=pad["padx"], pady=(4, 2))
+    row += 1
+
+    err = _label(root, "", fg=DANGER)
+    err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+    row += 1
+
+    def on_confirm():
+        if not written_var.get():
+            _show_error(root, err,
+                        "Please check the box to confirm you have written the key down.")
+            return
+        typed = reentry.get()
+        if not typed.strip():
+            _show_error(root, err, "Please re-enter the recovery key from your paper.")
+            return
+        # Parse both the typed text and the displayed key; compare bytes.
+        # All key material is held in bytearrays and zeroed after use —
+        # best-effort in CPython, does not defeat a memory dump.
+        typed_raw = None
+        displayed_raw = None
+        try:
+            typed_raw, parse_err = _parse_rk_input(typed)
+            if parse_err:
+                _show_error(root, err, parse_err)
+                return
+            try:
+                displayed_raw = parse_recovery_key(key_text)
+            except MalformedRecoveryKey:
+                # key_text came from format_recovery_key — should not be
+                # malformed in practice, but never let an exception surface
+                # key material.
+                _show_error(root, err, "Internal error verifying key — contact support.")
+                return
+            if bytes(typed_raw) != bytes(displayed_raw):
+                _show_error(root, err,
+                            "The key you entered does not match the one shown above. "
+                            "Check what you typed — every character must match.")
+                return
+            result[0] = True
+            root.destroy()
+        except Exception:
+            _show_error(root, err, "Could not verify key (unexpected error).")
+        finally:
+            if typed_raw is not None:
+                for _i in range(len(typed_raw)):
+                    typed_raw[_i] = 0
+            if displayed_raw is not None:
+                for _i in range(len(displayed_raw)):
+                    displayed_raw[_i] = 0
+
+    def on_cancel():
+        root.destroy()
+
+    btns = tk.Frame(root, bg=WINDOW_BG)
+    btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+    _button(btns, "I'll Set It Up Later", command=on_cancel).pack(side="left", padx=6)
+    _button(btns, "Confirm — I Have It", command=on_confirm, kind="primary").pack(
+        side="left", padx=6)
+    row += 1
+
+    _branding_footer(root).grid(row=row, column=0, columnspan=2)
+
+    root.bind("<Escape>", lambda e: on_cancel())
+    reentry.focus_force()
+    _center(root)
+    root.mainloop()
+    return result[0]
+
+
+def recover_dialog() -> dict:
+    """Account recovery using the paper recovery key.
+
+    Visually distinct from the normal unlock dialog — different title,
+    amber heading, and an explicit warning so users are not trained to
+    enter paper secrets into ordinary unlock prompts.  Recovery-key entry
+    lives only here, never in unlock_for_run_dialog.
+
+    Returns {"recovery_key": str|None, "new_password": str|None}.
+    Both are None if cancelled.  The returned recovery_key has been
+    checksum-verified by parse_recovery_key before this function returns,
+    so the caller can pass it straight to store.recover_with_recovery_key
+    without a second parse step.
+    """
+    outcome = {"recovery_key": None, "new_password": None}
+    pad = {"padx": 18, "pady": 7}
+
+    root = tk.Tk()
+    root.title("llm-env-vault — Account Recovery")
+    root.resizable(False, False)
+    _style(root)
+
+    row = 0
+    _label(root, "Account Recovery", font=FONT_TITLE, fg=WARNING).grid(
+        row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"],
+        pady=(pad["pady"], 4))
+    row += 1
+
+    _label(root,
+           "Use this only if you have forgotten your master password. "
+           "Your paper recovery key lets you set a new master password.",
+           fg=WARNING, justify="left").grid(
+        row=row, column=0, columnspan=2, sticky="w", **pad)
+    row += 1
+
+    _divider(root).grid(row=row, column=0, columnspan=2, sticky="ew",
+                        padx=pad["padx"], pady=6)
+    row += 1
+
+    _label(root, "Recovery key\n(from your paper):").grid(row=row, column=0, sticky="e", **pad)
+    rk_entry = _entry(root, width=40)
+    rk_entry.grid(row=row, column=1, **pad)
+    row += 1
+
+    _label(root, f"New master password\n(at least {MIN_PASSWORD_LEN} characters):").grid(
+        row=row, column=0, sticky="e", **pad)
+    pw1 = _entry(root, show="*", width=30)
+    pw1.grid(row=row, column=1, **pad)
+    row += 1
+
+    _label(root, "Confirm new password:").grid(row=row, column=0, sticky="e", **pad)
+    pw2 = _entry(root, show="*", width=30)
+    pw2.grid(row=row, column=1, **pad)
+    row += 1
+
+    err = _label(root, "", fg=DANGER)
+    err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+    row += 1
+
+    def on_recover():
+        rk_text = rk_entry.get()
+        pw = pw1.get()
+        confirm = pw2.get()
+        if not rk_text.strip():
+            _show_error(root, err, "Recovery key cannot be empty.")
+            return
+        pw_err = _validate_password_fields(pw, confirm)
+        if pw_err:
+            _show_error(root, err, pw_err)
+            return
+        # Validate checksum before returning — gives a friendly message
+        # for transcription errors instead of an opaque failure in the caller.
+        # The parsed bytearray is zeroed after the check; best-effort in CPython.
+        parsed = None
+        try:
+            parsed, parse_err = _parse_rk_input(rk_text)
+            if parse_err:
+                _show_error(root, err, parse_err)
+                return
+            # Return the raw text (the store API takes a string).
+            # The checksum is already verified above.
+            outcome["recovery_key"] = rk_text.strip()
+            outcome["new_password"] = pw
+            root.destroy()
+        except Exception:
+            _show_error(root, err, "Could not verify recovery key (unexpected error).")
+        finally:
+            if parsed is not None:
+                for _i in range(len(parsed)):
+                    parsed[_i] = 0
+
+    def on_cancel():
+        root.destroy()
+
+    btns = tk.Frame(root, bg=WINDOW_BG)
+    btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+    _button(btns, "Cancel", command=on_cancel).pack(side="left", padx=6)
+    _button(btns, "Recover Account", command=on_recover, kind="primary").pack(
+        side="left", padx=6)
+    row += 1
+
+    _branding_footer(root).grid(row=row, column=0, columnspan=2)
+
+    root.bind("<Escape>", lambda e: on_cancel())
+    root.bind("<Return>", lambda e: on_recover())
+    rk_entry.focus_force()
+    _center(root)
+    root.mainloop()
+    return outcome
+
+
+def manage_vault_dialog() -> dict:
+    """Vault administration window.
+
+    Shows current vault state (format version, recovery-slot presence and
+    slot id) and offers the actions that apply to that state:
+      change_password  — always available
+      upgrade_v2       — only for v1 vaults
+      setup_recovery   — v2 vault without a recovery slot
+      reissue_recovery — v2 vault that already has a recovery slot
+
+    Returns {"action": str|None, ...} where action is one of the strings
+    above, or None if cancelled/closed.  Carries the credentials the
+    chosen action needs:
+      change_password:           old_password, new_password
+      setup_recovery:            password
+      reissue_recovery:          password
+      upgrade_v2:                password
+
+    The caller (MCP server) drives all vault I/O; this dialog is free of
+    vault side-effects, matching the pattern of change_password_dialog.
+    """
+    outcome = {"action": None}
+    pad = {"padx": 18, "pady": 7}
+
+    try:
+        info = store.vault_info()
+    except Exception as exc:
+        info = {"error": str(exc)}
+
+    actions = _applicable_manage_actions(info)
+    fmt = info.get("format")
+    has_rk = info.get("recovery_slot", False)
+    rk_slot_id = info.get("recovery_slot_id", "")
+    rk_created = info.get("recovery_slot_created", "")
+
+    root = tk.Tk()
+    root.title("llm-env-vault")
+    root.resizable(False, False)
+    _style(root)
+
+    container = tk.Frame(root, bg=WINDOW_BG)
+    container.pack()
+    _branding_footer(root).pack(side="bottom", fill="x")
+
+    def clear():
+        for w in container.winfo_children():
+            w.destroy()
+
+    def show_main():
+        clear()
+        row = 0
+        _label(container, "Vault Settings", font=FONT_TITLE).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"],
+            pady=(pad["pady"], 14))
+        row += 1
+
+        # Status section
+        if "error" in info:
+            _label(container,
+                   f"Vault status: {_safe_display(info['error'])}",
+                   fg=DANGER).grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+        else:
+            fmt_str = f"Format: v{fmt}" if fmt else "Format: unknown"
+            _label(container, fmt_str, fg=FG_MUTED).grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+
+            if fmt == 2:
+                if has_rk:
+                    rk_parts = ["Recovery slot: active"]
+                    if rk_slot_id:
+                        rk_parts.append(f"slot id: {_safe_display(rk_slot_id)}")
+                    if rk_created:
+                        rk_parts.append(f"created: {_safe_display(rk_created)}")
+                    rk_status = "  |  ".join(rk_parts)
+                else:
+                    rk_status = "Recovery slot: not configured"
+                _label(container, rk_status, fg=FG_MUTED).grid(
+                    row=row, column=0, columnspan=2, sticky="w", **pad)
+                row += 1
+
+        _divider(container).grid(row=row, column=0, columnspan=2, sticky="ew",
+                                  padx=pad["padx"], pady=6)
+        row += 1
+
+        action_defs = [
+            ("change_password",  "Change Master Password"),
+            ("upgrade_v2",       "Upgrade Vault to v2"),
+            ("setup_recovery",   "Set Up Paper Recovery Key"),
+            ("reissue_recovery", "Reissue Recovery Key"),
+        ]
+
+        if not actions:
+            _label(container, "No actions available for this vault state.").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+        else:
+            for action_id, btn_label in action_defs:
+                if action_id not in actions:
+                    continue
+                def _make_cb(a=action_id):
+                    return lambda: show_action(a)
+                _button(container, btn_label, command=_make_cb()).grid(
+                    row=row, column=0, columnspan=2, pady=4)
+                row += 1
+
+        btns = tk.Frame(container, bg=WINDOW_BG)
+        btns.grid(row=row, column=0, columnspan=2, pady=(12, 4))
+        _button(btns, "Close", command=root.destroy).pack(side="left", padx=6)
+        root.bind("<Escape>", lambda e: root.destroy())
+        _center(root)
+
+    def show_action(action):
+        clear()
+        row = 0
+
+        titles = {
+            "change_password":  "Change Master Password",
+            "setup_recovery":   "Set Up Paper Recovery Key",
+            "reissue_recovery": "Reissue Recovery Key",
+            "upgrade_v2":       "Upgrade Vault to v2",
+        }
+        _label(container, titles.get(action, action), font=FONT_TITLE).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"],
+            pady=(pad["pady"], 14))
+        row += 1
+
+        if action == "upgrade_v2":
+            _label(container,
+                   "Warning: after upgrading, older versions of this plugin will "
+                   "no longer be able to open the vault. An older build will "
+                   "report 'Wrong password' for a correct password — there is no "
+                   "data loss, but it is alarming if you are not expecting it. "
+                   "Only upgrade if all your installations are current.",
+                   fg=WARNING, justify="left").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+
+        if action == "setup_recovery":
+            _label(container,
+                   "A paper recovery key lets you reset your master password if you "
+                   "forget it. It genuinely increases attack surface: anyone who finds "
+                   "the paper can reset your password. "
+                   "A password-only vault is also a valid and secure choice.",
+                   fg=FG_MUTED, justify="left").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+
+        if action == "reissue_recovery":
+            _label(container,
+                   "This generates a new recovery key. "
+                   "Your old paper key stops working immediately.",
+                   fg=WARNING, justify="left").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+
+        err_lbl = _label(container, "", fg=DANGER)
+
+        if action == "change_password":
+            _label(container, "Current password:").grid(row=row, column=0, sticky="e", **pad)
+            old_pw = _entry(container, show="*", width=30)
+            old_pw.grid(row=row, column=1, **pad)
+            row += 1
+
+            _label(container, f"New password\n(at least {MIN_PASSWORD_LEN} chars):").grid(
+                row=row, column=0, sticky="e", **pad)
+            new_pw1 = _entry(container, show="*", width=30)
+            new_pw1.grid(row=row, column=1, **pad)
+            row += 1
+
+            _label(container, "Confirm new password:").grid(row=row, column=0, sticky="e", **pad)
+            new_pw2 = _entry(container, show="*", width=30)
+            new_pw2.grid(row=row, column=1, **pad)
+            row += 1
+
+            err_lbl.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+            row += 1
+
+            def on_change_pw():
+                old = old_pw.get()
+                pw_err = _validate_password_fields(new_pw1.get(), new_pw2.get())
+                if not old:
+                    _show_error(root, err_lbl, "Current password cannot be empty.")
+                    return
+                if pw_err:
+                    _show_error(root, err_lbl, pw_err)
+                    return
+                outcome["action"] = "change_password"
+                outcome["old_password"] = old
+                outcome["new_password"] = new_pw1.get()
+                root.destroy()
+
+            btns = tk.Frame(container, bg=WINDOW_BG)
+            btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+            _button(btns, "Back", command=show_main).pack(side="left", padx=6)
+            _button(btns, "Change Password", command=on_change_pw, kind="primary").pack(
+                side="left", padx=6)
+            root.bind("<Escape>", lambda e: show_main())
+            root.bind("<Return>", lambda e: on_change_pw())
+            old_pw.focus_force()
+
+        else:
+            # setup_recovery, reissue_recovery, upgrade_v2 — all need the
+            # current password; the caller drives the actual vault operation.
+            _label(container, "Master password:").grid(row=row, column=0, sticky="e", **pad)
+            pw_entry = _entry(container, show="*", width=30)
+            pw_entry.grid(row=row, column=1, **pad)
+            row += 1
+
+            err_lbl.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+            row += 1
+
+            confirm_labels = {
+                "setup_recovery":   "Set Up Recovery Key",
+                "reissue_recovery": "Reissue Recovery Key",
+                "upgrade_v2":       "Upgrade to v2",
+            }
+
+            def on_confirm():
+                pw = pw_entry.get()
+                if not pw:
+                    _show_error(root, err_lbl, "Password cannot be empty.")
+                    return
+                outcome["action"] = action
+                outcome["password"] = pw
+                root.destroy()
+
+            btns = tk.Frame(container, bg=WINDOW_BG)
+            btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+            _button(btns, "Back", command=show_main).pack(side="left", padx=6)
+            _button(btns, confirm_labels.get(action, "Confirm"),
+                    command=on_confirm, kind="primary").pack(side="left", padx=6)
+            root.bind("<Escape>", lambda e: show_main())
+            root.bind("<Return>", lambda e: on_confirm())
+            pw_entry.focus_force()
+
+        _center(root)
+
+    show_main()
     root.mainloop()
     return outcome

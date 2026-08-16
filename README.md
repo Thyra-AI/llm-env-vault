@@ -36,8 +36,9 @@ The vault lives as a small set of files, in one of two places depending on how y
 |---|---|---|---|
 | `llm.env` | `VAR_NAME="value N"` placeholders, auto-generated | No secrets — but gitignored here, see below | Yes |
 | `vault_index.json` | `VAR_NAME → placeholder number` map (no secrets) | No secrets — but gitignored here, see below | Yes |
-| `vault.enc` | Real values, Fernet-encrypted | No (gitignored) | **No** |
-| `vault.salt` | 16-byte PBKDF2 salt | No (gitignored) | **No** |
+| `vault.enc` | Encrypted vault (v1: Fernet; v2: AES-256-GCM with a versioned header) | No (gitignored) | **No** |
+| `vault.enc.bak` | Pre-change backup, deleted once read-back verification passes | No (gitignored) | **No** |
+| `vault.salt` | 16-byte KDF salt (kept after a v2 upgrade — deleting it bricks v1 backups) | No (gitignored) | **No** |
 | `targets.json` | Paths of migrated `.env` files | No (gitignored — machine-local paths, not secret) | No |
 
 `llm.env` and `vault_index.json` contain no secrets, and a migrated project's own placeholder-only
@@ -49,7 +50,12 @@ everyone who installs the plugin.
 Key properties:
 
 - **The master password never touches disk.** It's never a CLI argument, never an env var, and only lives in the GUI dialog's memory for the duration of one prompt.
-- **Encryption:** PBKDF2-HMAC-SHA256 (480,000 iterations) key derivation; Fernet (AES-128-CBC + HMAC) for the vault itself.
+- **Encryption (v2):** scrypt (`n=2**16, r=8, p=1`, 64 MiB) for key derivation; AES-256-GCM for the
+  body with the on-disk header bytes as AAD — any header change fails authentication before decryption.
+  v1 vaults keep PBKDF2-HMAC-SHA256 (480,000 iterations) and Fernet (AES-128-CBC + HMAC) unchanged.
+- **Envelope encryption (v2):** a random data key (DEK) encrypts the body and is wrapped once per
+  credential — master password and optional recovery key can both open one vault without storing the
+  body twice. Every credential change rotates the DEK.
 - **All vault file writes are atomic** (temp file + fsync + atomic replace) — a crash or power loss mid-write can't leave a corrupted file.
 - **Nothing happens silently.** Every operation that touches a real value opens a dialog showing exactly what will change, and nothing is written until you click Allow.
 
@@ -135,7 +141,12 @@ All GUI dialogs run synchronously on the server's main thread by design (Tkinter
 
 ### `vault_status()`
 
-No password, no GUI. Returns what the vault knows: whether it exists, the managed variable names and their placeholder numbers, the path to `llm.env`, and which external files are registered as sync targets. Never returns real values.
+No password, no GUI. Returns what the vault knows: whether it exists, the managed variable names and
+their placeholder numbers, the path to `llm.env`, and which external files are registered as sync
+targets. As of 1.4.0, also returns `format_version` and, if a recovery key is configured, a
+non-secret `recovery_key` object with `present`, `id` (4-character slot identifier), and `created`
+timestamp. `vault_id` is deliberately not exposed — it would be a stable fingerprint correlating vault
+copies across machines, with no agent use case. Never returns real values.
 
 ### `sync_llm_env()`
 
@@ -152,9 +163,41 @@ operation), then a new-password field. The new password must be at least 12 char
 derives a new key from the new password and a fresh salt, re-encrypts the vault, and writes both
 `vault.enc` and `vault.salt` atomically.
 
-**Honest limit:** rotation protects secrets stored *after* the change. Anyone who copied
-`vault.enc` and `vault.salt` before the change, and who later learns the old password, can still
-decrypt that earlier snapshot. Treat old backups as compromised once you rotate.
+**v2 vaults:** credential changes rotate the DEK — a copy of `vault.enc` made before the change
+cannot be used to decrypt future bodies. For v2 vaults, changing the password also issues a new
+recovery key and invalidates the old printout; the dialog says so before writing. **v1 vaults:** the
+older limit applies — anyone who copied `vault.enc` and `vault.salt` before the change, and who later
+learns the old password, can still decrypt that earlier snapshot.
+
+### `manage_vault()`
+
+Password-gated hub for vault credential management: change the master password, set up or reissue a
+paper recovery key, or upgrade the vault from v1 to v2 format. Each sub-operation opens its own
+consent dialog; nothing is written until you allow.
+
+**Password change:** re-derives a new wrapping key from a fresh salt and rotates the DEK — a copy of
+`vault.enc` made before the change cannot decrypt future bodies. For v2 vaults, this also issues a new
+recovery key and invalidates the old printout; the dialog says so before writing. A `vault.enc.bak` is
+written before the change and deleted once read-back verification passes.
+
+**Recovery key setup:** generates 160 bits of entropy, displayed as `RK1` plus 8 groups of 4 Crockford
+base32 characters and a 4-character checksum. A 4-character slot id makes a stale printout
+identifiable. The setup ceremony requires re-entering the full key from paper before it is accepted.
+Shown only in a native dialog with no copy, save, or print controls.
+
+**v1 → v2 upgrade:** rewrites `vault.enc` with the versioned header, AES-256-GCM body, and envelope
+encryption. See [Vault format upgrade](#vault-format-upgrade-v1--v2) below for the full implications.
+
+### `recover_vault()`
+
+The only entry point that does not require the master password — this is what makes the paper recovery
+key useful in practice. Enter the full key from your printout; if valid, a new master password is set
+and vault access is restored. A new recovery key is issued on completion; the old printout is
+invalidated immediately.
+
+**Honest limits:** a recovery key cannot recover the password — the password is never stored. It
+recovers *access* and the flow sets a new credential. Lose the paper AND forget the password and the
+data is gone.
 
 ### `remove_secret(var_name)`
 
@@ -219,6 +262,28 @@ run_with_env(
 **`background=True`** — starts the process detached (stdin closed, stdout/stderr redirected to a temp log file — never the MCP server's own stdio, which is the JSON-RPC channel) and returns immediately with the `pid` and `log_file` path. For long-running things like dev servers. The tool does not track or stop the process afterward — use your own process manager. Foreground calls block and return stdout/stderr (truncated to the last 4000 chars each) plus the exit code.
 
 Every result includes an `auto_allowed` flag, plus a `trust_note` whenever trust was used, granted, or revoked — an auto-allowed run is never silent even though no dialog appeared.
+
+---
+
+## Vault format upgrade (v1 → v2)
+
+New vaults created with 1.4.0 or later use v2 format. Existing v1 vaults keep working unchanged
+until you choose to upgrade via `manage_vault`.
+
+**What changes:** `vault.enc` gains a structured header (`magic || version || hdr_len ||
+header-JSON || nonce || body`); AES-256-GCM replaces Fernet for the body; scrypt replaces PBKDF2
+for key derivation; a random DEK is introduced, which is what allows a second credential (the
+optional recovery key) without storing the body twice.
+
+**What stays:** `vault.salt` is kept forever after the upgrade — deleting 16 bytes to tidy up
+would permanently destroy decryptability of every v1 `vault.enc` backup you hold.
+
+**It is permanent for that file.** Once upgraded, older plugin builds (pre-1.4.0) cannot read the
+vault and will report an incorrect-password error for a correct password. The upgrade dialog warns
+before writing.
+
+**It is opt-in.** A v1 vault is fully functional and not degraded. Upgrade when you want the
+stronger KDF and AES-256-GCM authentication, or to enable the recovery key.
 
 ---
 
@@ -298,6 +363,22 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
   can copy `vault.enc` and `vault.salt`. Decryption then depends entirely on the master password,
   which is why the minimum was raised to 12 characters. A long, random passphrase (the 4-word
   generated option offered at creation) is strongly recommended.
+- **The recovery key is a real increase in attack surface.** It converts "compromise requires
+  something in a human's head" into "compromise requires a piece of paper" — screenshots, phone
+  photos, a filing cabinet. It is opt-in for exactly that reason; a password-only vault is fully
+  supported and not degraded.
+- **A recovery key cannot recover the password** — the password is never stored. It recovers
+  *access*, and the flow sets a new password immediately.
+- **Every credential change rotates the DEK.** Re-wrapping alone would be theater: an adversary
+  who copied `vault.enc` today and later learned the old password could unwrap a DEK that still
+  decrypts future bodies. DEK rotation means the copy is ciphertext locked to the moment it was
+  made.
+- **KDF parameters live in an attacker-writable header** for v2 vaults, and are validated before
+  use — a hostile `n` is rejected rather than allowed to exhaust memory (ceiling: 256 MiB). The
+  header bytes are bound as AES-256-GCM AAD, so a tampered parameter also fails body authentication.
+- **Rollback is undetectable in-file.** Someone with write access can swap in an older valid
+  `vault.enc` and reinstate a revoked secret. The in-session trust fingerprint catches only the
+  live case.
 - **Never paste the master password (or any secret value) into chat with an AI assistant.** Type
   them only into the vault's own GUI windows.
 - **`run_with_env` output is redacted before it reaches the AI, but this is accident-prevention,
@@ -310,7 +391,11 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
   injection to what the command actually needs.
 - This is not an "intercept every file access" system — that would require a kernel-level filter driver or virtual filesystem (elevated install, fragile). Instead: files are placeholder-only by default, and real values only exist at moments a human deliberately triggered, each gated by the password prompt.
 - `vault_index.json` is validated on every read, not just write — a hand-edited or tampered entry can't inject unexpected content into a synced target file.
-- Crypto details: PBKDF2-HMAC-SHA256 at 480,000 iterations for key derivation; Fernet (AES-128-CBC + HMAC) for the vault. If `vault.salt` exists but `vault.enc` doesn't, the code refuses to silently regenerate a new salt — that would permanently brick decryption of any surviving `vault.enc` backup keyed to the old salt.
+- **Crypto details:** v2 vaults use scrypt (`n=2**16, r=8, p=1`, 64 MiB) for key derivation,
+  AES-256-GCM for the body (header bytes as AAD), and envelope encryption (a random DEK wrapped once
+  per credential). v1 vaults use PBKDF2-HMAC-SHA256 at 480,000 iterations and Fernet (AES-128-CBC +
+  HMAC), frozen and unchanged. If `vault.salt` exists but `vault.enc` doesn't, the code refuses to
+  regenerate a new salt — that would permanently brick any surviving `vault.enc` backup.
 
 ## Known limitations
 
@@ -331,9 +416,19 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
   of the command. A sync client can upload that file within the command's lifetime, and deleting
   the file afterward does not recall it from the sync provider's servers or any device that already
   received it.
-- **There is no recovery path if the master password is forgotten.** The vault cannot be decrypted
-  without it. A paper recovery key is planned for 1.4.0; until then, the vault is unrecoverable
-  if the password is lost.
+- **Lose the paper AND forget the password and the data is gone.** That is the design working as
+  intended. `manage_vault` offers an opt-in recovery key, but a password-only vault has no recovery
+  path — and even with a recovery key, losing both the paper and the password means the vault is
+  unrecoverable.
+- **Downgrading to an older plugin build after upgrading to v2** produces an incorrect-password
+  error for a correct password. The upgrade dialog warns before writing; there is no way to make an
+  old build understand the new format.
+- **Any header bit-flip in a v2 vault makes the file unopenable** — the price of binding the
+  header as AES-256-GCM AAD. `vault.enc.bak` is written before credential changes and deleted once
+  read-back verification passes.
+- **Tampering with the password slot is indistinguishable from a wrong password.** Only the
+  DEK-keyed body tag authenticates the header; you need a working slot to get the DEK — so that
+  error still surfaces as "incorrect master password (or the vault file is corrupted)".
 
 ## Troubleshooting
 
@@ -362,24 +457,26 @@ change. The dialog says which. See Trusted commands above.
 ## Tests
 
 The suite is hand-rolled test scripts (no pytest required, though they also run under pytest),
-plus additional pytest-only files added in 1.3.0:
+plus additional pytest-only files:
 
-- `tests/test_trust.py` — covers the trusted-commands / drift-detection feature, the vault's
-  storage and padding behaviour, and the plugin launcher's venv provisioning and reprovisioning
-  logic. Includes two true end-to-end tests that spawn a real child process and assert the actual
-  secret value is injected on both the fresh-unlock and auto-allowed paths. Fully isolates the
-  real vault (temp dir, no real Tkinter window) — running the tests never touches your actual
-  vault.
-- `tests/test_install_migrate_robustness.py` — regression tests: OSError robustness (unreachable
-  UNC paths, nonexistent paths, physical drive paths on Windows all return clean error dicts
-  instead of crashing), `sync_target_file`'s guard against mass-removing every managed line at
-  once, and the assertion that credential-shaped text swallowed during a migration is redacted
-  rather than leaked into a warning message.
+- `tests/test_trust.py` — trusted-commands / drift-detection feature, vault storage and padding
+  behaviour, and plugin-launcher venv provisioning logic. Includes two true end-to-end tests that
+  spawn a real child process and assert secret injection on both the fresh-unlock and auto-allowed
+  paths. Fully isolates the real vault (temp dir, no real Tkinter window).
+- `tests/test_install_migrate_robustness.py` — OSError robustness (UNC paths, nonexistent paths,
+  physical drive paths all return clean error dicts), `sync_target_file`'s mass-removal guard, and
+  assertion that credential-shaped text is redacted rather than leaked in parse warnings.
 - `tests/test_trust_hardening.py`, `tests/test_store_hardening.py`, `tests/test_gui_helpers.py`,
-  `tests/test_redaction.py` — added in 1.3.0, covering the security-hardening changes in this
-  release (TTL enforcement, output redaction, dialog sanitizers, and store scoping).
+  `tests/test_redaction.py` — 1.3.0 security-hardening coverage: TTL enforcement, output
+  redaction, dialog sanitizers, and store scoping.
+- `tests/test_crypto_v2.py`, `tests/test_vault_format.py`, `tests/test_store_v2.py`,
+  `tests/test_gui_v2.py`, `tests/test_manage_vault.py`, `tests/test_integration_v2.py` — 1.4.0
+  coverage: v2 format round-trips, AES-256-GCM authentication, scrypt KDF, envelope encryption,
+  DEK rotation, recovery key setup and use, manage_vault / recover_vault flows, and end-to-end
+  tests across both format versions.
 
-Run from the project venv:
+All tests fully isolate the real vault — running the suite never touches your actual vault. Run
+from the project venv:
 
 ```bash
 python tests/test_trust.py
@@ -395,7 +492,9 @@ Or all at once with `pytest` from the repo root.
 If you are an AI assistant with this MCP server available:
 
 - The tool descriptions in your schemas are authoritative — this section supplements them.
-- **Never open, cat, or read `vault.enc` or `vault.salt`.** They are encrypted, but treat them as off-limits entirely. Don't read `targets.json` either — it holds machine-local paths and there is no reason for you to read it.
+- **Never open, cat, or read `vault.enc`, `vault.enc.bak`, or `vault.salt`.** They are encrypted,
+  but treat them as off-limits entirely. Don't read `targets.json` either — it holds machine-local
+  paths and there is no reason for you to read it.
 - Only `llm.env` and `vault_index.json` are meant for you to read directly.
 - **Never ask the human to paste a secret value or the master password into chat.** Route secrets through `add_secret` / `install_migrate` and let the human type values into the GUI themselves.
 - Prefer `only_vars` on `run_with_env` whenever you know which variables the command needs.
