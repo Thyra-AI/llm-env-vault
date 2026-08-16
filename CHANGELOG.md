@@ -37,8 +37,10 @@ unchanged until the human opts into an upgrade via `manage_vault`.
 - **`manage_vault()` tool.** Change master password, set up or reissue a recovery key, or upgrade a
   v1 vault to v2. Each sub-operation opens its own consent dialog.
 - **`recover_vault()` tool.** The only entry point that does not require the master password — enter
-  the paper recovery key, set a new password, and access is restored. A new recovery key is issued on
-  completion; the old printout is invalidated.
+  the paper recovery key, set a new password, and access is restored. The printout keeps working:
+  the data key is rotated, but the recovery slot is re-wrapped with the same key the human just
+  supplied — the one credential operation that can do this, because it alone has the key in hand.
+  `change_password` cannot, which is why that one does issue a replacement.
 - **`vault_status()` additions:** `format_version`, and a non-secret `recovery_key` object
   (`present`, `id`, `created`) when a recovery key is configured. `vault_id` is not exposed — it
   would be a stable fingerprint correlating vault copies, with no agent use case.
@@ -61,9 +63,12 @@ unchanged until the human opts into an upgrade via `manage_vault`.
   attempt is simply an error — while a password the human cannot remember is a certain, permanent
   loss of the vault. The trade-off is explicit and holds only while `vault.enc` stays on the
   machine: a copy taken off it is attacked offline, where a short user-chosen password falls to a
-  wordlist in seconds regardless of the KDF. The generated 4-word passphrase remains offered at
-  creation and is still the right choice if offline attack is in your threat model. Existing
-  vaults are unaffected; the floor applies only at creation and password change.
+  wordlist in seconds regardless of the KDF. If offline attack is in your threat model, choose a
+  long passphrase of your own. Existing vaults are unaffected; the floor applies only at creation
+  and password change.
+- **The "Generate passphrase" button was removed.** It filled the two masked password fields, so
+  the value it produced was never visible to the person who had to remember it — a generator whose
+  output you cannot read is a data-loss trap, not a convenience.
 - **`cryptography` floor raised to `>=42`.** Older OpenSSL builds defaulted scrypt's `maxmem` to
   32 MiB; the v2 KDF asks for 64 MiB, so an older pin fails at runtime on some installs.
 

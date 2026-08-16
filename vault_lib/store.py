@@ -1382,11 +1382,24 @@ def recover_with_recovery_key(
 ) -> Optional[str]:
     """Use a recovery key to set a new master password.
 
-    Rotates the DEK (same reason as change_password), issues a new recovery
-    key (since the old one was used), and returns the new formatted key string.
+    Rotates the DEK, as every credential change does, and re-wraps the
+    recovery slot with the SAME recovery key. Returns None -- the caller has
+    no new key to display, because the human's existing printout still works.
 
-    The new recovery key replaces the old one in the vault.  The caller
-    MUST display the returned key to the user immediately -- it is not stored.
+    This is the one credential operation that can keep the key, and the reason
+    is simply that we have it: the human just typed it in. change_password
+    cannot do this, because it runs without the paper key in hand and has no
+    way to re-wrap the rotated DEK for it.
+
+    An earlier version minted a replacement here, on the grounds that a key
+    read aloud off paper may have been observed. That reasoning is real but it
+    loses on balance: it invalidates a printout the user has already stored
+    safely, and forces the whole write-it-down ceremony again at the worst
+    possible moment -- they have just recovered from losing a password, and if
+    they skip or fumble the new ceremony they are left with no recovery path at
+    all. A speculative compromise traded against a concrete, repeated chance to
+    lose the vault. Anyone who believes the key WAS observed can reissue
+    deliberately from manage_vault, which is the right place for that judgement.
 
     Raises crypto.MalformedRecoveryKey if recovery_key_text is malformed.
     Raises crypto.WrongRecoveryKey if the key is well-formed but wrong.
@@ -1407,17 +1420,27 @@ def recover_with_recovery_key(
     vault_id = _vault_id_from_header(header)
     params = _params_from_header(header)
 
-    # Rotate the DEK so the compromised recovery key cannot decrypt future bodies.
+    # Rotate the DEK: an attacker holding a copy of the old ciphertext who
+    # later learns the old password must not get a key that still opens future
+    # bodies.
     new_dek = crypto.new_dek()
 
     new_pw_slot = _build_password_slot(bytes(new_dek), new_password, params, vault_id)
 
-    # Always issue a fresh recovery key after recovery (the old one was used,
-    # possibly observed, and is now invalid).
-    new_recovery_raw = crypto.new_recovery_key()
+    # Re-wrap the recovery slot with the SAME key the human just used, so their
+    # printout stays valid. Possible only because they supplied it a moment ago.
+    new_recovery_raw = crypto.parse_recovery_key(recovery_key_text)
     rec_slot, _ = _build_recovery_slot(
         bytes(new_dek), bytes(new_recovery_raw), vault_id
     )
+    # Preserve the slot id: it identifies the printout, and the printout has
+    # not changed. Rotating it would make a still-valid paper key look stale.
+    if header.get("slots"):
+        for _old in header["slots"]:
+            if _old.get("type") == "recovery" and _old.get("id"):
+                rec_slot["id"] = _old["id"]
+                rec_slot["created"] = _old.get("created", rec_slot.get("created"))
+                break
 
     new_header = dict(header)
     new_header["slots"] = [new_pw_slot, rec_slot]
@@ -1440,7 +1463,11 @@ def recover_with_recovery_key(
         )
 
     _cleanup_backup()
-    return crypto.format_recovery_key(bytes(new_recovery_raw))
+    # Zero our copy; the human's paper is the only place this key lives.
+    for _i in range(len(new_recovery_raw)):
+        new_recovery_raw[_i] = 0
+    # None: nothing new to display, because the existing printout still works.
+    return None
 
 
 def vault_format_version() -> Optional[int]:

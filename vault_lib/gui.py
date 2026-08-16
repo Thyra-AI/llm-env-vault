@@ -149,6 +149,12 @@ FONT_BUTTON = (FONT_FAMILY, 10, "bold")
 # README says so plainly rather than implying the minimum is strong.
 MIN_PASSWORD_LEN = 5
 
+# How long a copied recovery key is allowed to sit on the clipboard before
+# it is wiped. The clipboard is readable by every process running as this
+# user, so the window is kept short -- long enough to paste into the
+# confirm field, not long enough to still be there later.
+_CLIPBOARD_CLEAR_SECONDS = 30
+
 # Blocklist of passwords that survive no attack at all, and the compensating
 # control for the low length floor above. Length and dictionary rank are
 # different axes: "password" is eight characters and falls in the first
@@ -347,21 +353,76 @@ def _new_window():
 
 
 def _foreground(win):
-    """Drag the window in front of whatever the human is looking at.
+    """Take the foreground and the keyboard, not just the top of the z-order.
 
-    focus_force() alone only moves keyboard focus *within* the application on
-    Windows -- the window can still be painted behind the editor, so the first
-    thing typed goes somewhere else entirely. lift() plus a topmost flip is
-    what actually raises it.
+    This is a security control, not a politeness. If the dialog is visible but
+    does NOT own keyboard focus, the human starts typing their master password
+    into whatever window does -- an editor, a terminal, a chat box. The secret
+    this whole product exists to contain ends up somewhere arbitrary, in
+    plaintext, with no way to take it back.
+
+    focus_force() is not enough on its own. Windows refuses SetForegroundWindow
+    to a process that is not already the foreground process (SPI_SETFOREGROUND-
+    LOCKTIMEOUT), and this server is typically launched in the background by an
+    editor or an MCP client, so it is exactly that kind of process. Tk's
+    focus_force() then moves focus only *within* our application, which changes
+    nothing about where the keystrokes actually land.
+
+    The AttachThreadInput dance below is the documented way through: a thread
+    attached to the current foreground thread's input queue temporarily shares
+    its input state, and is allowed to set the foreground window while attached.
+    Every step is best-effort -- if any of it is refused we still have topmost
+    and lift, so the window is at least visible.
     """
     try:
+        win.deiconify()
         win.lift()
         win.attributes("-topmost", True)
+        win.update_idletasks()
+        _win32_take_foreground(win)
         win.focus_force()
-        # Drop the always-on-top flag once we have the foreground, so the
-        # dialog does not hover over every other window for its whole life.
-        win.after(300, lambda: _safe_untopmost(win))
+        # Drop always-on-top once we hold the foreground, so the dialog does not
+        # hover over everything else for the rest of its life.
+        win.after(400, lambda: _safe_untopmost(win))
     except Exception:  # noqa: BLE001 -- window manager may refuse any of this
+        pass
+
+
+def _win32_take_foreground(win):
+    """Windows-only: borrow the foreground thread's input state long enough to
+    legally call SetForegroundWindow. No-op everywhere else, and silent on any
+    failure -- this is a best-effort improvement on top of topmost/lift."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        # Tk's winfo_id() is the client area; the real top-level window Windows
+        # cares about is its parent.
+        hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
+
+        fg_hwnd = user32.GetForegroundWindow()
+        if fg_hwnd == hwnd:
+            return
+
+        target_tid = kernel32.GetCurrentThreadId()
+        fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, ctypes.byref(wintypes.DWORD()))
+
+        attached = False
+        if fg_tid and fg_tid != target_tid:
+            attached = bool(user32.AttachThreadInput(fg_tid, target_tid, True))
+        try:
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.SetActiveWindow(hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(fg_tid, target_tid, False)
+    except Exception:  # noqa: BLE001 -- ctypes, DLL, or the OS refusing
         pass
 
 
@@ -385,6 +446,31 @@ def _entry(parent, **kw):
     return tk.Entry(parent, bg=FIELD_BG, fg=FG, insertbackground=FG,
                      relief="flat", highlightthickness=1,
                      highlightbackground=BORDER, highlightcolor=ACCENT, **kw)
+
+
+def _textbox(parent, **kw):
+    """A read-only-ish text box styled identically to _entry.
+
+    Every tk.Text in this file used to be constructed by hand, and each one
+    quietly omitted `highlightcolor`. Tk then falls back to its own default for
+    the focus ring, so a box that had focus was outlined in a completely
+    different colour from the entry beside it -- boxes that should look like
+    siblings visibly did not. Centralising it means a new box cannot pick up a
+    different palette by being written slightly differently.
+
+    Defaults to wrapping rather than clipping: text that runs past the right
+    edge should flow onto another line and make the dialog taller, never
+    disappear off the side where the reader has no idea it exists. Callers that
+    genuinely need fixed-column layout (the recovery key grid) pass wrap="none"
+    and size the box to fit.
+    """
+    kw.setdefault("font", FONT_BODY)
+    kw.setdefault("wrap", "word")
+    kw.setdefault("fg", FG)  # setdefault, not a literal: callers override it
+    return tk.Text(parent, bg=FIELD_BG, insertbackground=FG,
+                    relief="flat", highlightthickness=1,
+                    highlightbackground=BORDER, highlightcolor=ACCENT,
+                    selectbackground=ACCENT, **kw)
 
 
 def _divider(parent):
@@ -519,45 +605,38 @@ def _show_error(root, err_label, text):
     _center(root)
 
 
-def _create_v2_with_drill(password: str, offer_recovery: bool, err_label, root) -> None:
-    """Create the first-run v2 vault, running the write-it-down drill BEFORE
-    the recovery slot is committed.
+def run_recovery_drill():
+    """Generate a recovery key and make the human write it down. Returns the
+    raw key bytes if they confirmed, or None if they declined or bailed out.
 
-    The order is the point. The obvious flow -- create the vault with a
-    recovery slot, then show the key -- leaves a vault whose header advertises
-    recovery_slot: true even when the human bails out of the drill, for a key
-    that was never written down and can never be shown again. vault_info()
-    would then report protection the user does not have, and they would find
-    that out at the one moment it matters. Nothing in normal operation ever
-    exercises a recovery key, so the lie would keep indefinitely.
+    Deliberately called while the human is choosing their PASSWORD, not after
+    they have gone on to type a secret value. Setting up a recovery credential
+    belongs with the other credential decisions; surfacing it several steps
+    later, after an unrelated Allow, reads as though something went wrong.
 
-    Since the key is generated locally, drilling first costs nothing and makes
-    the cancel path honest: no slot is written, and the vault is simply
-    password-only -- a fully supported state, not a degraded one.
+    Nothing is written here. The caller passes the returned key to
+    create_v2_vault, so declining simply produces a password-only vault --
+    never a vault advertising a recovery slot whose key nobody holds.
     """
-    raw_rk = new_recovery_key() if offer_recovery else None
+    raw = new_recovery_key()
     try:
-        keep = False
-        if raw_rk is not None:
-            # Blank the parent's status line so "Working..." isn't sitting
-            # behind the drill window for however long the human takes.
-            err_label.config(text="", fg=FG_MUTED)
-            root.update_idletasks()
-            # slot_id is empty here: the store assigns it at write time, and it
-            # carries no staleness value at first run -- no earlier key exists
-            # to confuse this one with.
-            keep = show_recovery_key_dialog(format_recovery_key(bytes(raw_rk)), "")
-        err_label.config(text="Working...", fg=FG_MUTED)
-        root.update_idletasks()
-        if keep:
-            store.create_v2_vault(password, recovery_raw=bytes(raw_rk))
-        else:
-            store.create_v2_vault(password)
+        # slot_id is empty: the store assigns it at write time, and it carries
+        # no staleness value at first run -- no earlier key exists yet.
+        if show_recovery_key_dialog(format_recovery_key(bytes(raw)), ""):
+            return bytes(raw)
+        return None
     finally:
-        if raw_rk is not None:
-            # Best-effort in CPython; does not defeat a memory dump.
-            for _i in range(len(raw_rk)):
-                raw_rk[_i] = 0
+        # Best-effort in CPython; does not defeat a memory dump.
+        for _i in range(len(raw)):
+            raw[_i] = 0
+
+
+def create_first_vault(password, recovery_raw, err_label, root):
+    """Create the first-run v2 vault, optionally with a recovery slot whose
+    key the human has already confirmed via run_recovery_drill()."""
+    err_label.config(text="Working...", fg=FG_MUTED)
+    root.update_idletasks()
+    store.create_v2_vault(password, recovery_raw=recovery_raw)
 
 
 def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
@@ -576,12 +655,12 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
     store.validate_var_name(var_name)
     outcome = {"approved": False, "partial_failure": None}
     state = {"password": None, "secrets": None, "first_run": not store.vault_exists(),
-             "offer_recovery": False}
+             "offer_recovery": False, "recovery_raw": None}
     pad = {"padx": 18, "pady": 7}
 
     root, _run_modal = _new_window()
     root.title("llm-env-vault")
-    root.resizable(False, False)
+    root.resizable(True, True)
     _style(root)
 
     container = tk.Frame(root, bg=WINDOW_BG)
@@ -661,6 +740,10 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
                 state["offer_recovery"] = rk_opt_var.get() if rk_opt_var is not None else False
                 state["password"] = password
                 state["secrets"] = {}
+                # Recovery setup belongs with the password decision, not after
+                # an unrelated Allow several steps later.
+                if state["offer_recovery"]:
+                    state["recovery_raw"] = run_recovery_drill()
                 show_step2()
                 return
             try:
@@ -738,8 +821,8 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
                     # freeze the window otherwise.
                     err.config(text="Working...", fg=FG_MUTED)
                     root.update_idletasks()
-                    _create_v2_with_drill(state["password"],
-                                          state.get("offer_recovery"), err, root)
+                    create_first_vault(state["password"],
+                                       state.get("recovery_raw"), err, root)
                     err.config(text="", fg=DANGER)
                     state["first_run"] = False
                     secrets = {}
@@ -802,7 +885,7 @@ def remove_secret_dialog(var_name: str, placeholder: int):
 
     root, _run_modal = _new_window()
     root.title("llm-env-vault")
-    root.resizable(False, False)
+    root.resizable(True, True)
     _style(root)
 
     container = tk.Frame(root, bg=WINDOW_BG)
@@ -970,12 +1053,12 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
     sensitive_names = set(sensitive_names or ())
     outcome = {"approved": False, "partial_failure": None, "conflicts": []}
     state = {"password": None, "secrets": None, "first_run": not store.vault_exists(),
-             "offer_recovery": False}
+             "offer_recovery": False, "recovery_raw": None}
     pad = {"padx": 18, "pady": 7}
 
     root, _run_modal = _new_window()
     root.title("llm-env-vault")
-    root.resizable(False, False)
+    root.resizable(True, True)
     _style(root)
 
     container = tk.Frame(root, bg=WINDOW_BG)
@@ -1001,16 +1084,10 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                 row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
         path_frame = tk.Frame(container, bg=WINDOW_BG)
-        path_text = tk.Text(path_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
-                            highlightthickness=1, highlightbackground=BORDER,
-                            selectbackground=ACCENT, insertbackground=FG,
-                            height=2, width=52, wrap="none")
-        path_xscroll = _scrollbar(path_frame, orient="horizontal", command=path_text.xview)
-        path_text.config(xscrollcommand=path_xscroll.set)
+        path_text = _textbox(path_frame, fg=FG, font=FONT_BODY, height=2, width=52)
         path_text.insert("end", _collapse_whitespace(str(target)))
         path_text.config(state="disabled")
         path_text.grid(row=0, column=0, sticky="we")
-        path_xscroll.grid(row=1, column=0, sticky="ew")
         path_frame.grid_columnconfigure(0, weight=1)
         path_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
         row += 1
@@ -1069,6 +1146,10 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                 state["offer_recovery"] = rk_opt_var.get() if rk_opt_var is not None else False
                 state["password"] = password
                 state["secrets"] = {}
+                # Recovery setup belongs with the password decision, not after
+                # an unrelated Allow several steps later.
+                if state["offer_recovery"]:
+                    state["recovery_raw"] = run_recovery_drill()
                 show_step2()
                 return
             try:
@@ -1138,13 +1219,9 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
 
         list_height = min(8, max(2, list_count))
         txt_frame = tk.Frame(container, bg=WINDOW_BG)
-        txt = tk.Text(txt_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
-                      highlightthickness=1, highlightbackground=BORDER,
-                      selectbackground=ACCENT, insertbackground=FG,
-                      height=list_height, width=46, wrap="none")
+        txt = _textbox(txt_frame, fg=FG, font=FONT_BODY, height=list_height, width=46)
         yscroll = _scrollbar(txt_frame, orient="vertical", command=txt.yview)
-        xscroll = _scrollbar(txt_frame, orient="horizontal", command=txt.xview)
-        txt.config(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        txt.config(yscrollcommand=yscroll.set)
         for name in display_names:
             label = name
             if name in other_owner:
@@ -1157,7 +1234,6 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
         # vertically: the "[OVERWRITES value used by ...]" marker on a
         # collision line -- consent-relevant info about whose value is
         # about to be destroyed -- can exceed the box's width on its own.
-        xscroll.grid(row=1, column=0, sticky="ew")
         txt_frame.grid_rowconfigure(0, weight=1)
         txt_frame.grid_columnconfigure(0, weight=1)
         txt_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
@@ -1176,7 +1252,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                    f"Warning: {len(other_owner)} name(s) above are already used by another "
                    f"registered project (listed first, scroll up if needed). Continuing will "
                    f"overwrite that project's vault value: "
-                   f"{_safe_display(', '.join(sorted(other_owner)), 200)}",
+                   f"{_collapse_whitespace(', '.join(sorted(other_owner)))}",
                    fg=WARNING, justify="left").grid(
                 row=row, column=0, columnspan=2, sticky="w", **pad)
             row += 1
@@ -1184,7 +1260,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
         sensitive_in_migrate = sorted(n for n, _ in to_migrate if n in sensitive_names)
         if sensitive_in_migrate:
             _label(container,
-                   f"Warning: {_safe_display(', '.join(sensitive_in_migrate), 200)} "
+                   f"Warning: {_collapse_whitespace(', '.join(sensitive_in_migrate))} "
                    f"override(s) system/runtime environment variable(s) -- any command "
                    f"run_with_env launches later will see the vaulted value instead of "
                    f"the real system value.",
@@ -1209,8 +1285,8 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                     # Show a progress note before scrypt derivation.
                     err.config(text="Working...", fg=FG_MUTED)
                     root.update_idletasks()
-                    _create_v2_with_drill(state["password"],
-                                          state.get("offer_recovery"), err, root)
+                    create_first_vault(state["password"],
+                                       state.get("recovery_raw"), err, root)
                     err.config(text="", fg=DANGER)
                     state["first_run"] = False
                     secrets = {}
@@ -1457,7 +1533,7 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
 
     root, _run_modal = _new_window()
     root.title("llm-env-vault")
-    root.resizable(False, False)
+    root.resizable(True, True)
     _style(root)
 
     if only_vars is not None:
@@ -1484,10 +1560,7 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
         # be elided. trust_note can carry a full warning about what trust
         # monitoring covers; cutting it at 300 chars would defeat the purpose.
         note_frame = tk.Frame(root, bg=WINDOW_BG)
-        note_text = tk.Text(note_frame, bg=FIELD_BG, fg=WARNING, font=FONT_BODY,
-                            relief="flat", highlightthickness=1,
-                            highlightbackground=BORDER, selectbackground=ACCENT,
-                            insertbackground=FG, height=4, width=52, wrap="word")
+        note_text = _textbox(note_frame, fg=WARNING, height=4, width=52)
         note_yscroll = _scrollbar(note_frame, orient="vertical", command=note_text.yview)
         note_text.config(yscrollcommand=note_yscroll.set)
         note_text.insert("end", _collapse_whitespace(trust_note))
@@ -1509,19 +1582,14 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
         list_count = len(var_names)
         list_height = min(8, max(2, list_count))
         vars_frame = tk.Frame(root, bg=WINDOW_BG)
-        vars_txt = tk.Text(vars_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
-                           highlightthickness=1, highlightbackground=BORDER,
-                           selectbackground=ACCENT, insertbackground=FG,
-                           height=list_height, width=46, wrap="none")
+        vars_txt = _textbox(vars_frame, fg=FG, font=FONT_BODY, height=list_height, width=46)
         vars_yscroll = _scrollbar(vars_frame, orient="vertical", command=vars_txt.yview)
-        vars_xscroll = _scrollbar(vars_frame, orient="horizontal", command=vars_txt.xview)
-        vars_txt.config(yscrollcommand=vars_yscroll.set, xscrollcommand=vars_xscroll.set)
+        vars_txt.config(yscrollcommand=vars_yscroll.set)
         for name in var_names:
             vars_txt.insert("end", name + "\n")
         vars_txt.config(state="disabled")
         vars_txt.grid(row=0, column=0, sticky="nsew")
         vars_yscroll.grid(row=0, column=1, sticky="ns")
-        vars_xscroll.grid(row=1, column=0, sticky="ew")
         vars_frame.grid_rowconfigure(0, weight=1)
         vars_frame.grid_columnconfigure(0, weight=1)
         vars_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
@@ -1546,16 +1614,10 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     row += 1
 
     cmd_frame = tk.Frame(root, bg=WINDOW_BG)
-    cmd_text = tk.Text(cmd_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
-                        highlightthickness=1, highlightbackground=BORDER,
-                        selectbackground=ACCENT, insertbackground=FG,
-                        height=3, width=52, wrap="none")
-    cmd_xscroll = _scrollbar(cmd_frame, orient="horizontal", command=cmd_text.xview)
-    cmd_text.config(xscrollcommand=cmd_xscroll.set)
+    cmd_text = _textbox(cmd_frame, fg=FG, font=FONT_BODY, height=3, width=52)
     cmd_text.insert("end", _collapse_whitespace(command_str))
     cmd_text.config(state="disabled")
     cmd_text.grid(row=0, column=0, sticky="we")
-    cmd_xscroll.grid(row=1, column=0, sticky="ew")
     cmd_frame.grid_columnconfigure(0, weight=1)
     cmd_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
     row += 1
@@ -1567,16 +1629,10 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
             row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(6, 0))
         row += 1
         path_frame = tk.Frame(root, bg=WINDOW_BG)
-        path_text = tk.Text(path_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
-                            highlightthickness=1, highlightbackground=BORDER,
-                            selectbackground=ACCENT, insertbackground=FG,
-                            height=2, width=52, wrap="none")
-        path_xscroll = _scrollbar(path_frame, orient="horizontal", command=path_text.xview)
-        path_text.config(xscrollcommand=path_xscroll.set)
+        path_text = _textbox(path_frame, fg=FG, font=FONT_BODY, height=2, width=52)
         path_text.insert("end", _collapse_whitespace(str(materialize_path)))
         path_text.config(state="disabled")
         path_text.grid(row=0, column=0, sticky="we")
-        path_xscroll.grid(row=1, column=0, sticky="ew")
         path_frame.grid_columnconfigure(0, weight=1)
         path_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
         row += 1
@@ -1675,7 +1731,7 @@ def change_password_dialog() -> dict:
 
     root, _run_modal = _new_window()
     root.title("llm-env-vault")
-    root.resizable(False, False)
+    root.resizable(True, True)
     _style(root)
 
     row = 0
@@ -1773,7 +1829,7 @@ def show_recovery_key_dialog(key_text: str, slot_id: str) -> bool:
 
     root, _run_modal = _new_window()
     root.title("llm-env-vault — Recovery Key")
-    root.resizable(False, False)
+    root.resizable(True, True)
     _style(root)
 
     row = 0
@@ -1812,14 +1868,26 @@ def show_recovery_key_dialog(key_text: str, slot_id: str) -> bool:
     # leaves an unbroken 44-character run underneath -- easy to lose your place
     # in halfway through. Three rows of three groups in a monospace face keeps
     # the columns aligned so the eye can track position.
-    _groups = [g for g in key_text.replace("RK1", " ").replace("-", " ").split() if g]
-    _rows = ["  ".join(_groups[i:i + 3]) for i in range(0, len(_groups), 3)]
-    _pretty = "RK1\n" + "\n".join(_rows)
-    key_disp = tk.Text(key_frame, bg=FIELD_BG, fg=ACCENT,
-                       font=("Consolas", 15, "bold"), relief="flat",
-                       highlightthickness=1, highlightbackground=BORDER,
-                       selectbackground=ACCENT, insertbackground=FG,
-                       height=len(_rows) + 1, width=24, wrap="none",
+    # Strip the RK1 PREFIX only. A blanket .replace("RK1", ...) also eats any
+    # "RK1" that occurs inside the key data -- Crockford base32 produces those
+    # by chance -- silently turning a 4-character group into a 1-character one.
+    # The human then writes down a key that can never open the vault, and only
+    # finds out when they need it. This must stay a prefix strip.
+    _stripped = key_text.strip()
+    _body = _stripped[3:] if _stripped.upper().startswith("RK1") else _stripped
+    _groups = [g for g in _body.replace("-", " ").split() if g]
+    # Self-check before showing it. Every group is 4 Crockford characters; if
+    # the reformatting above ever produces anything else, the pretty form is
+    # lying about what the key is, and a human copying it down would be storing
+    # a key that cannot open the vault. Fall back to the canonical one-line
+    # string rather than display something wrong.
+    if all(len(g) == 4 for g in _groups) and _groups:
+        _rows = ["  ".join(_groups[i:i + 3]) for i in range(0, len(_groups), 3)]
+        _pretty = "RK1\n" + "\n".join(_rows)
+    else:
+        _rows = [_stripped]
+        _pretty = _stripped
+    key_disp = _textbox(key_frame, fg=ACCENT, font=("Consolas", 15, "bold"), height=len(_rows) + 1, width=24, wrap="none",
                        padx=12, pady=8)
     key_disp.insert("end", _pretty)
     key_disp.tag_configure("mid", justify="left")
@@ -1832,6 +1900,52 @@ def show_recovery_key_dialog(key_text: str, slot_id: str) -> bool:
     _label(root, "Groups of 4 characters separated by hyphens.  The last group is the checksum.",
            fg=FG_MUTED, justify="left").grid(
         row=row, column=0, columnspan=2, sticky="w", **pad)
+    row += 1
+
+    # Copy to clipboard, with an automatic wipe.
+    #
+    # This was deliberately absent at first: the Windows clipboard is readable
+    # by every process running as this user -- the agent included -- and
+    # Clipboard History can sync it to the cloud. That reasoning still holds
+    # and is why the clipboard is cleared again shortly after.
+    #
+    # It exists anyway because the alternative was worse in practice: without
+    # it the human hand-types 36 characters into the confirm field, and a
+    # transcription slip there reads as "the key does not work". A key nobody
+    # can be bothered to confirm is a recovery path that silently does not
+    # exist. Bounded exposure beats an unusable ceremony.
+    copy_state = {"job": None}
+
+    def _clear_clipboard():
+        copy_state["job"] = None
+        try:
+            if root.winfo_exists() and root.clipboard_get() == _stripped:
+                root.clipboard_clear()
+                root.clipboard_append("")
+                copy_hint.config(text="Clipboard cleared.", fg=FG_MUTED)
+        except Exception:  # noqa: BLE001 -- clipboard may hold non-text or be owned elsewhere
+            pass
+
+    def on_copy():
+        try:
+            root.clipboard_clear()
+            root.clipboard_append(_stripped)
+            copy_hint.config(
+                text=f"Copied. Clipboard clears in {_CLIPBOARD_CLEAR_SECONDS}s — "
+                     f"paste it below, then still write it on paper.",
+                fg=WARNING)
+            if copy_state["job"] is not None:
+                root.after_cancel(copy_state["job"])
+            copy_state["job"] = root.after(_CLIPBOARD_CLEAR_SECONDS * 1000,
+                                           _clear_clipboard)
+        except Exception:  # noqa: BLE001 -- no clipboard on this display
+            copy_hint.config(text="Could not access the clipboard on this system.",
+                             fg=DANGER)
+
+    _button(root, "Copy key", command=on_copy).grid(
+        row=row, column=0, sticky="w", padx=pad["padx"], pady=(0, 2))
+    copy_hint = _label(root, "", fg=FG_MUTED, justify="left")
+    copy_hint.grid(row=row, column=1, sticky="w", padx=(0, pad["padx"]))
     row += 1
 
     _divider(root).grid(row=row, column=0, columnspan=2, sticky="ew",
@@ -1951,7 +2065,7 @@ def recover_dialog() -> dict:
 
     root, _run_modal = _new_window()
     root.title("llm-env-vault — Account Recovery")
-    root.resizable(False, False)
+    root.resizable(True, True)
     _style(root)
 
     row = 0
@@ -2080,7 +2194,7 @@ def manage_vault_dialog() -> dict:
 
     root, _run_modal = _new_window()
     root.title("llm-env-vault")
-    root.resizable(False, False)
+    root.resizable(True, True)
     _style(root)
 
     container = tk.Frame(root, bg=WINDOW_BG)

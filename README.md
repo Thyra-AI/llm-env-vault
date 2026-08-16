@@ -192,8 +192,10 @@ encryption. See [Vault format upgrade](#vault-format-upgrade-v1--v2) below for t
 
 The only entry point that does not require the master password — this is what makes the paper recovery
 key useful in practice. Enter the full key from your printout; if valid, a new master password is set
-and vault access is restored. A new recovery key is issued on completion; the old printout is
-invalidated immediately.
+and vault access is restored. **Your printout keeps working** — the data key is rotated, but the
+recovery slot is re-wrapped with the same key you just supplied, so there is no second ceremony to
+complete at the moment you can least afford to fumble one. If you think the key was observed while
+you typed it, `manage_vault` can reissue it deliberately.
 
 **Honest limits:** a recovery key cannot recover the password — the password is never stored. It
 recovers *access* and the flow sets a new credential. Lose the paper AND forget the password and the
@@ -367,8 +369,8 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
   cannot attack the password at all, while a password you cannot remember is a certain, permanent
   loss of the vault. That trade only holds while the ciphertext stays on your machine. **A short
   user-chosen password falls to a wordlist in seconds once the file is copied off it**, no matter
-  how strong the KDF — so if that is a scenario you care about, use the generated 4-word
-  passphrase offered at creation rather than the minimum. As a partial compensation, roughly 220
+  how strong the KDF — so if that is a scenario you care about, choose a long passphrase of your
+  own rather than the minimum. As a partial compensation, roughly 220
   of the most common passwords (`password`, `123456`, `qwerty`) and infrastructure defaults
   (`admin`, `root`, `changeme`, `docker`, `postgres`) are refused outright at any length. Length
   and dictionary rank are separate problems: a short random password needs millions of guesses,

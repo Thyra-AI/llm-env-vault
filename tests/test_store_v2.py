@@ -472,11 +472,19 @@ def test_recover_with_recovery_key_restores_access() -> None:
             RECOVERY_PASSWORD = "recovered-password-789"
             new_rk_text = store.recover_with_recovery_key(orig_rk_text, RECOVERY_PASSWORD)
 
-            assert new_rk_text is not None, (
-                "REGRESSION: recover_with_recovery_key returned None"
+            # Returns None on purpose: recovery re-wraps the slot with the key
+            # the human just supplied, so their printout stays valid and there
+            # is nothing new to display. change_password cannot do this -- it
+            # runs without the paper key in hand.
+            assert new_rk_text is None, (
+                f"REGRESSION: recovery minted a replacement key ({new_rk_text!r}), "
+                f"invalidating a printout the user already stored safely and "
+                f"forcing the write-it-down ceremony again immediately after "
+                f"they recovered from losing a password"
             )
-            assert new_rk_text.startswith("RK1 "), (
-                f"REGRESSION: returned key has unexpected prefix: {new_rk_text!r}"
+            assert crypto.open_v2_with_recovery(
+                store.SECRETS_FILE.read_bytes(), orig_rk_text) is not None, (
+                "REGRESSION: the original recovery key no longer opens the vault"
             )
 
             # New password must work
@@ -485,23 +493,16 @@ def test_recover_with_recovery_key_restores_access() -> None:
                 f"REGRESSION: recover_with_recovery_key lost secrets -- got {loaded!r}"
             )
 
-            # Old recovery key must not work
+            # The SAME recovery key must still work -- the human's printout is
+            # a physical object they stored once, and using it must not destroy
+            # it. This is the inverse of the original behaviour and is
+            # deliberate; see recover_with_recovery_key's docstring.
             data = store.SECRETS_FILE.read_bytes()
-            try:
-                crypto.open_v2_with_recovery(data, orig_rk_text)
-            except (crypto.WrongRecoveryKey, crypto.VaultTampered):
-                pass  # expected
-            else:
-                raise AssertionError(
-                    "REGRESSION: old recovery key still works after recover_with_recovery_key"
-                )
-
-            # New recovery key must work
-            plaintext, _dek, _hdr = crypto.open_v2_with_recovery(data, new_rk_text)
+            plaintext, _dek, _hdr = crypto.open_v2_with_recovery(data, orig_rk_text)
             recovered = json.loads(store._pkcs7_unpad_strict(plaintext))
             assert recovered == BASE_SECRETS, (
-                f"REGRESSION: new recovery key cannot read secrets after recovery -- "
-                f"got {recovered!r}"
+                f"REGRESSION: the original recovery key can no longer read the "
+                f"vault after being used once -- got {recovered!r}"
             )
         finally:
             _restore_store_paths(originals)

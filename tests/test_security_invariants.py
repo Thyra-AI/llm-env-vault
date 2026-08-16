@@ -95,12 +95,37 @@ def _all_text(widgets) -> str:
 # exist so that stays true, because adding one would look like a usability win.
 # ---------------------------------------------------------------------------
 
-def test_gui_never_touches_the_clipboard() -> None:
-    for api in ("clipboard_append", "clipboard_clear", "clipboard_get"):
-        assert api not in _GUI_SRC, (
-            f"REGRESSION: gui.py calls {api}. The recovery key and the master "
-            f"password must never reach the clipboard -- it is readable by every "
-            f"local process and Clipboard History syncs it off the machine.")
+def test_clipboard_use_is_paired_with_an_automatic_wipe() -> None:
+    """The copy button was originally refused outright, then added on purpose.
+
+    The objection was real and still is: the Windows clipboard is readable by
+    every process running as this user -- the agent included -- and Clipboard
+    History can sync it off the machine. What overturned it was watching a
+    human actually do the ceremony. Without a copy button they hand-type 36
+    characters into the confirm field, and a slip there presents as "the key
+    does not work". A confirmation step people abandon is a recovery path that
+    silently does not exist, which is the exact failure this feature exists to
+    prevent.
+
+    So the clipboard is allowed, and the exposure is bounded instead. This test
+    pins the bound: if the copy path ever loses its scheduled wipe, the key sits
+    on the clipboard indefinitely and the trade-off we accepted quietly becomes
+    a worse one than the one we argued about.
+    """
+    if "clipboard_append" not in _GUI_SRC:
+        return  # no copy path at all is also acceptable
+    assert "clipboard_clear" in _GUI_SRC, (
+        "REGRESSION: gui.py puts the recovery key on the clipboard but never "
+        "clears it.")
+    assert "_CLIPBOARD_CLEAR_SECONDS" in _GUI_SRC, (
+        "REGRESSION: the clipboard wipe is no longer on a bounded timer.")
+    assert "_CLIPBOARD_CLEAR_SECONDS * 1000" in _GUI_SRC, (
+        "REGRESSION: the clipboard wipe is no longer scheduled via after() -- "
+        "a clear that is never scheduled never runs.")
+    assert gui._CLIPBOARD_CLEAR_SECONDS <= 60, (
+        f"REGRESSION: the clipboard holds the recovery key for "
+        f"{gui._CLIPBOARD_CLEAR_SECONDS}s. It only needs to survive long enough "
+        f"to paste into the field directly below it.")
 
 
 def test_gui_never_offers_to_save_or_print() -> None:
@@ -141,11 +166,14 @@ def test_recovery_key_dialog_has_no_copy_control() -> None:
     for cls, text in widgets:
         if cls in ("Button", "Checkbutton", "Radiobutton"):
             low = text.lower()
-            for banned in ("copy", "clipboard", "save to", "print", "export"):
+            # "copy" is now allowed -- see the clipboard test above for why, and
+            # for the wipe that bounds it. Writing to disk or a spooler is not:
+            # those leave the key somewhere nobody remembers to clean up.
+            for banned in ("save to", "save as", "print", "export", "email"):
                 assert banned not in low, (
                     f"REGRESSION: found a {cls} labelled {text!r} in the recovery "
-                    f"key dialog. The key must leave this window only by being "
-                    f"written down by hand.")
+                    f"key dialog. The key may reach the clipboard briefly, but it "
+                    f"must never be written to a file or a print spooler.")
 
 
 def test_unlock_dialog_never_accepts_a_recovery_key() -> None:
@@ -215,6 +243,129 @@ def test_every_dialog_constructs_without_error() -> None:
     finally:
         store.vault_info = orig_info
         store.vault_format_version = orig_version
+
+
+# ---------------------------------------------------------------------------
+# A dialog opened from inside another dialog must not create a second Tk root
+#
+# Found by hand, not by any test: the recovery drill is invoked from inside
+# add_secret_dialog's Allow handler, which is already running inside that
+# dialog's mainloop. Creating a second tk.Tk() there produced a nested
+# mainloop, and on Windows that meant the drill window opened BEHIND its
+# parent (so it looked like nothing had happened) and destroy() failed to
+# unwind the nested loop -- the human could tick the checkbox, click Confirm,
+# and never leave the page. Recovery setup was impossible to complete.
+#
+# The fix is structural: only the first window is a Tk root; any window opened
+# while one is alive is a Toplevel driven by wait_window. These tests pin that,
+# because the natural way to write a new dialog is to copy an existing one --
+# which would reintroduce tk.Tk() verbatim.
+# ---------------------------------------------------------------------------
+
+def test_no_dialog_calls_tk_Tk_directly() -> None:
+    """Every dialog must go through the _new_window() helper."""
+    import re
+    # Strip the helper itself: it legitimately owns the one tk.Tk() call.
+    helper_start = _GUI_SRC.index("def _new_window(")
+    helper_end = _GUI_SRC.index("def _foreground(")
+    without_helper = _GUI_SRC[:helper_start] + _GUI_SRC[helper_end:]
+    offenders = re.findall(r"^\s*\w+\s*=\s*tk\.Tk\(\)", without_helper, re.M)
+    assert not offenders, (
+        f"REGRESSION: {len(offenders)} dialog(s) call tk.Tk() directly instead of "
+        f"_new_window(). A dialog opened from inside another dialog's callback "
+        f"then creates a second root with a nested mainloop, which on Windows "
+        f"opens behind its parent and cannot be dismissed.")
+
+
+def test_second_window_is_a_toplevel_not_a_second_root() -> None:
+    if not _tk_available():
+        return
+    import tkinter as tk
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        second, run = gui._new_window()
+        assert isinstance(second, tk.Toplevel), (
+            f"REGRESSION: opening a window while a root is alive produced "
+            f"{type(second).__name__}, not a Toplevel. A second Tk root means a "
+            f"nested mainloop and an undismissable dialog.")
+        assert run.__name__ != "mainloop", (
+            "REGRESSION: the second window would be driven by a nested "
+            "mainloop rather than wait_window")
+        second.destroy()
+    finally:
+        root.destroy()
+
+
+def test_first_window_is_a_real_root() -> None:
+    if not _tk_available():
+        return
+    import tkinter as tk
+
+    win, _run = gui._new_window()
+    try:
+        assert isinstance(win, tk.Tk), (
+            "the first window in a process must be a real Tk root")
+    finally:
+        win.destroy()
+
+
+def test_dialog_actually_takes_the_keyboard_focus() -> None:
+    """A visible dialog that does not own the keyboard is a disclosure bug.
+
+    If the window is painted but the foreground belongs to something else, the
+    human types their master password into whatever that something else is --
+    an editor, a terminal, a chat box. The secret this product exists to
+    contain lands in plaintext somewhere arbitrary and unrecoverable.
+
+    Windows refuses SetForegroundWindow to a process that is not already in the
+    foreground, which is exactly what this server is when an editor or MCP
+    client launched it. focus_force() does not help: it moves focus only within
+    our own application. This asserts the real OS-level condition rather than
+    trusting that we asked nicely.
+    """
+    if not _tk_available() or sys.platform != "win32":
+        return
+    import ctypes
+    import tkinter as tk
+
+    win, _run = gui._new_window()
+    try:
+        gui._style(win)
+        tk.Label(win, text="focus probe").pack()
+        win.update_idletasks()
+        gui._foreground(win)
+        win.update()
+
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
+        assert user32.GetForegroundWindow() == hwnd, (
+            "REGRESSION: the dialog opened without taking the Windows "
+            "foreground. Anything the human types before clicking it goes to "
+            "another application -- including their master password.")
+    finally:
+        win.destroy()
+
+
+def test_win32_foreground_helper_is_wired_in() -> None:
+    """Guards the mechanism, so the OS-level test above cannot be satisfied by
+    accident on a machine where we happened to be foreground already."""
+    assert "AttachThreadInput" in _GUI_SRC, (
+        "REGRESSION: the AttachThreadInput workaround is gone. Without it "
+        "Windows silently refuses the foreground request from a background-"
+        "launched process and the dialog opens without the keyboard.")
+    assert "_win32_take_foreground" in _GUI_SRC
+
+
+def test_passphrase_generator_is_gone() -> None:
+    """It filled two masked fields, so the value it produced was never visible
+    to the person who had to remember it -- a data-loss trap, not a feature."""
+    for token in ("_WORDLIST", "gen_passphrase", "Generate passphrase"):
+        assert token not in _GUI_SRC, (
+            f"REGRESSION: {token!r} is back in gui.py. A generated password "
+            f"written into a show='*' field cannot be read, written down, or "
+            f"recovered -- it guarantees eventual loss of the vault.")
 
 
 # ---------------------------------------------------------------------------

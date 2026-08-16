@@ -36,7 +36,7 @@ _STORE_PATHS = {
 
 
 class _FakeLabel:
-    """Stands in for the Tk status label _create_v2_with_drill writes to."""
+    """Stands in for the Tk status label create_first_vault writes to."""
 
     def config(self, **kwargs):
         pass
@@ -45,6 +45,16 @@ class _FakeLabel:
 class _FakeRoot:
     def update_idletasks(self):
         pass
+
+
+def _first_run(password, offer_recovery):
+    """Mirror what the dialog now does: drill first (if offered), then create.
+
+    The two are separate steps precisely so that declining the drill cannot
+    leave a recovery slot behind -- the key never reaches create_v2_vault.
+    """
+    recovery_raw = gui.run_recovery_drill() if offer_recovery else None
+    gui.create_first_vault(password, recovery_raw, _FakeLabel(), _FakeRoot())
 
 
 @contextlib.contextmanager
@@ -91,7 +101,7 @@ def _empty_vault_dir():
 def test_cancelled_drill_leaves_no_recovery_slot() -> None:
     with _empty_vault_dir():
         gui.show_recovery_key_dialog = lambda key_text, slot_id: False
-        gui._create_v2_with_drill("first-run-password-1", True, _FakeLabel(), _FakeRoot())
+        _first_run("first-run-password-1", True)
         store.save_secrets("first-run-password-1", {"A": "alpha"})
         info = store.vault_info()
         assert info.get("recovery_slot") is False, (
@@ -104,7 +114,7 @@ def test_cancelled_drill_still_produces_a_usable_vault() -> None:
     """Bailing out of the drill must not cost the user their vault."""
     with _empty_vault_dir():
         gui.show_recovery_key_dialog = lambda key_text, slot_id: False
-        gui._create_v2_with_drill("first-run-password-1", True, _FakeLabel(), _FakeRoot())
+        _first_run("first-run-password-1", True)
         store.save_secrets("first-run-password-1", {"A": "alpha"})
         assert store.load_secrets("first-run-password-1") == {"A": "alpha"}
         assert store.vault_format_version() == 2
@@ -119,7 +129,7 @@ def test_confirmed_drill_commits_the_recovery_slot() -> None:
             return True
 
         gui.show_recovery_key_dialog = _confirm
-        gui._create_v2_with_drill("first-run-password-2", True, _FakeLabel(), _FakeRoot())
+        _first_run("first-run-password-2", True)
         store.save_secrets("first-run-password-2", {"A": "alpha"})
         assert store.vault_info().get("recovery_slot") is True
         # The key shown in the drill must be the one actually committed.
@@ -133,7 +143,7 @@ def test_declining_recovery_never_shows_the_drill() -> None:
     with _empty_vault_dir():
         calls = []
         gui.show_recovery_key_dialog = lambda key_text, slot_id: calls.append(1) or True
-        gui._create_v2_with_drill("first-run-password-3", False, _FakeLabel(), _FakeRoot())
+        _first_run("first-run-password-3", False)
         store.save_secrets("first-run-password-3", {"A": "alpha"})
         assert calls == [], "drill was shown to a user who declined recovery"
         assert store.vault_info().get("recovery_slot") is False
@@ -156,7 +166,7 @@ def _make_recoverable_vault(password, secrets):
         return True
 
     gui.show_recovery_key_dialog = _confirm
-    gui._create_v2_with_drill(password, True, _FakeLabel(), _FakeRoot())
+    _first_run(password, True)
     store.save_secrets(password, secrets)
     return held["key"]
 
@@ -193,29 +203,63 @@ def test_recover_vault_never_returns_key_material() -> None:
         assert paper_key not in blob, (
             "REGRESSION (A1-class): the recovery key the human typed came back "
             "to the agent in the tool result")
-        assert issued.get("key") and issued["key"] not in blob, (
-            "REGRESSION: the replacement recovery key was returned to the agent "
-            "instead of being confined to the native dialog")
+        assert not issued, (
+            "REGRESSION: recovery showed a replacement key dialog. Recovery now "
+            "keeps the key the human just used -- their printout stays valid, "
+            "and re-running the write-it-down ceremony right after they have "
+            "recovered from a lost password is where recovery paths get lost.")
         assert "brand-new-password-9" not in blob, (
             "REGRESSION: the new master password came back in the tool result")
 
 
-def test_recovery_invalidates_the_key_that_was_just_used() -> None:
-    """The used key was read off paper and may have been observed."""
+def test_recovery_keeps_the_paper_key_valid() -> None:
+    """The printout must survive being used.
+
+    Recovery rotates the DEK like every credential change, but unlike
+    change_password it HAS the recovery key in hand -- the human just typed it
+    -- so the slot can be re-wrapped with the same key. Minting a replacement
+    here would invalidate a printout that is already stored safely and force
+    the whole ceremony again at the worst moment: immediately after someone
+    has lost a password. Skip or fumble that and they have no recovery path
+    left. Anyone who thinks the key was observed can reissue on purpose.
+    """
     with _empty_vault_dir():
         paper_key = _make_recoverable_vault("forgotten-password-3", {"A": "alpha"})
+        before_id = store.vault_info().get("recovery_slot_id")
+        gui.recover_dialog = lambda: {"recovery_key": paper_key,
+                                      "new_password": "brand-new-password-9"}
+        gui.show_recovery_key_dialog = lambda key_text, slot_id: True
+        assert mcp_server._recover_vault_impl()["applied"] is True
+
+        opened = crypto.open_v2_with_recovery(store.SECRETS_FILE.read_bytes(), paper_key)
+        assert opened is not None, (
+            "REGRESSION: the paper key stopped working after being used once, "
+            "so the human's stored printout is now dead")
+        assert store.vault_info().get("recovery_slot_id") == before_id, (
+            "REGRESSION: the slot id changed while the key stayed the same, "
+            "making a still-valid printout look stale")
+
+
+def test_recovery_still_rotates_the_data_key() -> None:
+    """Keeping the recovery key must not mean keeping the DEK."""
+    with _empty_vault_dir():
+        paper_key = _make_recoverable_vault("forgotten-password-4", {"A": "alpha"})
+        import json as _json
+        def _wrapped():
+            h, _, _ = crypto.parse_envelope(store.SECRETS_FILE.read_bytes())
+            return {s["type"]: s["wrapped_dek"] for s in h["slots"]}
+        before = _wrapped()
         gui.recover_dialog = lambda: {"recovery_key": paper_key,
                                       "new_password": "brand-new-password-9"}
         gui.show_recovery_key_dialog = lambda key_text, slot_id: True
         mcp_server._recover_vault_impl()
-
-        try:
-            crypto.open_v2_with_recovery(store.SECRETS_FILE.read_bytes(), paper_key)
-            assert False, ("REGRESSION: the recovery key stayed valid after being "
-                           "used, so a key read aloud from paper keeps working")
-        except crypto.WrongRecoveryKey:
-            pass
-
+        after = _wrapped()
+        assert before["recovery"] != after["recovery"], (
+            "REGRESSION: the recovery slot was not re-wrapped, so the data key "
+            "was not rotated -- an old ciphertext copy plus the old password "
+            "would still open future bodies")
+        assert before["password"] != after["password"], (
+            "REGRESSION: the password slot was not re-wrapped")
 
 def test_mistyped_recovery_key_reports_a_typo_not_a_failure() -> None:
     """The appended checksum exists so this case is distinguishable."""
@@ -237,7 +281,7 @@ def test_mistyped_recovery_key_reports_a_typo_not_a_failure() -> None:
 def test_recover_vault_on_a_vault_with_no_recovery_slot() -> None:
     with _empty_vault_dir():
         gui.show_recovery_key_dialog = lambda key_text, slot_id: False
-        gui._create_v2_with_drill("no-recovery-password", False, _FakeLabel(), _FakeRoot())
+        _first_run("no-recovery-password", False)
         store.save_secrets("no-recovery-password", {"A": "alpha"})
 
         fake_key = crypto.format_recovery_key(bytes(crypto.new_recovery_key()))

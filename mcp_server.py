@@ -717,20 +717,23 @@ def _recover_vault_impl() -> dict:
         return {"applied": False,
                 "error": "Recovery failed -- the vault has been restored to its "
                          "previous state. Nothing was changed."}
-    # Recovery always mints a fresh key: the one just used was typed from
-    # paper and may have been observed in the process.
+    # Recovery keeps the key the human just supplied, so there is normally
+    # nothing new to display -- their printout still works. The branch stays
+    # because store may still hand back a key in future variants, and a key
+    # returned but never shown would be a silently dead recovery path.
     if new_key:
         info = store.vault_info()
         shown = gui.show_recovery_key_dialog(new_key, info.get("recovery_slot_id", ""))
         if not shown:
             return {"applied": True,
                     "warning": "Access was recovered and the new master password is "
-                               "set, but the replacement recovery key was not "
-                               "confirmed and cannot be shown again. The key you "
-                               "just used is now invalid. Run manage_vault and "
-                               "choose reissue_recovery to get a usable one."}
+                               "set, but a replacement recovery key was issued and "
+                               "not confirmed, and cannot be shown again. Run "
+                               "manage_vault and choose reissue_recovery to get a "
+                               "usable one."}
     return {"applied": True,
-            "message": "Access recovered and a new master password set."}
+            "message": "Access recovered and a new master password set. Your "
+                       "existing recovery key still works -- keep the printout."}
 
 
 @mcp.tool()
@@ -748,9 +751,10 @@ def recover_vault() -> dict:
     is a second full-power credential for the whole vault; the native dialog
     is the only correct channel.
 
-    Recovering always issues a replacement recovery key (the one just used was
-    read aloud from paper and may have been observed) and shows it in the
-    write-it-down dialog. It never appears in this result."""
+    The recovery key survives being used: the data key is rotated, but the
+    recovery slot is re-wrapped with the same key, so the human's printout
+    stays valid and no new ceremony is required. If they believe the key was
+    observed while they typed it, manage_vault can reissue deliberately."""
     return _recover_vault_impl()
 
 
