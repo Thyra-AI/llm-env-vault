@@ -62,6 +62,7 @@ _LOCK_RETRIES = 30
 _LOCK_RETRY_SLEEP = 0.05  # seconds
 
 VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+MAX_VAR_NAME_LEN = 128
 ENV_LINE_RE = re.compile(
     r'^(?P<indent>\s*)(?P<export>export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*)$'
 )
@@ -85,6 +86,12 @@ def validate_var_name(name: str) -> str:
         raise ValueError(
             f"Invalid variable name {name!r} -- must match [A-Za-z_][A-Za-z0-9_]* "
             "(letters, digits, underscore; can't start with a digit, no newlines/spaces)."
+        )
+    if len(name) > MAX_VAR_NAME_LEN:
+        raise ValueError(
+            f"Invalid variable name {name!r} -- length {len(name)} exceeds the "
+            f"{MAX_VAR_NAME_LEN}-character maximum "
+            "(Windows environment blocks and the consent-dialog layout both impose limits)."
         )
     return name
 
@@ -727,3 +734,47 @@ def save_secrets(password: str, secrets: dict) -> None:
     plaintext = _pkcs7_pad(json.dumps(secrets).encode("utf-8"))
     token = crypto.encrypt(password, salt, plaintext)
     _atomic_write_bytes(SECRETS_FILE, token)
+
+
+def change_password(old_password: str, new_password: str) -> None:
+    """Re-encrypt vault.enc under new_password, reusing vault.salt.
+    Single atomic write. Read-back verifies before returning.
+    Raises crypto.WrongPassword on a bad old password."""
+    if not vault_exists():
+        raise FileNotFoundError(
+            "No vault found (vault.enc or vault.salt is missing). "
+            "Create a vault first before changing the password."
+        )
+    # Step 1: decrypt with old_password.
+    # crypto.WrongPassword propagates unchanged; do not swallow it.
+    secrets = load_secrets(old_password)
+    # Step 2: snapshot the current ciphertext bytes so we can roll back if
+    # the write succeeds but the read-back fails.
+    original_bytes = SECRETS_FILE.read_bytes()
+    # Step 3: re-encrypt under new_password.  save_secrets uses _atomic_write_bytes
+    # internally, so this is a single atomic file write with no two-file window.
+    # The salt is deliberately reused -- rotating it would require a two-file atomic
+    # write that does not exist, creating a crash window that can permanently brick
+    # the vault.  The Fernet body key changes completely with the new password, so
+    # the re-encryption is cryptographically effective without a salt change.
+    save_secrets(new_password, secrets)
+    # Step 4: read-back verification.  If the newly written file cannot be decrypted
+    # or decrypts to a different dict, restore the original bytes so the vault stays
+    # openable and raise a clear error.  A read-back failure must never leave the
+    # user with an unopenable vault.
+    try:
+        verified = load_secrets(new_password)
+    except Exception as exc:
+        _atomic_write_bytes(SECRETS_FILE, original_bytes)
+        raise RuntimeError(
+            "Password change failed during read-back verification -- "
+            "vault has been restored to its previous state. "
+            "The password was NOT changed."
+        ) from exc
+    if verified != secrets:
+        _atomic_write_bytes(SECRETS_FILE, original_bytes)
+        raise RuntimeError(
+            "Password change aborted: read-back produced a different secret dict -- "
+            "vault has been restored to its previous state. "
+            "The password was NOT changed."
+        )

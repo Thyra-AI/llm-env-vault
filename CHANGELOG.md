@@ -7,6 +7,54 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.3.0] — 2026-08-15
+
+Security hardening pass. No change to the vault format, the crypto, or the consent model —
+an existing vault is read by this version unchanged.
+
+### Added
+
+- **`change_password` tool and dialog.** Rotates the master password: re-derives a new key from
+  a fresh salt, re-encrypts the vault, and writes both `vault.enc` and `vault.salt` atomically.
+  Honest limit: rotation protects secrets stored *after* the change. Anyone who copied `vault.enc`
+  and `vault.salt` before the change, and who later learns the old password, can still decrypt
+  that earlier snapshot.
+- **Output redaction in `run_with_env`.** Secret values injected into a command's environment are
+  now redacted to `[REDACTED:VAR_NAME]` in the result returned to the AI — the exact value, its
+  base64 encoding, and its URL encoding are all matched. The unlock dialog now discloses that
+  output goes back to the AI. Honest limits: redaction is accident-prevention, not adversarial
+  defence. A command line chosen by the agent can transform output (gzip, chunk, re-encode) in
+  ways that defeat string matching. Two paths are explicitly not covered: a `background=True`
+  run's temp log file is only redacted after the process exits (it is unredacted while the process
+  is still running), and a `materialize` target is real values on disk by design.
+- **Trusted-command TTL.** Trust grants now expire after 8 hours (absolute wall-clock time, also
+  verified against monotonic clock so neither a suspend nor a clock change extends them).
+- **Scrollable variable list in the unlock dialog.** The "will expose N variables" list is now a
+  scrollable box instead of being truncated at 300 characters with an ellipsis.
+- **Variable-name length cap.** Variable names are capped at 128 characters, preventing an
+  absurdly long name from pushing the Allow/Deny buttons off the non-resizable dialog.
+- **Password floor raised to 12 characters**, with a generated 4-word passphrase offered at vault
+  creation. Applies at `create` and `change_password`; existing vaults are unaffected.
+
+### Changed
+
+- **Trusted-command "session-only" framing replaced with an explicit TTL.** The trust-grant note
+  now says "8 hours" rather than "rest of this session". The MCP server process can live for days
+  across many conversations in one Claude Code Desktop window, which made "session" misleading.
+- **Trust-grant note now accurately enumerates what is monitored.** For a command like
+  `docker compose up`, no config file appears on the command line, so only the resolved executable
+  is hashed. The note warns explicitly when the monitored set is executable-only.
+- **argv0 drift-detection no longer searches the working directory on macOS/Linux**, where `exec`
+  itself does not search the working directory.
+- **Dialog text sanitizers** now strip Unicode `Cf`-category characters (zero-width joiners and
+  bidi directional controls) and C0/C1 control characters in addition to the previous checks.
+
+### Fixed
+
+- **`run_with_env` no longer returns the full vault to its caller when `only_vars` is given.**
+  The unlock dialog now scopes the decrypted values it passes back to the `only_vars` set before
+  returning; the rest of the vault is not present in the returned structure.
+
 ## [1.2.0] — 2026-08-14
 
 Release-readiness pass. No change to the vault format, the crypto, or the consent model — an
@@ -83,6 +131,7 @@ Pre-1.0.0 history is a long series of security fixes found by repeated red-team 
 credential-shaped text in parse warnings, consent before registering unowned targets, and honest
 reporting of partial writes. See `git log` for the full sequence.
 
+[1.3.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.3.0
 [1.2.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.0.0

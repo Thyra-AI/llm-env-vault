@@ -33,6 +33,10 @@ jobs:
         run: |
           python tests/test_trust.py
           python tests/test_install_migrate_robustness.py
+          python tests/test_trust_hardening.py
+          python tests/test_store_hardening.py
+          python tests/test_gui_helpers.py
+          python tests/test_redaction.py
 
       - name: Run under pytest
         run: python -m pytest -q

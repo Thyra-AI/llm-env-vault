@@ -145,6 +145,17 @@ No password. Regenerates `llm.env` from `vault_index.json` (useful if `llm.env` 
 
 Adds one secret. The dialog has two steps: master password (this also *creates* the vault on first-ever use), then a confirmation showing the proposed change (`VAR_NAME → "value N"` in `llm.env`) with a field where **you** type the real value. If the name matches common secret-name patterns (contains PASSWORD, SECRET, TOKEN, KEY, etc.), the dialog shows an amber warning above the value field as an extra "are you sure this is going where you think" check. Nothing is written until you click Allow. On Allow: encrypted vault updated, index updated, `llm.env` regenerated automatically.
 
+### `change_password()`
+
+Opens a two-step dialog: master password to decrypt the vault (same as any other vault-touching
+operation), then a new-password field. The new password must be at least 12 characters. On Allow,
+derives a new key from the new password and a fresh salt, re-encrypts the vault, and writes both
+`vault.enc` and `vault.salt` atomically.
+
+**Honest limit:** rotation protects secrets stored *after* the change. Anyone who copied
+`vault.enc` and `vault.salt` before the change, and who later learns the old password, can still
+decrypt that earlier snapshot. Treat old backups as compromised once you rotate.
+
 ### `remove_secret(var_name)`
 
 Same password-then-confirm flow, no value field. If the vault files are in an inconsistent state (e.g. `vault.enc`/`vault.salt` missing but the name still in the index), it **refuses and reports the problem** rather than silently auto-pruning the index — inconsistencies get surfaced to a human, not papered over.
@@ -235,22 +246,44 @@ not restarted after install). This is the one thing that can't be a tool — whe
 fails, every tool disappears, and nothing that runs *through* the server can report on the
 server's own absence. Commands are read by Claude Code directly, so this still works.
 
-## Trusted commands (session-only auto-allow)
+## Trusted commands (8-hour auto-allow)
 
-Typing your password twenty times a session for the same `docker compose up` gets old. The `run_with_env` unlock dialog has a checkbox: **"Trust this exact command for the rest of this session."** Check it, click Allow once, and identical future calls auto-run with no dialog.
+Typing your password twenty times a session for the same `docker compose up` gets old. The
+`run_with_env` unlock dialog has a checkbox: **"Trust this exact command for the next 8 hours."**
+Check it, click Allow once, and identical future calls auto-run with no dialog. Trust expires
+8 hours after it was granted — verified on both wall clock and monotonic clock, so neither
+a machine suspend nor a clock adjustment extends it.
 
 **"Exact" means exact.** The full argument list, `cwd`, `only_vars`, `materialize`, and `background` together form the trusted signature — change any one and a fresh Allow is required. `only_vars=[]` and `only_vars` omitted are deliberately different signatures even though both are falsy in Python, because they authorize very different exposure.
 
-**Drift detection.** Trust also records the SHA-256 hash of every file named directly as an argument on the command line (a `docker-compose.yml` after `-f`, a script path), **and of the program being executed itself** — resolved the same way your OS's PATH/PATHEXT search would find it (best-effort, via Python's `shutil.which`; not a guaranteed match to the OS's own search in every edge case), so a bare `docker` or `python` is covered the same as a file named explicitly on the command line. Files are hashed *before* the dialog opens — trust binds to what you actually reviewed, even if the dialog sat open a while. If a tracked file changes (or disappears) before the next trusted run, trust for that command is silently revoked and the dialog reappears with a note explaining why (e.g. "docker-compose.yml changed since it was approved"). Honest boundaries of the tracking, surfaced in the trust note when they apply:
+**Drift detection.** Trust also records the SHA-256 hash of every file named directly as an
+argument on the command line (a `docker-compose.yml` after `-f`, a script path), **and of the
+program being executed itself** — resolved the same way your OS's PATH/PATHEXT search would find
+it (best-effort, via Python's `shutil.which`; not a guaranteed match to the OS's own search in
+every edge case), so a bare `docker` or `python` is covered the same as a file named explicitly
+on the command line. Files are hashed *before* the dialog opens — trust binds to what you
+actually reviewed, even if the dialog sat open a while. If a tracked file changes (or disappears)
+before the next trusted run, trust for that command is silently revoked and the dialog reappears
+with a note explaining why (e.g. "docker-compose.yml changed since it was approved"). Honest
+boundaries of the tracking, surfaced in the trust note when they apply:
 
-- Files over 64 MiB or unreadable are skipped from hashing (with a one-time warning at grant time).
+- Files over 64 MiB or unreadable are skipped from hashing (with a one-time warning at grant
+  time).
 - Only the first 20 distinct referenced files are tracked.
-- Only files named *directly on the command line* are tracked — a Dockerfile pulled in indirectly via a compose file's `context:` isn't and can't be followed.
-- If the executed program can't be resolved to a concrete file at all (an unusual PATH/PATHEXT setup, a shell builtin), it isn't drift-monitored — the trust-grant note says so explicitly when it applies.
+- Only files named *directly on the command line* are tracked — a Dockerfile pulled in indirectly
+  via a compose file's `context:` isn't and can't be followed.
+- **For commands like `docker compose up`, where no config file is named on the command line, the
+  only thing monitored is the resolved executable.** The trust-grant note warns explicitly when
+  the monitored set is executable-only, so you can decide whether that coverage is enough for your
+  use case.
+- If the executed program can't be resolved to a concrete file at all (an unusual PATH/PATHEXT
+  setup, a shell builtin), it isn't drift-monitored — the trust-grant note says so explicitly
+  when it applies.
 
 **The vault matters too.** Adding, removing, or rotating any secret drops the *entire* trust cache immediately — the cached decrypted values a trusted command would inject are now stale. The next trusted run needs the password again. Cached values are also scoped to exactly what each trusted command was approved to see (a command trusted with a narrow `only_vars` doesn't leave the rest of the vault resident in memory too) and kept obfuscated in memory, not as plain, greppable text — see `vault_lib/trust.py`'s own comments for exactly what that obfuscation does and doesn't protect against (short version: it raises the bar against passive exposure like crash dumps, not against a targeted attacker who can already read this process's memory).
 
-**This is a convenience feature, not a security boundary — deliberately.** Everything is session-only, in-memory, gone on restart. Making it survive a restart with zero prompts would require persisting something capable of decrypting the vault (the password, the derived key, or equivalent), which breaks the one real invariant this project is built on: the master password never touches disk. Any persisted equivalent would ultimately be usable in plaintext-equivalent form by any process running under your OS account — the same account the AI agent runs as. Against an actively malicious agent with local code execution, no purely local/software mechanism is a real boundary; genuine protection there would need a separate, more-privileged OS principal gated by hardware-backed human presence (e.g. Windows Hello), which is out of scope. Use trusted commands to stop re-typing your password; don't rely on them to stop an agent already working against you.
+**This is a convenience feature, not a security boundary — deliberately.** Everything is
+time-limited (8-hour TTL), in-memory, and gone on restart. Making it survive a restart with zero prompts would require persisting something capable of decrypting the vault (the password, the derived key, or equivalent), which breaks the one real invariant this project is built on: the master password never touches disk. Any persisted equivalent would ultimately be usable in plaintext-equivalent form by any process running under your OS account — the same account the AI agent runs as. Against an actively malicious agent with local code execution, no purely local/software mechanism is a real boundary; genuine protection there would need a separate, more-privileged OS principal gated by hardware-backed human presence (e.g. Windows Hello), which is out of scope. Use trusted commands to stop re-typing your password; don't rely on them to stop an agent already working against you.
 
 One more honest limit: an auto-allowed run hashes referenced files, then runs the command — there's a small window between the check and whatever the command itself later reads from disk. Irrelevant against the adversarial case above; against an ordinary cause (an editor autosaving mid-run), it means the check is a point-in-time snapshot, not a live guarantee.
 
@@ -261,8 +294,20 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
 - **Threat model:** protects against an AI agent (or anyone with filesystem read access) harvesting real values from files. Does **not** protect against someone who already has your master password, or an agent granted the ability to type into GUI windows on your behalf (e.g. computer-use tooling) — don't grant that.
 - **"The agent can edit this tool's own source" is a sharper non-boundary than it sounds — mitigated, not eliminated.** `plugin_launcher.py` used to re-run `pip install -r requirements.txt` automatically whenever that file's content hash changed, on every server start — meaning an agent with filesystem write access to an *installed* plugin's `requirements.txt` (the same access the "don't protect against editing source" threat model already excludes) could get it silently pip-installed on the very next restart, with no real `claude plugin update` involved. Two reductions, both confirmed by a red-team audit: (1) the installed-plugin trigger is now keyed on `CLAUDE_PLUGIN_ROOT`'s own path, not the requirements content — a real update always moves the plugin to a new version-scoped directory, so editing `requirements.txt` alone no longer triggers anything; (2) on Windows, dependencies install from `requirements-lock.txt`, a hash-pinned lockfile (every package and transitive dependency pinned to an exact version with sha256 hashes for every published artifact) via `pip install --require-hashes`, closing the separate supply-chain risk of a compromised/typosquatted PyPI upload being pulled in silently. Neither makes "an agent can edit this tool's own source" a real boundary — an agent with that access can still edit `plugin_launcher.py` itself, or any other file — but both shrink the auto-triggered, no-real-event attack surface that existed on top of it.
 - **Dependency pinning is Windows-only.** The hash-pinned `requirements-lock.txt` described above is scoped to Windows, because `pywin32` (a transitive `mcp[cli]` dependency) only publishes wheels there and a lockfile that can't resolve is worse than none. On macOS and Linux the launcher installs from the unpinned `requirements.txt` instead, so **those installs get no hash verification** and the supply-chain mitigation above does not apply to them. This is the concrete security cost of the Windows-first scoping, not just a packaging detail.
-- **Never paste the master password (or any secret value) into chat with an AI assistant.** Type them only into the vault's own GUI windows.
-- **`run_with_env` output can contain real secrets.** Secrets are in the command's real environment; a command that echoes its environment or prints its config on error leaks them into the result — and into the client's transcript. Use `only_vars` to scope injection, and know what your command prints.
+- **Assume `vault.enc` is exfiltratable.** An agent — or anyone with filesystem read access —
+  can copy `vault.enc` and `vault.salt`. Decryption then depends entirely on the master password,
+  which is why the minimum was raised to 12 characters. A long, random passphrase (the 4-word
+  generated option offered at creation) is strongly recommended.
+- **Never paste the master password (or any secret value) into chat with an AI assistant.** Type
+  them only into the vault's own GUI windows.
+- **`run_with_env` output is redacted before it reaches the AI, but this is accident-prevention,
+  not adversarial defence.** The exact injected value, its base64 encoding, and its URL encoding
+  are matched and replaced with `[REDACTED:VAR_NAME]`. Two paths are not covered: a
+  `background=True` run's temp log file is only redacted after the process exits (it is unredacted
+  while the process is still running), and a `materialize` target is real values on disk by design.
+  An agent that chooses the command line can also transform output (gzip, chunk, re-encode) in
+  ways that defeat string matching. `only_vars` remains the first line of defence — scope
+  injection to what the command actually needs.
 - This is not an "intercept every file access" system — that would require a kernel-level filter driver or virtual filesystem (elevated install, fragile). Instead: files are placeholder-only by default, and real values only exist at moments a human deliberately triggered, each gated by the password prompt.
 - `vault_index.json` is validated on every read, not just write — a hand-edited or tampered entry can't inject unexpected content into a synced target file.
 - Crypto details: PBKDF2-HMAC-SHA256 at 480,000 iterations for key derivation; Fernet (AES-128-CBC + HMAC) for the vault. If `vault.salt` exists but `vault.enc` doesn't, the code refuses to silently regenerate a new salt — that would permanently brick decryption of any surviving `vault.enc` backup keyed to the old salt.
@@ -275,7 +320,20 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
 - **A resync normalizes the whole file's line endings** to its dominant terminator and ensures a trailing newline, even when nothing else changed — harmless to meaning, but can show up as a full-file diff under strict VCS line-ending settings.
 - **Background run logs linger for up to 7 days.** Each `background=True` call leaves an `llm-env-vault-run-*.log` file in the system temp directory. These are reaped opportunistically once they're older than 7 days, but only when a later run happens to trigger the sweep — so a log can sit there indefinitely if you stop using the tool. Since a log can contain the process's real environment if the command prints its config, clear old ones out yourself if that matters to you.
 - **Windows is the only tested platform.** The suite runs on Windows and dependencies are hash-pinned only there (see Security notes). The code is stdlib-portable and the dialogs are plain Tkinter, but macOS and Linux are untested — and the plugin's `.mcp.json` launches a bare `python`, which many such systems don't provide at all. Run `/llm-env-vault:doctor` if the tools don't appear.
-- **One dialog at a time.** GUI prompts run on the server's main thread; concurrent tool calls queue behind an open dialog.
+- **One dialog at a time.** GUI prompts run on the server's main thread; concurrent tool calls
+  queue behind an open dialog.
+- **The master password and decrypted vault values are Python `str` objects, and CPython provides
+  no way to wipe them from memory.** They may be interned, referenced from tracebacks, or held
+  alive by the garbage collector beyond the immediate operation. "The password only lives for the
+  duration of one prompt" should not be read as a stronger guarantee than CPython can deliver.
+- **Do not store the vault in a synced folder (OneDrive, Dropbox, Syncthing, etc.).** A
+  `materialize` target written by `run_with_env` is a real-values file on disk for the duration
+  of the command. A sync client can upload that file within the command's lifetime, and deleting
+  the file afterward does not recall it from the sync provider's servers or any device that already
+  received it.
+- **There is no recovery path if the master password is forgotten.** The vault cannot be decrypted
+  without it. A paper recovery key is planned for 1.4.0; until then, the vault is unrecoverable
+  if the password is lost.
 
 ## Troubleshooting
 
@@ -303,10 +361,23 @@ change. The dialog says which. See Trusted commands above.
 
 ## Tests
 
-66 tests across two hand-rolled test scripts (no pytest required, though they also run under pytest):
+The suite is hand-rolled test scripts (no pytest required, though they also run under pytest),
+plus additional pytest-only files added in 1.3.0:
 
-- `tests/test_trust.py` — 55 tests covering the trusted-commands / drift-detection feature, the vault's storage and padding behaviour, and the plugin launcher's venv provisioning and reprovisioning logic. Includes two true end-to-end tests that spawn a real child process and assert the actual secret value is injected on both the fresh-unlock and auto-allowed paths. Fully isolates the real vault (temp dir, no real Tkinter window) — running the tests never touches your actual vault.
-- `tests/test_install_migrate_robustness.py` — 11 regression tests: OSError robustness (unreachable UNC paths, nonexistent paths, physical drive paths on Windows all return clean error dicts instead of crashing), `sync_target_file`'s guard against mass-removing every managed line at once, and the assertion that credential-shaped text swallowed during a migration is redacted rather than leaked into a warning message.
+- `tests/test_trust.py` — covers the trusted-commands / drift-detection feature, the vault's
+  storage and padding behaviour, and the plugin launcher's venv provisioning and reprovisioning
+  logic. Includes two true end-to-end tests that spawn a real child process and assert the actual
+  secret value is injected on both the fresh-unlock and auto-allowed paths. Fully isolates the
+  real vault (temp dir, no real Tkinter window) — running the tests never touches your actual
+  vault.
+- `tests/test_install_migrate_robustness.py` — regression tests: OSError robustness (unreachable
+  UNC paths, nonexistent paths, physical drive paths on Windows all return clean error dicts
+  instead of crashing), `sync_target_file`'s guard against mass-removing every managed line at
+  once, and the assertion that credential-shaped text swallowed during a migration is redacted
+  rather than leaked into a warning message.
+- `tests/test_trust_hardening.py`, `tests/test_store_hardening.py`, `tests/test_gui_helpers.py`,
+  `tests/test_redaction.py` — added in 1.3.0, covering the security-hardening changes in this
+  release (TTL enforcement, output redaction, dialog sanitizers, and store scoping).
 
 Run from the project venv:
 
@@ -316,8 +387,6 @@ python tests/test_install_migrate_robustness.py
 ```
 
 Or all at once with `pytest` from the repo root.
-
-Both pass 100%.
 
 ---
 

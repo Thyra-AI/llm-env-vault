@@ -38,6 +38,8 @@ entirely rather than silently serving pre-rotation values.
 import hashlib
 import os
 import shutil
+import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -48,6 +50,15 @@ from . import store
 # or one pointing at a multi-GB file) making every trusted run silently
 # slow.
 _MAX_HASHED_FILES = 20
+
+# Maximum lifetime of a trust grant. Expired entries are dropped on the next
+# check() call and the caller must re-approve. Both wall-clock and monotonic
+# elapsed times are checked -- whichever deadline comes first triggers expiry.
+# Using dual clocks is deliberate: CLOCK_MONOTONIC pauses during system sleep
+# on Linux/macOS (so monotonic alone would leave a Friday-evening grant live
+# Monday morning), while wall clock can be set backward (so wall alone could
+# be cheated). Together they cover both failure modes.
+_TRUST_TTL_SECONDS = 8 * 60 * 60
 _MAX_HASH_BYTES = 64 * 1024 * 1024  # 64 MiB
 
 # Populated only after the human checks "trust this command" in
@@ -75,7 +86,8 @@ _cache_keys: dict = {}
 # checked -- see check() below.
 _cached_vault_fingerprint: Optional[str] = None
 
-# signature -> {resolved_path_str: sha256_hex, ...}
+# signature -> {"hashes": {resolved_path_str: sha256_hex, ...},
+#               "granted_wall": float,  "granted_mono": float}
 _trusted: dict = {}
 
 
@@ -147,6 +159,13 @@ def _resolve_argv0(command, cwd) -> Optional[Path]:
     itself literally named PATH, which store.SENSITIVE_ENV_NAMES already
     flags elsewhere as a separate, advisory warning.
 
+    On Windows, cwd is prepended to the PATH search to match CreateProcess
+    semantics (Windows searches the application's current directory before
+    PATH). On POSIX, cwd is intentionally NOT prepended: POSIX exec() never
+    searches cwd, so prepending it would cause a planted decoy file in cwd
+    to be hashed while the real PATH binary executes -- drift detection
+    would be bound to the wrong file.
+
     Returns None if command is empty or the program can't be resolved to a
     concrete file -- that failure is itself surfaced to the human via
     unmonitored_file_warning() rather than silently implying coverage.
@@ -154,7 +173,13 @@ def _resolve_argv0(command, cwd) -> Optional[Path]:
     if not command:
         return None
     base = Path(cwd) if cwd else Path.cwd()
-    search_path = f"{base}{os.pathsep}{os.environ.get('PATH', '')}"
+    if sys.platform == "win32":
+        # Windows CreateProcess searches the cwd before PATH.
+        search_path = f"{base}{os.pathsep}{os.environ.get('PATH', '')}"
+    else:
+        # POSIX exec does not search cwd -- prepending it would mis-bind
+        # drift detection to a decoy file in cwd.
+        search_path = os.environ.get("PATH", "")
     resolved = shutil.which(command[0], path=search_path)
     if not resolved:
         return None
@@ -252,6 +277,40 @@ def unmonitored_file_warning(command, cwd) -> Optional[str]:
     return "Note: " + "; ".join(parts) + ". Changes to these won't revoke trust."
 
 
+def monitored_summary(command, cwd) -> tuple:
+    """Returns (monitored_paths, is_executable_only).
+
+    monitored_paths: sorted list of path strings for every file that is
+    drift-monitored for this command (the full set _candidate_paths resolves
+    to, including the resolved argv0 when found).
+
+    is_executable_only: True when the ONLY monitored path is the resolved
+    argv0 and zero command-line file arguments resolved to real files.  This
+    is the "docker compose up" shape -- the compose file is not named on the
+    command line, so drift detection covers only the executable binary.
+    False in all other cases:
+      - monitored_paths is empty (nothing monitored at all -- a distinct
+        condition that unmonitored_file_warning already reports separately);
+      - at least one non-argv0 file argument is also monitored.
+    Lane 4 uses this flag to decide whether to show an "only the executable
+    is monitored" amber warning; an unresolvable argv0 (paths==[]) must not
+    take that branch.
+    """
+    paths, _ = _candidate_paths(command, cwd)
+    if not paths:
+        return [], False
+    monitored_strs = sorted(str(p) for p in paths)
+    argv0 = _resolve_argv0(command, cwd)
+    # is_executable_only: the set of monitored paths is exactly {argv0}.
+    # _candidate_paths deduplicates via `seen`, so argv0 appears at most once.
+    is_executable_only = (
+        argv0 is not None
+        and len(paths) == 1
+        and paths[0] == argv0
+    )
+    return monitored_strs, is_executable_only
+
+
 def _vault_fingerprint() -> Optional[str]:
     try:
         return hashlib.sha256(store.SECRETS_FILE.read_bytes()).hexdigest()
@@ -292,7 +351,11 @@ def cached_secrets(signature) -> Optional[dict]:
 
 
 def trust(signature, file_hashes: dict) -> None:
-    _trusted[signature] = file_hashes
+    _trusted[signature] = {
+        "hashes": file_hashes,
+        "granted_wall": time.time(),
+        "granted_mono": time.monotonic(),
+    }
 
 
 def check(signature, command, cwd):
@@ -317,6 +380,23 @@ def check(signature, command, cwd):
     if signature not in _trusted or signature not in _cached_secrets:
         return False, None
 
+    entry = _trusted[signature]
+    elapsed_wall = time.time() - entry["granted_wall"]
+    elapsed_mono = time.monotonic() - entry["granted_mono"]
+    if elapsed_wall > _TRUST_TTL_SECONDS or elapsed_mono > _TRUST_TTL_SECONDS:
+        # Drop this signature's cached plaintext too, not just its trust
+        # record. Nothing would *serve* it after expiry (mcp_server only
+        # reads cached_secrets() when check() returned ok), but leaving it
+        # resident would mean the decrypted values outlive the grant that
+        # justified caching them -- for the rest of the process's life. The
+        # point of a TTL is to bound that exposure, so it has to bound the
+        # cache as well as the permission.
+        del _trusted[signature]
+        _cached_secrets.pop(signature, None)
+        _cache_keys.pop(signature, None)
+        return False, ("Trust for this command expired -- the 8-hour trust grant "
+                       "limit was reached. Re-approve to trust it again.")
+
     if _cached_vault_fingerprint is not None and _vault_fingerprint() != _cached_vault_fingerprint:
         # The vault changed since these secrets were cached -- every
         # trusted command was approved against a vault snapshot that no
@@ -332,7 +412,7 @@ def check(signature, command, cwd):
                         "added, removed, or the vault was re-unlocked) -- re-enter the "
                         "master password to refresh it.")
 
-    approved_hashes = _trusted[signature]
+    approved_hashes = entry["hashes"]
     current_hashes = referenced_file_hashes(command, cwd)
     if current_hashes == approved_hashes:
         return True, None
