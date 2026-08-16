@@ -34,55 +34,6 @@ with open(_GUI_SRC_PATH, encoding="utf-8") as _fh:
     _GUI_SRC = _fh.read()
 
 
-def _tk_available() -> bool:
-    try:
-        import tkinter as tk
-        root = tk.Tk()
-        root.destroy()
-        return True
-    except Exception:  # noqa: BLE001 -- no display, no Tcl, anything
-        return False
-
-
-def _build_dialog(call):
-    """Run a dialog function far enough to build its widgets, then tear it down.
-
-    The dialogs own their Tk root and end in root.mainloop(), so there is no
-    outside handle to drive them with. Swapping in a root whose mainloop()
-    snapshots the tree and destroys itself lets the whole construction path run
-    -- every grid(), every cget(), every f-string in a label -- without a human
-    and without blocking.
-
-    Returns a list of (widget_class, text) for every widget built.
-    """
-    import tkinter as tk
-
-    captured = []
-    real_tk = tk.Tk
-
-    class _AutoCloseTk(real_tk):
-        def mainloop(self, n=0):
-            def walk(widget):
-                for child in widget.winfo_children():
-                    try:
-                        text = str(child.cget("text"))
-                    except Exception:  # noqa: BLE001 -- not every widget has -text
-                        text = ""
-                    captured.append((child.winfo_class(), text))
-                    walk(child)
-            walk(self)
-            self.destroy()
-
-    gui.tk.Tk = _AutoCloseTk
-    try:
-        call()
-    finally:
-        gui.tk.Tk = real_tk
-    return captured
-
-
-def _all_text(widgets) -> str:
-    return " ".join(text for _cls, text in widgets).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -136,69 +87,8 @@ def test_gui_never_offers_to_save_or_print() -> None:
             f"file or a print spooler defeats the point of a paper-only key.")
 
 
-def test_recovery_key_dialog_shows_the_key_and_both_drill_steps() -> None:
-    if not _tk_available():
-        return
-    key = crypto.format_recovery_key(bytes(crypto.new_recovery_key()))
-    widgets = _build_dialog(lambda: gui.show_recovery_key_dialog(key, "AB12"))
-    blob = _all_text(widgets)
-
-    classes = [cls for cls, _text in widgets]
-    assert "Checkbutton" in classes, (
-        "REGRESSION: the 'I have written this down' checkbox is gone from the "
-        "recovery-key drill")
-    assert "Entry" in classes, (
-        "REGRESSION: the full-key re-entry field is gone from the recovery-key "
-        "drill. Without it nothing verifies the human actually transcribed the "
-        "key, and a mistranscription is only discovered when recovery is needed")
-    assert "cannot be shown again" in blob, (
-        "the dialog must say plainly that the key is unrecoverable once closed")
-    assert "AB12" in " ".join(t for _c, t in widgets), (
-        "the slot id must be shown so a stale printout is identifiable")
 
 
-def test_recovery_key_dialog_has_no_copy_control() -> None:
-    """Prose may legitimately mention a 'printed copy'; a control may not."""
-    if not _tk_available():
-        return
-    key = crypto.format_recovery_key(bytes(crypto.new_recovery_key()))
-    widgets = _build_dialog(lambda: gui.show_recovery_key_dialog(key, "AB12"))
-    for cls, text in widgets:
-        if cls in ("Button", "Checkbutton", "Radiobutton"):
-            low = text.lower()
-            # "copy" is now allowed -- see the clipboard test above for why, and
-            # for the wipe that bounds it. Writing to disk or a spooler is not:
-            # those leave the key somewhere nobody remembers to clean up.
-            for banned in ("save to", "save as", "print", "export", "email"):
-                assert banned not in low, (
-                    f"REGRESSION: found a {cls} labelled {text!r} in the recovery "
-                    f"key dialog. The key may reach the clipboard briefly, but it "
-                    f"must never be written to a file or a print spooler.")
-
-
-def test_unlock_dialog_never_accepts_a_recovery_key() -> None:
-    """If it did, every routine unlock becomes a harvesting surface and users
-    get trained to type paper secrets into ordinary prompts."""
-    if not _tk_available():
-        return
-    widgets = _build_dialog(
-        lambda: gui.unlock_for_run_dialog("echo hello", only_vars=["A"]))
-    blob = _all_text(widgets)
-    assert "recovery" not in blob, (
-        "REGRESSION: the run-command unlock dialog mentions a recovery key. "
-        "Recovery entry belongs only in recover_dialog, which is visually "
-        "distinct and explicitly framed as a forgotten-password path.")
-
-
-def test_unlock_dialog_discloses_that_output_goes_to_the_ai() -> None:
-    if not _tk_available():
-        return
-    widgets = _build_dialog(
-        lambda: gui.unlock_for_run_dialog("echo hello", only_vars=["A"]))
-    blob = _all_text(widgets)
-    assert "returned to the ai" in blob or "returned to the a" in blob, (
-        "REGRESSION (A1): the unlock dialog no longer tells the human that the "
-        "command's output is handed back to the AI assistant")
 
 
 # ---------------------------------------------------------------------------
@@ -209,40 +99,6 @@ def test_unlock_dialog_discloses_that_output_goes_to_the_ai() -> None:
 # constant would pass the entire suite and fail only in front of a human --
 # at the exact moment they are trying to reach their secrets.
 # ---------------------------------------------------------------------------
-
-def test_every_dialog_constructs_without_error() -> None:
-    if not _tk_available():
-        return
-    key = crypto.format_recovery_key(bytes(crypto.new_recovery_key()))
-    orig_info = store.vault_info
-    orig_version = store.vault_format_version
-    store.vault_info = lambda: {
-        "format": 2, "kdf": "scrypt", "kdf_params": {"n": 65536, "r": 8, "p": 1},
-        "recovery_slot": True, "recovery_slot_id": "AB12",
-        "recovery_slot_created": "2026-08-16T00:00:00+00:00",
-        "created": "2026-08-16T00:00:00+00:00"}
-    store.vault_format_version = lambda: 2
-    try:
-        cases = {
-            "show_recovery_key_dialog": lambda: gui.show_recovery_key_dialog(key, "AB12"),
-            "recover_dialog": gui.recover_dialog,
-            "manage_vault_dialog": gui.manage_vault_dialog,
-            "change_password_dialog": gui.change_password_dialog,
-            "unlock_for_run_dialog": lambda: gui.unlock_for_run_dialog(
-                "echo hello", only_vars=["A"]),
-        }
-        for name, call in cases.items():
-            try:
-                widgets = _build_dialog(call)
-            except Exception as exc:  # noqa: BLE001
-                assert False, (
-                    f"REGRESSION: {name} raised while building its widgets "
-                    f"({type(exc).__name__}: {exc}). A dialog that cannot be "
-                    f"constructed locks the human out of their own vault.")
-            assert widgets, f"{name} built no widgets at all"
-    finally:
-        store.vault_info = orig_info
-        store.vault_format_version = orig_version
 
 
 # ---------------------------------------------------------------------------
@@ -277,75 +133,7 @@ def test_no_dialog_calls_tk_Tk_directly() -> None:
         f"opens behind its parent and cannot be dismissed.")
 
 
-def test_second_window_is_a_toplevel_not_a_second_root() -> None:
-    if not _tk_available():
-        return
-    import tkinter as tk
 
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        second, run = gui._new_window()
-        assert isinstance(second, tk.Toplevel), (
-            f"REGRESSION: opening a window while a root is alive produced "
-            f"{type(second).__name__}, not a Toplevel. A second Tk root means a "
-            f"nested mainloop and an undismissable dialog.")
-        assert run.__name__ != "mainloop", (
-            "REGRESSION: the second window would be driven by a nested "
-            "mainloop rather than wait_window")
-        second.destroy()
-    finally:
-        root.destroy()
-
-
-def test_first_window_is_a_real_root() -> None:
-    if not _tk_available():
-        return
-    import tkinter as tk
-
-    win, _run = gui._new_window()
-    try:
-        assert isinstance(win, tk.Tk), (
-            "the first window in a process must be a real Tk root")
-    finally:
-        win.destroy()
-
-
-def test_dialog_actually_takes_the_keyboard_focus() -> None:
-    """A visible dialog that does not own the keyboard is a disclosure bug.
-
-    If the window is painted but the foreground belongs to something else, the
-    human types their master password into whatever that something else is --
-    an editor, a terminal, a chat box. The secret this product exists to
-    contain lands in plaintext somewhere arbitrary and unrecoverable.
-
-    Windows refuses SetForegroundWindow to a process that is not already in the
-    foreground, which is exactly what this server is when an editor or MCP
-    client launched it. focus_force() does not help: it moves focus only within
-    our own application. This asserts the real OS-level condition rather than
-    trusting that we asked nicely.
-    """
-    if not _tk_available() or sys.platform != "win32":
-        return
-    import ctypes
-    import tkinter as tk
-
-    win, _run = gui._new_window()
-    try:
-        gui._style(win)
-        tk.Label(win, text="focus probe").pack()
-        win.update_idletasks()
-        gui._foreground(win)
-        win.update()
-
-        user32 = ctypes.windll.user32
-        hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
-        assert user32.GetForegroundWindow() == hwnd, (
-            "REGRESSION: the dialog opened without taking the Windows "
-            "foreground. Anything the human types before clicking it goes to "
-            "another application -- including their master password.")
-    finally:
-        win.destroy()
 
 
 def test_win32_foreground_helper_is_wired_in() -> None:
@@ -395,6 +183,43 @@ def test_no_shadowed_module_level_definitions() -> None:
         f"REGRESSION: {sorted(set(dupes))} defined more than once at module "
         f"level in gui.py. The later definition wins and the earlier one is "
         f"dead code that still looks live.")
+
+
+# ---------------------------------------------------------------------------
+# Dialog checks, executed in a fresh interpreter
+#
+# These need real Tk windows -- nothing else catches a dialog that fails to
+# build, or one that opens without owning the keyboard. But creating and
+# destroying Tk roots repeatedly inside a single interpreter corrupts Tcl
+# state: after a dozen or so, unrelated tests begin failing with "tk wasn't
+# installed properly", and which ones fail depends on execution order. A flaky
+# security test is worse than none, because it gets muted. So the whole sweep
+# runs once in a subprocess. See tests/_tk_checks.py for the individual checks.
+# ---------------------------------------------------------------------------
+
+def test_dialog_checks_pass_in_a_clean_interpreter() -> None:
+    import subprocess
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    python = os.path.join(repo, ".venv", "Scripts", "python.exe")
+    if not os.path.exists(python):
+        python = sys.executable
+    script = os.path.join(repo, "tests", "_tk_checks.py")
+
+    proc = subprocess.run([python, script], cwd=repo, capture_output=True,
+                          text=True, timeout=300)
+    out = (proc.stdout or "") + (proc.stderr or "")
+
+    if "tk wasn't installed properly" in out or "no display name" in out:
+        return  # headless box -- nothing to assert
+
+    failures = [ln for ln in out.splitlines() if ln.startswith("FAIL ")]
+    assert proc.returncode == 0 and not failures, (
+        "REGRESSION: dialog checks failed.\n" + out)
+    assert "OK every_dialog_constructs" in out, (
+        "the dialog-construction sweep did not run at all -- a dialog that "
+        "cannot be built locks the human out of their own vault, so this must "
+        "never silently skip.\n" + out)
 
 
 # ---------------------------------------------------------------------------
