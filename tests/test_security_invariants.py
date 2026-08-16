@@ -368,6 +368,35 @@ def test_passphrase_generator_is_gone() -> None:
             f"recovered -- it guarantees eventual loss of the vault.")
 
 
+
+def test_no_shadowed_module_level_definitions() -> None:
+    """No name may be defined twice at module level in gui.py.
+
+    A blocklist and its two helpers were once defined twice in this file. Python
+    binds top to bottom, so the later pair silently won and the earlier pair was
+    dead code that looked completely authoritative -- edit the wrong copy, add
+    an entry to the wrong set, and the behaviour does not change while the diff
+    says it should. For a security control that is a genuinely dangerous shape.
+    """
+    import ast
+    tree = ast.parse(_GUI_SRC)
+    seen, dupes = set(), []
+    for node in tree.body:
+        names = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [node.name]
+        elif isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        for name in names:
+            if name in seen:
+                dupes.append(name)
+            seen.add(name)
+    assert not dupes, (
+        f"REGRESSION: {sorted(set(dupes))} defined more than once at module "
+        f"level in gui.py. The later definition wins and the earlier one is "
+        f"dead code that still looks live.")
+
+
 # ---------------------------------------------------------------------------
 # The standing agent policy
 #

@@ -155,65 +155,6 @@ MIN_PASSWORD_LEN = 5
 # confirm field, not long enough to still be there later.
 _CLIPBOARD_CLEAR_SECONDS = 30
 
-# Blocklist of passwords that survive no attack at all, and the compensating
-# control for the low length floor above. Length and dictionary rank are
-# different axes: "password" is eight characters and falls in the first
-# thousand guesses, while "k7#qz" is five and does not appear in any wordlist.
-# Refusing the top of the list is what makes a short floor defensible.
-#
-# Weighted towards infrastructure defaults rather than the usual leaked-list
-# classics, because this is a developer tool and "admin" / "changeme" /
-# "docker" are what actually get typed into it.
-_COMMON_PASSWORDS = frozenset("""
-password password1 password123 passw0rd p@ssword p@ssw0rd pass pass123 passwd
-123456 1234567 12345678 123456789 1234567890 12345 1234 111111 000000 123123
-654321 666666 121212 112233 123321 789456 159753 987654321 11111111 00000000
-qwerty qwerty123 qwertyuiop qazwsx qwe123 1q2w3e 1q2w3e4r 1qaz2wsx zaq12wsx
-asdfgh asdfghjkl zxcvbn zxcvbnm poiuy trewq
-admin admin123 administrator adminadmin sysadmin superuser super root toor
-root123 guest guest123 user user123 test test1 test123 testing testtest demo
-demo123 default changeme change changeit letmein letmein123 welcome welcome1
-welcome123 login logon access secret secret1 secrets topsecret master master1
-monkey dragon shadow sunshine princess football baseball basketball soccer
-hockey superman batman starwars pokemon computer internet samsung google
-michael jennifer jessica ashley daniel charlie thomas robert joshua matthew
-andrew hunter tigger buster soccer1 harley ranger jordan freedom whatever
-trustno1 iloveyou lovely loveme babygirl sweetie angel flower cookie
-docker dockerhub kubernetes k8s jenkins gitlab github bitbucket ansible
-postgres postgresql mysql mariadb mongodb mongo redis oracle sqlserver mssql
-sa dba database db admin1 vault vaultpass keystore keychain
-apikey api_key apitoken token bearer secretkey privatekey
-localhost devuser dev development staging production prod stage
-temp temporary temppass abc123 abcd1234 a1b2c3 aaaaaa qwer1234
-""".split())
-
-
-def _is_common_password(password: str) -> bool:
-    """True if the password is on the blocklist.
-
-    Compares against the stripped, lowercased form: an attacker's wordlist is
-    tried case-insensitively, so treating "Admin" as distinct from "admin"
-    would be self-deception rather than a real distinction.
-    """
-    return password.strip().lower() in _COMMON_PASSWORDS
-
-
-def _password_rejection_reason(password: str) -> Optional[str]:
-    """Why this password cannot be used, or None if it is acceptable.
-
-    Pure and Tkinter-free so it can be unit-tested without a display. Checked
-    in escalating order so the message names the most basic problem first.
-    """
-    if not password:
-        return "Password cannot be empty."
-    if len(password) < MIN_PASSWORD_LEN:
-        return f"Use at least {MIN_PASSWORD_LEN} characters."
-    if _is_common_password(password):
-        return ("That is one of the most common passwords in use, so it is "
-                "among the first an attacker tries. Pick something else -- it "
-                "can still be short, just not guessable.")
-    return None
-
 # Passwords refused outright regardless of length.
 #
 # This is the cheap half of the trade-off above. Length and dictionary rank are

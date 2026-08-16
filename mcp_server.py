@@ -528,7 +528,10 @@ def _manage_vault_impl() -> dict:
       change_password  -- "old_password" (str), "new_password" (str)
       setup_recovery   -- "password" (str)
       reissue_recovery -- "password" (str)
-      upgrade_v2       -- "password" (str); "recovery" (bool, optional, defaults False)
+      upgrade_v2       -- "password" (str). The dialog never sets "recovery";
+                          the kwarg is still passed through to store because
+                          upgrade_to_v2 accepts it, but no UI path produces
+                          True. Adding a recovery key is setup_recovery's job.
       None             -- cancelled; returns a clean no-change result
 
     Recovery key handling contract: whenever a store call returns a key, it is
@@ -667,8 +670,10 @@ def manage_vault() -> dict:
       reissue_recovery -- replace an existing recovery key (e.g. after it
                           was lost or potentially compromised).
       upgrade_v2       -- upgrade a v1 vault to the v2 AES-256-GCM/scrypt
-                          format; optionally adds a recovery slot in the
-                          same operation.
+                          format. It does NOT add a recovery key; run
+                          setup_recovery afterwards for that. Two explicit
+                          steps, each with its own consent dialog, rather
+                          than one that quietly does two things.
 
     Recovery keys are displayed in a dedicated write-it-down dialog and
     never appear in this tool's result. If the human closes that dialog
