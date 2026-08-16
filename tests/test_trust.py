@@ -37,6 +37,7 @@ Runs under pytest (`pytest tests/test_trust.py -q`) or standalone
 (`python tests/test_trust.py`), matching test_install_migrate_robustness.py.
 """
 import contextlib
+import json
 import os
 import subprocess
 import sys
@@ -684,15 +685,36 @@ def test_cached_secret_is_obfuscated_not_plaintext_in_the_cache_dict() -> None:
 def test_real_docker_test_token_value_is_actually_injected() -> None:
     """End-to-end (no Docker needed): confirms the real secret VALUE, not
     just its presence, reaches the child process on both the fresh-unlock
-    and the auto-allowed path."""
+    and the auto-allowed path.
+
+    The child prints the value REVERSED rather than verbatim. That is not
+    obfuscation for its own sake -- since A1, _run_with_env_impl redacts
+    every vault value out of the returned stdout/stderr, so a child that
+    echoed the value plainly would hand this test back
+    `[REDACTED:DOCKER_TEST_TOKEN]` and prove nothing about what the child
+    actually received. Reversing dodges the literal-match redactor while
+    still being derivable only from the true value, so the assertion below
+    is strictly stronger than the pre-A1 version it replaces: it proves the
+    real secret reached the child AND that the real secret did not come
+    back to the caller."""
     with isolated_vault():
-        cmd = [sys.executable, "-c", "import os; print(os.environ.get('DOCKER_TEST_TOKEN', ''))"]
+        cmd = [sys.executable, "-c",
+               "import os; print(os.environ.get('DOCKER_TEST_TOKEN', '')[::-1])"]
+        expected_reversed = BASE_SECRETS["DOCKER_TEST_TOKEN"][::-1]
         with fake_dialog(_allow(trust_it=True)):
             r1 = mcp_server._run_with_env_impl(list(cmd), None, False, None, ["DOCKER_TEST_TOKEN"])
-            assert r1["stdout"].strip() == BASE_SECRETS["DOCKER_TEST_TOKEN"]
+            assert r1["stdout"].strip() == expected_reversed, (
+                "the real secret value did not reach the child process")
+            assert BASE_SECRETS["DOCKER_TEST_TOKEN"] not in json.dumps(r1), (
+                "REGRESSION (A1): the raw secret value came back to the caller "
+                "in the tool result")
             r2 = mcp_server._run_with_env_impl(list(cmd), None, False, None, ["DOCKER_TEST_TOKEN"])
             assert r2.get("auto_allowed") is True
-            assert r2["stdout"].strip() == BASE_SECRETS["DOCKER_TEST_TOKEN"]
+            assert r2["stdout"].strip() == expected_reversed, (
+                "the real secret value did not reach the child on the auto-allowed path")
+            assert BASE_SECRETS["DOCKER_TEST_TOKEN"] not in json.dumps(r2), (
+                "REGRESSION (A1): the raw secret value came back to the caller "
+                "on the auto-allowed path")
 
 
 # ---------------------------------------------------------------------------

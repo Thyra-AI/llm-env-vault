@@ -22,17 +22,21 @@ import sys
 # the vault_lib import; after it, it's a no-op.
 sys.dont_write_bytecode = True
 
+import base64
 import os
 import signal
 import subprocess
 import tempfile
+import threading
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
 from vault_lib import gui, store, trust
+from vault_lib.crypto import WrongPassword
 
 # Standing policy handed to every client that connects, so it applies
 # unconditionally rather than depending on a skill trigger firing at the exact
@@ -50,8 +54,20 @@ human types into directly -- that is the only correct path.
 - When running a command with run_with_env, pass only_vars to scope the \
 exposure to the variables that command actually needs. Injecting the whole \
 vault when two variables would do is the main avoidable risk here.
-- run_with_env output can contain real secret values if the command prints \
-its own configuration. Do not echo that output back verbatim.
+- run_with_env output is redacted before it reaches you: vault values, and \
+their base64 and URL-encoded forms, are replaced with [REDACTED:NAME]. This \
+is best-effort damage control, NOT a guarantee -- values under 8 characters \
+are left alone (they would shred unrelated output; the names are reported in \
+redaction_skipped), and a command that transforms what it prints can still \
+emit a real value. Do not echo run_with_env output back verbatim, and never \
+craft a command whose purpose is to get a value past the redactor.
+- Never read the background-run log file (the llm-env-vault-run-*.log path \
+returned when background=True) while the process is still running -- it \
+contains real secret values until the server redacts it in place once the \
+process exits. Wait for the process to finish before reading the log.
+- Never read a materialize target file -- it contains real secret values and \
+is deleted the instant the foreground command exits. Its path should be \
+treated as write-only from your perspective.
 """
 
 mcp = FastMCP("llm-env-vault", instructions=_AGENT_INSTRUCTIONS)
@@ -81,6 +97,42 @@ def _cleanup_stale_run_logs() -> None:
                 continue  # another process may hold it open, or it's already gone -- skip, don't fail the run
     except OSError:
         pass
+
+# Minimum byte-length a vault value must have before _redact_secrets will
+# replace it in command output. Values shorter than this (e.g. "1", "true",
+# "no") are too short to replace safely: they would match common substrings
+# and destroy the output. They are reported in the result instead so the
+# omission is visible rather than silent.
+REDACT_MIN_VALUE_LEN = 8
+
+
+def _redact_secrets(text: str, secrets: dict) -> tuple:
+    """Replace every vault value in text with [REDACTED:VAR_NAME].
+
+    Matches the exact value, its base64-encoded form, and its
+    URL-percent-encoded form. Values shorter than REDACT_MIN_VALUE_LEN
+    are skipped to avoid substring-destroying false positives.
+
+    Returns (redacted_text, names_skipped_as_too_short).
+    """
+    skipped: list = []
+    # Process longest values first so a long value isn't masked before its
+    # shorter substring (a different vault entry) is replaced first.
+    for name, value in sorted(secrets.items(), key=lambda kv: -len(kv[1])):
+        if len(value) < REDACT_MIN_VALUE_LEN:
+            skipped.append(name)
+            continue
+        marker = f"[REDACTED:{name}]"
+        # Exact value
+        text = text.replace(value, marker)
+        # Base64-encoded form (e.g. as it might appear in an HTTP Authorization header)
+        b64 = base64.b64encode(value.encode("utf-8")).decode("ascii")
+        text = text.replace(b64, marker)
+        # URL-percent-encoded form (e.g. as it might appear in a connection string)
+        url_enc = urllib.parse.quote(value, safe="")
+        text = text.replace(url_enc, marker)
+    return text, skipped
+
 
 # GUI-opening tools are deliberately plain, synchronous functions -- NOT
 # offloaded to a worker thread via asyncio.to_thread. That was tried: it
@@ -373,6 +425,42 @@ def resync_targets() -> dict:
     return _resync_targets_impl()
 
 
+def _change_password_impl() -> dict:
+    outcome = gui.change_password_dialog()
+    if outcome["old"] is None or outcome["new"] is None:
+        return {"applied": False, "message": "Cancelled by user."}
+    try:
+        store.change_password(outcome["old"], outcome["new"])
+    except FileNotFoundError:
+        return {"applied": False,
+                "error": "No vault found (vault.enc or vault.salt is missing). "
+                         "Create a vault first before changing the password."}
+    except WrongPassword:
+        return {"applied": False, "error": "Incorrect current password."}
+    except RuntimeError:
+        # Re-encryption or read-back verification failed; vault was rolled back.
+        # Do NOT include the exception message: it could theoretically carry
+        # password material under unexpected code paths, even though in
+        # practice store.change_password raises a fixed-text RuntimeError.
+        return {"applied": False,
+                "error": "Password change failed -- the vault has been restored "
+                         "to its previous state. The password was NOT changed. "
+                         "Try again or check for disk issues."}
+    return {"applied": True, "message": "Master password changed successfully."}
+
+
+@mcp.tool()
+def change_password() -> dict:
+    """Change the vault's master password. Opens a GUI dialog where the
+    human types the current password and the new password; nothing is
+    written until they confirm. The passwords are never returned or
+    logged. A cancelled dialog is a clean no-op. Three failure cases:
+    wrong current password, no vault found, and a rare read-back failure
+    (vault is automatically restored to its previous state in that last
+    case)."""
+    return _change_password_impl()
+
+
 class _Terminated(Exception):
     pass
 
@@ -451,20 +539,47 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
 
     if auto_ok and raw_secrets is not None:
         trust_info["auto_allowed"] = True
+        # Show the remaining TTL so the human knows how long auto-allow lasts.
+        _entry = trust._trusted.get(signature, {})
+        if _entry:
+            _elapsed = time.time() - _entry.get("granted_wall", time.time())
+            _remaining = max(0, trust._TRUST_TTL_SECONDS - int(_elapsed))
+            if _remaining >= 3600:
+                _remaining_str = f"{_remaining // 3600} hours"
+            elif _remaining >= 60:
+                _remaining_str = f"{_remaining // 60} minutes"
+            else:
+                _remaining_str = "less than a minute"
+            _ttl_part = f" ({_remaining_str} remaining)"
+        else:
+            _ttl_part = ""
         trust_info["trust_note"] = (
-            "Auto-allowed: this exact command is trusted for this session and its "
-            "referenced file(s) are unchanged -- no password prompt was shown.")
+            f"Auto-allowed: this exact command is trusted for this session{_ttl_part} "
+            f"and its referenced file(s) are unchanged -- no password prompt was shown.")
     else:
         # Hashed *before* the dialog opens, not after Allow is clicked --
         # the dialog can sit open for minutes while a human reads it, and
         # trust must bind to the file content they actually reviewed, not
         # to whatever it happens to contain the instant they click Allow.
         pre_hashes = trust.referenced_file_hashes(command, cwd)
+        # Determine what the trust grant will actually monitor, so we can
+        # warn the human BEFORE they tick the trust checkbox -- not only in
+        # the tool result they see afterward.
+        monitored_paths, is_executable_only = trust.monitored_summary(command, cwd)
+        _dialog_parts = []
+        if invalidated_reason:
+            _dialog_parts.append(invalidated_reason)
+        if is_executable_only:
+            _dialog_parts.append(
+                "Note: only the executable binary is drift-monitored for this "
+                "command -- no config files are named on the command line, so "
+                "changes to compose files or scripts will NOT revoke trust.")
+        dialog_trust_note = " ".join(_dialog_parts) if _dialog_parts else None
         outcome = gui.unlock_for_run_dialog(subprocess.list2cmdline(command),
                                              materialize_path=str(materialized_path)
                                              if materialized_path else None,
                                              only_vars=only_vars,
-                                             trust_note=invalidated_reason)
+                                             trust_note=dialog_trust_note)
         raw_secrets = outcome["secrets"]
         if raw_secrets is None:
             result = {"applied": False, "message": "Denied by user."}
@@ -481,10 +596,37 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
             to_cache = ({k: v for k, v in raw_secrets.items() if k in only_vars}
                         if only_vars is not None else raw_secrets)
             trust.cache_secrets(signature, to_cache)
-            granted_note = (
-                "This exact command is now trusted for the rest of this session -- "
-                "future identical runs auto-allow with no password prompt, as long as "
-                "its referenced file(s) stay unchanged.")
+            # Derive the TTL string from the constant so it can't drift.
+            _ttl_hours = trust._TRUST_TTL_SECONDS // 3600
+            if is_executable_only:
+                # "docker compose up" shape: only the binary is tracked.
+                # Make the limited coverage explicit in the tool result.
+                _exe_path = monitored_paths[0]
+                granted_note = (
+                    f"This exact command is now trusted for the next "
+                    f"{_ttl_hours} hours (or until this server restarts, "
+                    f"whichever comes first). "
+                    f"Future identical runs auto-allow with no password prompt. "
+                    f"Drift-monitored: only the executable ({_exe_path}). "
+                    f"No config files are named on this command line -- changes "
+                    f"to compose files or scripts will NOT revoke trust.")
+            elif monitored_paths:
+                _path_list = ", ".join(monitored_paths)
+                granted_note = (
+                    f"This exact command is now trusted for the next "
+                    f"{_ttl_hours} hours (or until this server restarts, "
+                    f"whichever comes first). "
+                    f"Future identical runs auto-allow with no password prompt, "
+                    f"as long as its referenced file(s) stay unchanged. "
+                    f"Drift-monitored: {_path_list}.")
+            else:
+                # Unresolvable argv0 and no file args -- nothing monitored;
+                # unmonitored_file_warning below will cover the disclosure.
+                granted_note = (
+                    f"This exact command is now trusted for the next "
+                    f"{_ttl_hours} hours (or until this server restarts, "
+                    f"whichever comes first). "
+                    f"Future identical runs auto-allow with no password prompt.")
             warning = trust.unmonitored_file_warning(command, cwd)
             if warning:
                 granted_note += " " + warning
@@ -541,9 +683,35 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
                                          stdout=log_file, stderr=subprocess.STDOUT)
         except OSError as e:
             return _finish({"applied": False, "error": f"could not start {command[0]!r}: {e}"})
+        # Redact the log in place once the process exits. Best-effort: a
+        # watcher daemon thread waits on the process and then rewrites the
+        # log with [REDACTED:NAME] markers. If the server dies before the
+        # process does, the thread dies too and the log stays unredacted --
+        # that is why we disclose the unredacted-while-running caveat below.
+        # We do NOT pipe the child's output through the server to redact live:
+        # if the server dies, the pipe fills and the child hangs.
+        _secrets_for_redaction = dict(raw_secrets)
+
+        def _log_redactor_thread() -> None:
+            try:
+                proc.wait()
+            except Exception:
+                return
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="replace") as _f:
+                    _content = _f.read()
+                _redacted, _ = _redact_secrets(_content, _secrets_for_redaction)
+                with open(log_path, "w", encoding="utf-8") as _f:
+                    _f.write(_redacted)
+            except OSError:
+                pass  # best-effort: swallow all IO failures silently
+
+        threading.Thread(target=_log_redactor_thread, daemon=True).start()
         return _finish({"applied": True, "started": True, "pid": proc.pid, "log_file": log_path,
-                "note": "Running detached. This tool does not track or stop it -- "
-                        "use the OS/your own process manager to stop it later."})
+                "note": "Running detached. The log file is unredacted while the process is "
+                        "still running -- secret values may appear in it until the process "
+                        "exits and the server redacts it in place. "
+                        "Use the OS/your own process manager to stop it later."})
 
     old_sigterm = None
     if materialized_path is not None:
@@ -576,12 +744,26 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
             except OSError as e:
                 cleanup_error = str(e)
 
+    # Redact BEFORE the [-4000:] slice so a secret value that straddles the
+    # cut point is still caught. The full output is redacted first, then
+    # truncated -- the truncation can split a [REDACTED:NAME] marker but
+    # cannot leave a raw secret value visible.
+    _stdout_full = proc.stdout or ""
+    _stderr_full = proc.stderr or ""
+    _stdout_redacted, _stdout_skipped = _redact_secrets(_stdout_full, raw_secrets)
+    _stderr_redacted, _stderr_skipped = _redact_secrets(_stderr_full, raw_secrets)
+    _all_skipped = sorted(set(_stdout_skipped) | set(_stderr_skipped))
     result = {
         "applied": True,
         "exit_code": proc.returncode,
-        "stdout": (proc.stdout or "")[-4000:],
-        "stderr": (proc.stderr or "")[-4000:],
+        "stdout": _stdout_redacted[-4000:],
+        "stderr": _stderr_redacted[-4000:],
     }
+    if _all_skipped:
+        result["redaction_skipped"] = (
+            f"These vault variables were NOT redacted from output because their "
+            f"values are shorter than {REDACT_MIN_VALUE_LEN} characters: "
+            + ", ".join(_all_skipped))
     if cleanup_error:
         result["warning"] = (f"Could not delete {materialized_path}, it still contains real "
                               f"secret values -- remove it by hand: {cleanup_error}")
@@ -596,11 +778,15 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     environment variables. Prompts once for the master password via a GUI
     (which also lists which variable names -- never values -- will be
     exposed) and never writes real values to disk unless materialize is
-    given. Returns the command's exit code, stdout, and stderr (not
-    secret -- that's the app's own output, same as running it in a
-    terminal, though be aware a command that echoes its own environment
-    or dumps its config on error will put real secret values into that
-    output, and therefore into this result).
+    given. Returns the command's exit code, stdout, and stderr, with every
+    vault value -- plus its base64 and URL-encoded forms -- replaced by
+    [REDACTED:VAR_NAME] before the result is handed back. That redaction is
+    accident-prevention, not a boundary: values shorter than 8 characters
+    are skipped (listed in redaction_skipped) because replacing them would
+    shred unrelated output, and a command that transforms what it prints
+    can still emit a real value. Two paths are deliberately not covered --
+    a background run's log file is only redacted once the process exits,
+    and a materialize target holds real values on disk by design.
 
     only_vars: restrict which vault variables are actually injected, by
     name (e.g. ["DATABASE_URL"]). Strongly recommended whenever the

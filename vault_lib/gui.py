@@ -19,13 +19,44 @@ means there -- an in-memory-only cache scoped to this one server
 process, never written to disk.
 """
 import re
+# Aliased: several dialogs bind a local named `secrets` to the decrypted vault
+# dict, which would shadow this module inside those scopes. They happen not to
+# call secrets.choice() today, so the collision is latent rather than live --
+# the alias keeps it that way permanently instead of leaving an UnboundLocalError
+# waiting for whoever adds a passphrase call to one of those functions.
+import secrets as _secrets
 import sys
 import tkinter as tk
 import tkinter.font as tkfont
+import unicodedata
 from typing import Optional
 
-from . import store
+from . import store, trust
 from .crypto import WrongPassword
+
+
+def _strip_hidden(text: str) -> str:
+    """Strip Unicode format characters (category Cf) and C0/C1 control
+    characters that are not ordinary ASCII whitespace (\\t \\n \\r \\f \\v).
+    These can hide a boundary in text a human is approving: a zero-width
+    joiner or directional mark inserted between two words looks like a word
+    boundary in the rendered string but not in the underlying code-point
+    sequence. Tk 8.6 does not implement bidi reordering, so a Right-to-Left
+    Override (U+202E) renders as a missing-glyph box rather than visually
+    reversing surrounding text -- the zero-width half of Cf is the plausible
+    attack surface here, not visual reordering.
+    Ordinary whitespace chars (\\t, \\n, \\r, \\f, \\v) are left in place so
+    _safe_display and _collapse_whitespace can still collapse them to spaces.
+    """
+    result = []
+    for ch in text:
+        cat = unicodedata.category(ch)
+        if cat == "Cf":
+            continue  # zero-width joiners/non-joiners, bidi marks, soft hyphen, etc.
+        if cat == "Cc" and ch not in "\t\n\r\f\v":
+            continue  # C0 (U+0000-U+001F minus whitespace) and C1 (U+0080-U+009F)
+        result.append(ch)
+    return "".join(result)
 
 
 def _safe_display(text, max_len: int = 200) -> str:
@@ -35,8 +66,10 @@ def _safe_display(text, max_len: int = 200) -> str:
     input (a command line, a process description) can never inject fake
     extra lines or grow tall/wide enough to push the real consent content
     and the Allow/Deny buttons off a non-resizable, non-scrolling window.
+    Also strips Unicode format characters (Cf) and C0/C1 controls via
+    _strip_hidden before collapsing -- see that function for why.
     """
-    collapsed = re.sub(r"\s+", " ", str(text)).strip()
+    collapsed = re.sub(r"\s+", " ", _strip_hidden(str(text))).strip()
     if len(collapsed) <= max_len:
         return collapsed
     head = max_len // 2 - 2
@@ -57,8 +90,10 @@ def _collapse_whitespace(text) -> str:
     with innocuous text specifically to bury the interesting part inside
     the elided middle). Still collapses newlines so attacker-controlled
     text can't fake extra lines that look like separate disclosures.
+    Also strips Unicode format characters (Cf) and C0/C1 controls via
+    _strip_hidden before collapsing -- see that function for why.
     """
-    return re.sub(r"\s+", " ", str(text)).strip()
+    return re.sub(r"\s+", " ", _strip_hidden(str(text))).strip()
 
 
 # --- Design tokens -----------------------------------------------------
@@ -96,6 +131,100 @@ FONT_BUTTON = (FONT_FAMILY, 10, "bold")
 # no other font is used anywhere in this module. _style() also forces
 # FONT_BODY as the Tk-wide default so any widget that forgets to set one
 # explicitly still can't end up on a different font.
+
+# Minimum acceptable master-password length (creation and change only --
+# existing vaults are never checked retroactively). 8 characters is roughly
+# 25-30 bits of entropy for user-chosen passwords -- crackable in hours by
+# anyone who copies vault.enc. 12 characters raises the floor to ~40 bits.
+MIN_PASSWORD_LEN = 12
+
+# Short built-in wordlist for the "Generate passphrase" convenience button in
+# the create-vault flow. Four words from 256 gives ~32 bits of entropy --
+# not Diceware, but more memorable than a random 12-char password and easily
+# above MIN_PASSWORD_LEN. The list is entirely lowercase, no special chars,
+# intentionally avoiding words that look like commands or path components.
+_WORDLIST = [
+    "apple", "beach", "birch", "blade", "blank", "blend", "block", "bloom",
+    "blown", "blues", "board", "brave", "bread", "brick", "brief", "bring",
+    "broad", "brook", "brush", "build", "bunny", "cable", "camel", "canoe",
+    "carry", "cedar", "chain", "chair", "chalk", "charm", "chart", "chase",
+    "cheap", "check", "cheek", "chess", "chief", "child", "chill", "chime",
+    "chord", "civil", "claim", "clasp", "class", "clean", "clear", "clerk",
+    "click", "cliff", "climb", "cloak", "clock", "close", "cloud", "clove",
+    "coach", "coast", "cobra", "combo", "comet", "coral", "cover", "crane",
+    "crate", "cream", "creek", "crisp", "cross", "crowd", "crown", "curve",
+    "cycle", "daisy", "dance", "delta", "depot", "depth", "derby", "digit",
+    "dingo", "disco", "ditch", "diver", "dodge", "dogma", "draft", "drain",
+    "drama", "drape", "drawl", "dream", "drift", "drill", "drink", "drive",
+    "drone", "drove", "drum", "dunce", "dusk", "eagle", "early", "earth",
+    "elder", "elbow", "ember", "entry", "equal", "event", "exact", "fable",
+    "facet", "fault", "feast", "fence", "ferry", "fetch", "fever", "fiber",
+    "field", "fifth", "fifty", "filth", "final", "first", "fixed", "fjord",
+    "flame", "flask", "fleet", "flesh", "flint", "float", "flood", "floor",
+    "floss", "flour", "fluid", "flute", "focus", "force", "forge", "forth",
+    "forty", "forum", "frank", "fresh", "front", "frost", "froze", "fully",
+    "funny", "gauze", "gavel", "gecko", "ghost", "giant", "given", "gleam",
+    "glide", "glint", "globe", "gloss", "glove", "glyph", "gnome", "goose",
+    "grace", "grade", "grain", "grand", "grant", "grape", "grasp", "grass",
+    "grave", "great", "green", "greet", "grind", "groan", "grove", "growl",
+    "gruel", "guard", "guide", "guild", "gusto", "havoc", "hedge", "helix",
+    "hertz", "hinge", "hippo", "holly", "honey", "honor", "horse", "hotel",
+    "house", "human", "humor", "hyena", "index", "indie", "inert", "infix",
+    "inner", "input", "ionic", "issue", "ivory", "jewel", "joust", "judge",
+    "juice", "jumbo", "kayak", "kazoo", "knack", "kneel", "knife", "knock",
+    "knoll", "label", "lance", "latch", "lemon", "lever", "light", "limit",
+    "linen", "lingo", "liver", "llama", "lodge", "logic", "lotus", "lover",
+    "lucid", "lunar", "lusty", "lyric", "maize", "manor", "maple", "march",
+    "march", "marsh", "match", "maxim", "media", "merge", "merit", "metal",
+    "metro", "micro", "minor", "mirage", "mirth", "mimic", "mixer", "model",
+    "money", "mongo", "moose", "morse", "mossy", "motor", "mount", "mouse",
+    "mouth", "mulch", "music", "myrrh", "naive", "nerve", "nexus", "night",
+    "ninety", "noble", "noise", "north", "notch", "novel", "nymph", "ocean",
+    "olive", "onset", "opera", "orbit", "order", "organ", "other", "otter",
+    "outer", "oxide", "ozone", "panda", "panel", "paper", "patch", "pause",
+    "peace", "pearl", "pedal", "perch", "photo", "piano", "pinch", "pixel",
+    "pixel", "plain", "plane", "plant", "plaza", "plumb", "plump", "plunk",
+    "point", "polar", "poppy", "portal", "power", "press", "price", "pride",
+    "prime", "prism", "prize", "probe", "prone", "proof", "prose", "proxy",
+    "pulse", "punch", "pupil", "quaff", "quail", "qualm", "quash", "quasi",
+    "queen", "quest", "queue", "quick", "quiet", "quirk", "quota", "quote",
+    "radar", "radio", "rainy", "rapid", "raven", "reach", "realm", "rebel",
+    "relay", "remix", "renew", "repay", "rider", "ridge", "risky", "rival",
+    "river", "robin", "robot", "rocky", "rodeo", "rouge", "rough", "round",
+    "royal", "rugby", "ruler", "rural", "rusty", "sadly", "safer", "saint",
+    "salsa", "sandy", "sauce", "savor", "scale", "scene", "scope", "score",
+    "scout", "screw", "seize", "sense", "serum", "seven", "shade", "shaft",
+    "shake", "shall", "shame", "shape", "share", "shark", "sharp", "sheep",
+    "sheer", "shelf", "shell", "shift", "shiny", "shore", "short", "shout",
+    "shown", "sight", "sigma", "silky", "silver", "since", "sixth", "sixty",
+    "sized", "skate", "skirt", "skull", "slate", "sleek", "sleep", "sleet",
+    "slick", "slide", "slime", "slimy", "slope", "sloth", "slump", "small",
+    "smart", "smash", "smell", "smile", "smoke", "snack", "snail", "snake",
+    "snowy", "solar", "solid", "solve", "sonic", "sorry", "south", "space",
+    "spark", "spawn", "speak", "speed", "spend", "spice", "spike", "spill",
+    "spine", "spite", "split", "spoke", "spore", "sport", "spout", "spray",
+    "spray", "squad", "squid", "stack", "staff", "stage", "stain", "stair",
+    "stake", "stale", "stall", "stamp", "stand", "stark", "start", "stash",
+    "state", "stays", "steam", "steel", "steep", "steer", "stern", "stock",
+    "stoic", "stone", "stood", "store", "storm", "story", "stout", "strap",
+    "straw", "stray", "strum", "stuck", "study", "style", "sugar", "suite",
+    "sunny", "super", "swamp", "swarm", "swear", "swept", "swift", "swirl",
+    "sword", "syrup", "table", "tango", "tapir", "taste", "teach", "tease",
+    "teeth", "tempo", "tense", "tenth", "tepid", "thank", "theme", "there",
+    "thick", "thing", "thorn", "three", "throw", "tiger", "timed", "tired",
+    "title", "tonal", "topic", "torch", "total", "tough", "tower", "track",
+    "trade", "trail", "train", "trait", "tramp", "trawl", "tread", "trend",
+    "triad", "tribe", "trick", "trout", "trove", "truce", "truck", "truly",
+    "truss", "trust", "truth", "tumor", "tuner", "tuxedo", "tweed", "twice",
+    "twist", "tying", "ultra", "uncle", "under", "unify", "union", "until",
+    "urban", "usher", "utter", "vague", "valid", "valor", "value", "valve",
+    "vapid", "vault", "verge", "vigor", "viola", "viper", "viral", "vista",
+    "vivid", "vocal", "vodka", "voter", "vowel", "waltz", "watch", "water",
+    "weave", "wedge", "weird", "whack", "whale", "wheat", "wheel", "where",
+    "which", "while", "white", "whole", "whose", "widen", "witty", "world",
+    "worse", "worst", "worth", "would", "wrath", "wreck", "wrist", "wrote",
+    "yacht", "yearn", "yield", "young", "yours", "youth", "zebra", "zonal",
+]
 
 
 def _enable_dark_titlebar(root) -> None:
@@ -314,14 +443,14 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
         row += 1
 
         verb = "update" if is_update else "add"
-        _label(container, f"About to {verb} the secret for {var_name}.",
+        _label(container, f"About to {verb} the secret for {_safe_display(var_name)}.",
                justify="left").grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
 
         if state["first_run"]:
-            _label(container, "No vault exists yet -- choose a master password\n"
-                               "(at least 8 characters).", justify="left").grid(
+            _label(container, f"No vault exists yet -- choose a master password\n"
+                               f"(at least {MIN_PASSWORD_LEN} characters).", justify="left").grid(
                 row=row, column=0, columnspan=2, sticky="w", **pad)
             row += 1
             _label(container, "Master password:").grid(row=row, column=0, sticky="e", **pad)
@@ -331,6 +460,17 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
             _label(container, "Confirm password:").grid(row=row, column=0, sticky="e", **pad)
             pw2 = _entry(container, show="*", width=30)
             pw2.grid(row=row, column=1, **pad)
+            row += 1
+
+            def gen_passphrase_add():
+                phrase = " ".join(_secrets.choice(_WORDLIST) for _ in range(4))
+                pw1.delete(0, "end")
+                pw1.insert(0, phrase)
+                pw2.delete(0, "end")
+                pw2.insert(0, phrase)
+
+            _button(container, "Generate passphrase", command=gen_passphrase_add).grid(
+                row=row, column=0, columnspan=2, pady=(0, 4))
             row += 1
         else:
             _label(container, "Master password:").grid(row=row, column=0, sticky="e", **pad)
@@ -349,8 +489,8 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
                 _show_error(root, err, "Password cannot be empty.")
                 return
             if state["first_run"]:
-                if len(password) < 8:
-                    _show_error(root, err, "Use at least 8 characters.")
+                if len(password) < MIN_PASSWORD_LEN:
+                    _show_error(root, err, f"Use at least {MIN_PASSWORD_LEN} characters.")
                     return
                 if password != pw2.get():
                     _show_error(root, err, "Passwords do not match.")
@@ -390,10 +530,11 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
         row += 1
 
         verb = "Update" if is_update else "Add"
+        _var = _safe_display(var_name)
         proposal = (
             f"Proposed change:\n"
-            f"  {verb} secret for  {var_name}\n"
-            f'  llm.env will read:  {var_name}="value {placeholder}"\n'
+            f"  {verb} secret for  {_var}\n"
+            f'  llm.env will read:  {_var}="value {placeholder}"\n'
             f"  The real value below is encrypted and never shown to the AI."
         )
         _label(container, proposal, justify="left").grid(
@@ -403,14 +544,14 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
         _divider(container).grid(row=row, column=0, columnspan=2, sticky="ew", padx=pad["padx"], pady=4)
         row += 1
 
-        _label(container, f"Real value for {var_name}:").grid(row=row, column=0, sticky="e", **pad)
+        _label(container, f"Real value for {_var}:").grid(row=row, column=0, sticky="e", **pad)
         val = _entry(container, show="*", width=30)
         val.grid(row=row, column=1, **pad)
         row += 1
 
         if is_sensitive:
             _label(container,
-                   f"Warning: {var_name} overrides a system/runtime environment variable "
+                   f"Warning: {_var} overrides a system/runtime environment variable "
                    f"and could affect any command run_with_env launches later.",
                    fg=WARNING, justify="left").grid(
                 row=row, column=0, columnspan=2, sticky="w", **pad)
@@ -507,7 +648,7 @@ def remove_secret_dialog(var_name: str, placeholder: int):
         _label(container, "Unlock Vault", font=FONT_TITLE).grid(
             row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(pad["pady"], 14))
         row += 1
-        _label(container, f"About to remove the secret for {var_name}.").grid(
+        _label(container, f"About to remove the secret for {_safe_display(var_name)}.").grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
         _label(container, "Master password:").grid(row=row, column=0, sticky="e", **pad)
@@ -553,10 +694,11 @@ def remove_secret_dialog(var_name: str, placeholder: int):
         _label(container, "Confirm Removal", font=FONT_TITLE).grid(
             row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(pad["pady"], 14))
         row += 1
+        _var = _safe_display(var_name)
         proposal = (
             f"Proposed change:\n"
-            f"  remove secret for  {var_name}\n"
-            f'  llm.env entry  {var_name}="value {placeholder}"  will be deleted.'
+            f"  remove secret for  {_var}\n"
+            f'  llm.env entry  {_var}="value {placeholder}"  will be deleted.'
         )
         _label(container, proposal, justify="left").grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
@@ -702,8 +844,8 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
         row += 1
 
         if state["first_run"]:
-            _label(container, "No vault exists yet -- choose a master password\n"
-                               "(at least 8 characters).", justify="left").grid(
+            _label(container, f"No vault exists yet -- choose a master password\n"
+                               f"(at least {MIN_PASSWORD_LEN} characters).", justify="left").grid(
                 row=row, column=0, columnspan=2, sticky="w", **pad)
             row += 1
             _label(container, "Master password:").grid(row=row, column=0, sticky="e", **pad)
@@ -713,6 +855,17 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
             _label(container, "Confirm password:").grid(row=row, column=0, sticky="e", **pad)
             pw2 = _entry(container, show="*", width=30)
             pw2.grid(row=row, column=1, **pad)
+            row += 1
+
+            def gen_passphrase_install():
+                phrase = " ".join(_secrets.choice(_WORDLIST) for _ in range(4))
+                pw1.delete(0, "end")
+                pw1.insert(0, phrase)
+                pw2.delete(0, "end")
+                pw2.insert(0, phrase)
+
+            _button(container, "Generate passphrase", command=gen_passphrase_install).grid(
+                row=row, column=0, columnspan=2, pady=(0, 4))
             row += 1
         else:
             _label(container, "Master password:").grid(row=row, column=0, sticky="e", **pad)
@@ -731,8 +884,8 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                 _show_error(root, err, "Password cannot be empty.")
                 return
             if state["first_run"]:
-                if len(password) < 8:
-                    _show_error(root, err, "Use at least 8 characters.")
+                if len(password) < MIN_PASSWORD_LEN:
+                    _show_error(root, err, f"Use at least {MIN_PASSWORD_LEN} characters.")
                     return
                 if password != pw2.get():
                     _show_error(root, err, "Passwords do not match.")
@@ -1002,10 +1155,10 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
                           trust_note: str = None):
     """Used by the run_with_env MCP tool. Returns an outcome dict:
     {"secrets": dict_or_None, "trust": bool}. secrets is None if
-    denied/failed, in which case trust is always False. Callers that pass
-    only_vars are expected to filter the returned secrets dict down to
-    those names themselves -- this function still returns everything,
-    since it has to decrypt the whole vault anyway to get any of it.
+    denied/failed, in which case trust is always False. When only_vars is
+    set, the returned secrets dict is already filtered to just those keys --
+    the whole vault is still decrypted internally (unavoidable to get any
+    of it), but only the requested subset is handed back to the caller.
 
     trust is True only if the human both allowed the run AND checked
     "Trust this exact command" -- see vault_lib/trust.py for what the
@@ -1014,9 +1167,9 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
 
     trust_note: optional text shown above the command box, e.g. an
     explanation that a *previous* trust grant for this same command was
-    just revoked because a file it references changed. Purely
-    informational -- this function doesn't consult vault_lib.trust
-    itself, the caller decides when a note is warranted.
+    just revoked because a file it references changed, or a warning about
+    what trust monitoring covers. Shown in full (scrollable) rather than
+    truncated -- consent-critical text must not be elided.
 
     No separate "Requested by" line here -- unlike the other dialogs, this
     one already shows exactly what's about to run in the Command box
@@ -1051,19 +1204,67 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     row += 1
 
     if trust_note:
-        _label(root, _safe_display(trust_note, 300), fg=WARNING,
-               justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        # B3: scrollable, non-truncating -- consent-critical text must never
+        # be elided. trust_note can carry a full warning about what trust
+        # monitoring covers; cutting it at 300 chars would defeat the purpose.
+        note_frame = tk.Frame(root, bg=WINDOW_BG)
+        note_text = tk.Text(note_frame, bg=FIELD_BG, fg=WARNING, font=FONT_BODY,
+                            relief="flat", highlightthickness=1,
+                            highlightbackground=BORDER, selectbackground=ACCENT,
+                            insertbackground=FG, height=4, width=52, wrap="word")
+        note_yscroll = _scrollbar(note_frame, orient="vertical", command=note_text.yview)
+        note_text.config(yscrollcommand=note_yscroll.set)
+        note_text.insert("end", _collapse_whitespace(trust_note))
+        note_text.config(state="disabled")
+        note_text.grid(row=0, column=0, sticky="nsew")
+        note_yscroll.grid(row=0, column=1, sticky="ns")
+        note_frame.grid_rowconfigure(0, weight=1)
+        note_frame.grid_columnconfigure(0, weight=1)
+        note_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
         row += 1
 
+    # B3: exposure list shown in a scrollable Text widget rather than a
+    # Label truncated at 300 chars -- with a large vault and only_vars=None
+    # the human would otherwise be approving an ellipsis, not a list.
     if var_names:
-        _label(root, f"Will expose {len(var_names)} variable(s) to this command: "
-                     f"{_safe_display(', '.join(var_names), 300)}",
+        _label(root, f"Will expose {len(var_names)} variable(s) to this command:",
                justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
+        list_count = len(var_names)
+        list_height = min(8, max(2, list_count))
+        vars_frame = tk.Frame(root, bg=WINDOW_BG)
+        vars_txt = tk.Text(vars_frame, bg=FIELD_BG, fg=FG, font=FONT_BODY, relief="flat",
+                           highlightthickness=1, highlightbackground=BORDER,
+                           selectbackground=ACCENT, insertbackground=FG,
+                           height=list_height, width=46, wrap="none")
+        vars_yscroll = _scrollbar(vars_frame, orient="vertical", command=vars_txt.yview)
+        vars_xscroll = _scrollbar(vars_frame, orient="horizontal", command=vars_txt.xview)
+        vars_txt.config(yscrollcommand=vars_yscroll.set, xscrollcommand=vars_xscroll.set)
+        for name in var_names:
+            vars_txt.insert("end", name + "\n")
+        vars_txt.config(state="disabled")
+        vars_txt.grid(row=0, column=0, sticky="nsew")
+        vars_yscroll.grid(row=0, column=1, sticky="ns")
+        vars_xscroll.grid(row=1, column=0, sticky="ew")
+        vars_frame.grid_rowconfigure(0, weight=1)
+        vars_frame.grid_columnconfigure(0, weight=1)
+        vars_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
+        row += 1
+        if list_count > list_height:
+            _label(root, f"({list_count} total -- scroll to see the rest.)",
+                   fg=FG_MUTED).grid(row=row, column=0, columnspan=2, sticky="w",
+                                     padx=pad["padx"])
+            row += 1
     else:
         _label(root, "Will expose 0 variable(s) to this command.").grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
+
+    # A1: disclose where this command's output goes.
+    _label(root, "This command's output will be returned to the AI assistant.",
+           fg=FG_MUTED, justify="left").grid(
+        row=row, column=0, columnspan=2, sticky="w", **pad)
+    row += 1
 
     _label(root, "Command:").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
     row += 1
@@ -1084,7 +1285,9 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     row += 1
 
     if materialize_path:
-        _label(root, f"Also writes real values to:", fg=FG_MUTED).grid(
+        # A1: be explicit about what the file contains, not just that it's cleaned up.
+        _label(root, "Also writes real secret values to disk for the lifetime of the command:",
+               fg=FG_MUTED, justify="left").grid(
             row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(6, 0))
         row += 1
         path_frame = tk.Frame(root, bg=WINDOW_BG)
@@ -1101,7 +1304,7 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
         path_frame.grid_columnconfigure(0, weight=1)
         path_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
         row += 1
-        _label(root, "(deleted the moment the command exits)", fg=FG_MUTED).grid(
+        _label(root, "(file deleted the moment the command exits)", fg=FG_MUTED).grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
 
@@ -1112,8 +1315,13 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
 
     trust_var = tk.BooleanVar(value=False)
     trust_check = tk.Checkbutton(
-        root, text="Trust this exact command for the rest of this session "
-                   "(auto-runs with no prompt while its files stay unchanged)",
+        # Hours derived from trust._TRUST_TTL_SECONDS rather than written out,
+        # so the number the human consents to here can never drift from the
+        # number check() actually enforces.
+        root, text=f"Trust this exact command for the next "
+                   f"{trust._TRUST_TTL_SECONDS // 3600} hours "
+                   f"(auto-runs with no prompt until then, or until this "
+                   f"server restarts -- whichever comes first)",
         variable=trust_var, bg=WINDOW_BG, fg=FG, font=FONT_BODY,
         selectcolor=FIELD_BG, activebackground=WINDOW_BG, activeforeground=FG,
         highlightthickness=0, wraplength=480, justify="left", anchor="w")
@@ -1148,7 +1356,13 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
             if mismatch:
                 _show_error(root, err, mismatch)
                 return
-        outcome["secrets"] = secrets
+        # A3: filter to only_vars when the caller scoped the run -- the whole
+        # vault was decrypted (unavoidable to get any key), but we must hand
+        # back only what was disclosed and approved, not everything.
+        if only_vars is not None:
+            outcome["secrets"] = {k: v for k, v in secrets.items() if k in only_vars}
+        else:
+            outcome["secrets"] = secrets
         outcome["trust"] = trust_var.get()
         root.destroy()
 
@@ -1166,6 +1380,87 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     root.bind("<Escape>", lambda e: on_deny())
     root.bind("<Return>", lambda e: on_allow())
     pw.focus_force()
+    _center(root)
+    root.mainloop()
+    return outcome
+
+
+def change_password_dialog() -> dict:
+    """Collect current and new master password from the human.
+    Returns {"old": str|None, "new": str|None}. Both are None if cancelled.
+    Does NOT call store.change_password -- returns the two strings and lets
+    the MCP tool drive the vault I/O, keeping this dialog free of vault
+    side-effects (same contract as the other dialogs in this module).
+    Enforces MIN_PASSWORD_LEN on the new password and that the two new-
+    password entries match before returning.
+    """
+    outcome = {"old": None, "new": None}
+    pad = {"padx": 18, "pady": 7}
+
+    root = tk.Tk()
+    root.title("llm-env-vault")
+    root.resizable(False, False)
+    _style(root)
+
+    row = 0
+    _label(root, "Change Master Password", font=FONT_TITLE).grid(
+        row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(pad["pady"], 14))
+    row += 1
+
+    _label(root, "Current password:").grid(row=row, column=0, sticky="e", **pad)
+    old_pw = _entry(root, show="*", width=30)
+    old_pw.grid(row=row, column=1, **pad)
+    row += 1
+
+    _label(root, f"New password (at least {MIN_PASSWORD_LEN} characters):").grid(
+        row=row, column=0, sticky="e", **pad)
+    new_pw1 = _entry(root, show="*", width=30)
+    new_pw1.grid(row=row, column=1, **pad)
+    row += 1
+
+    _label(root, "Confirm new password:").grid(row=row, column=0, sticky="e", **pad)
+    new_pw2 = _entry(root, show="*", width=30)
+    new_pw2.grid(row=row, column=1, **pad)
+    row += 1
+
+    err = _label(root, "", fg=DANGER)
+    err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+    row += 1
+
+    def on_change():
+        old = old_pw.get()
+        new = new_pw1.get()
+        confirm = new_pw2.get()
+        if not old:
+            _show_error(root, err, "Current password cannot be empty.")
+            return
+        if not new:
+            _show_error(root, err, "New password cannot be empty.")
+            return
+        if len(new) < MIN_PASSWORD_LEN:
+            _show_error(root, err, f"Use at least {MIN_PASSWORD_LEN} characters.")
+            return
+        if new != confirm:
+            _show_error(root, err, "New passwords do not match.")
+            return
+        outcome["old"] = old
+        outcome["new"] = new
+        root.destroy()
+
+    def on_cancel():
+        root.destroy()
+
+    btns = tk.Frame(root, bg=WINDOW_BG)
+    btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+    row += 1
+    _button(btns, "Cancel", command=on_cancel).pack(side="left", padx=6)
+    _button(btns, "Change Password", command=on_change, kind="primary").pack(side="left", padx=6)
+
+    _branding_footer(root).grid(row=row, column=0, columnspan=2)
+
+    root.bind("<Escape>", lambda e: on_cancel())
+    root.bind("<Return>", lambda e: on_change())
+    old_pw.focus_force()
     _center(root)
     root.mainloop()
     return outcome
