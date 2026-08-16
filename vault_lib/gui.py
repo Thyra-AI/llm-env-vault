@@ -19,12 +19,6 @@ means there -- an in-memory-only cache scoped to this one server
 process, never written to disk.
 """
 import re
-# Aliased: several dialogs bind a local named `secrets` to the decrypted vault
-# dict, which would shadow this module inside those scopes. They happen not to
-# call secrets.choice() today, so the collision is latent rather than live --
-# the alias keeps it that way permanently instead of leaving an UnboundLocalError
-# waiting for whoever adds a passphrase call to one of those functions.
-import secrets as _secrets
 import sys
 import tkinter as tk
 import tkinter.font as tkfont
@@ -134,98 +128,146 @@ FONT_BUTTON = (FONT_FAMILY, 10, "bold")
 # explicitly still can't end up on a different font.
 
 # Minimum acceptable master-password length (creation and change only --
-# existing vaults are never checked retroactively). 8 characters is roughly
-# 25-30 bits of entropy for user-chosen passwords -- crackable in hours by
-# anyone who copies vault.enc. 12 characters raises the floor to ~40 bits.
-MIN_PASSWORD_LEN = 12
+# existing vaults are never checked retroactively).
+#
+# Deliberately low, and the reasoning is worth writing down because it looks
+# like an oversight otherwise.
+#
+# The adversary this product is built against is an AI agent, and an agent
+# cannot attack the password at all: it can neither see nor drive the native
+# dialog, so every attempt it makes is simply an error. Length buys nothing
+# against that threat. Meanwhile a password the human cannot remember is a
+# certain, self-inflicted total loss of the vault -- a far more likely outcome
+# than the alternative.
+#
+# The alternative being: an attacker who gets a COPY of vault.enc off the
+# machine attacks it offline, where no dialog stands in the way, and there the
+# password is the only remaining secret. A short user-chosen password falls to
+# a wordlist in seconds regardless of the KDF. That path needs the ciphertext
+# to be exfiltrated first, which is a bigger step than reading it, but it is
+# not exotic. This floor accepts that risk in exchange for memorability; the
+# README says so plainly rather than implying the minimum is strong.
+MIN_PASSWORD_LEN = 5
 
-# Short built-in wordlist for the "Generate passphrase" convenience button in
-# the create-vault flow. Four words from 256 gives ~32 bits of entropy --
-# not Diceware, but more memorable than a random 12-char password and easily
-# above MIN_PASSWORD_LEN. The list is entirely lowercase, no special chars,
-# intentionally avoiding words that look like commands or path components.
-_WORDLIST = [
-    "apple", "beach", "birch", "blade", "blank", "blend", "block", "bloom",
-    "blown", "blues", "board", "brave", "bread", "brick", "brief", "bring",
-    "broad", "brook", "brush", "build", "bunny", "cable", "camel", "canoe",
-    "carry", "cedar", "chain", "chair", "chalk", "charm", "chart", "chase",
-    "cheap", "check", "cheek", "chess", "chief", "child", "chill", "chime",
-    "chord", "civil", "claim", "clasp", "class", "clean", "clear", "clerk",
-    "click", "cliff", "climb", "cloak", "clock", "close", "cloud", "clove",
-    "coach", "coast", "cobra", "combo", "comet", "coral", "cover", "crane",
-    "crate", "cream", "creek", "crisp", "cross", "crowd", "crown", "curve",
-    "cycle", "daisy", "dance", "delta", "depot", "depth", "derby", "digit",
-    "dingo", "disco", "ditch", "diver", "dodge", "dogma", "draft", "drain",
-    "drama", "drape", "drawl", "dream", "drift", "drill", "drink", "drive",
-    "drone", "drove", "drum", "dunce", "dusk", "eagle", "early", "earth",
-    "elder", "elbow", "ember", "entry", "equal", "event", "exact", "fable",
-    "facet", "fault", "feast", "fence", "ferry", "fetch", "fever", "fiber",
-    "field", "fifth", "fifty", "filth", "final", "first", "fixed", "fjord",
-    "flame", "flask", "fleet", "flesh", "flint", "float", "flood", "floor",
-    "floss", "flour", "fluid", "flute", "focus", "force", "forge", "forth",
-    "forty", "forum", "frank", "fresh", "front", "frost", "froze", "fully",
-    "funny", "gauze", "gavel", "gecko", "ghost", "giant", "given", "gleam",
-    "glide", "glint", "globe", "gloss", "glove", "glyph", "gnome", "goose",
-    "grace", "grade", "grain", "grand", "grant", "grape", "grasp", "grass",
-    "grave", "great", "green", "greet", "grind", "groan", "grove", "growl",
-    "gruel", "guard", "guide", "guild", "gusto", "havoc", "hedge", "helix",
-    "hertz", "hinge", "hippo", "holly", "honey", "honor", "horse", "hotel",
-    "house", "human", "humor", "hyena", "index", "indie", "inert", "infix",
-    "inner", "input", "ionic", "issue", "ivory", "jewel", "joust", "judge",
-    "juice", "jumbo", "kayak", "kazoo", "knack", "kneel", "knife", "knock",
-    "knoll", "label", "lance", "latch", "lemon", "lever", "light", "limit",
-    "linen", "lingo", "liver", "llama", "lodge", "logic", "lotus", "lover",
-    "lucid", "lunar", "lusty", "lyric", "maize", "manor", "maple", "march",
-    "march", "marsh", "match", "maxim", "media", "merge", "merit", "metal",
-    "metro", "micro", "minor", "mirage", "mirth", "mimic", "mixer", "model",
-    "money", "mongo", "moose", "morse", "mossy", "motor", "mount", "mouse",
-    "mouth", "mulch", "music", "myrrh", "naive", "nerve", "nexus", "night",
-    "ninety", "noble", "noise", "north", "notch", "novel", "nymph", "ocean",
-    "olive", "onset", "opera", "orbit", "order", "organ", "other", "otter",
-    "outer", "oxide", "ozone", "panda", "panel", "paper", "patch", "pause",
-    "peace", "pearl", "pedal", "perch", "photo", "piano", "pinch", "pixel",
-    "pixel", "plain", "plane", "plant", "plaza", "plumb", "plump", "plunk",
-    "point", "polar", "poppy", "portal", "power", "press", "price", "pride",
-    "prime", "prism", "prize", "probe", "prone", "proof", "prose", "proxy",
-    "pulse", "punch", "pupil", "quaff", "quail", "qualm", "quash", "quasi",
-    "queen", "quest", "queue", "quick", "quiet", "quirk", "quota", "quote",
-    "radar", "radio", "rainy", "rapid", "raven", "reach", "realm", "rebel",
-    "relay", "remix", "renew", "repay", "rider", "ridge", "risky", "rival",
-    "river", "robin", "robot", "rocky", "rodeo", "rouge", "rough", "round",
-    "royal", "rugby", "ruler", "rural", "rusty", "sadly", "safer", "saint",
-    "salsa", "sandy", "sauce", "savor", "scale", "scene", "scope", "score",
-    "scout", "screw", "seize", "sense", "serum", "seven", "shade", "shaft",
-    "shake", "shall", "shame", "shape", "share", "shark", "sharp", "sheep",
-    "sheer", "shelf", "shell", "shift", "shiny", "shore", "short", "shout",
-    "shown", "sight", "sigma", "silky", "silver", "since", "sixth", "sixty",
-    "sized", "skate", "skirt", "skull", "slate", "sleek", "sleep", "sleet",
-    "slick", "slide", "slime", "slimy", "slope", "sloth", "slump", "small",
-    "smart", "smash", "smell", "smile", "smoke", "snack", "snail", "snake",
-    "snowy", "solar", "solid", "solve", "sonic", "sorry", "south", "space",
-    "spark", "spawn", "speak", "speed", "spend", "spice", "spike", "spill",
-    "spine", "spite", "split", "spoke", "spore", "sport", "spout", "spray",
-    "spray", "squad", "squid", "stack", "staff", "stage", "stain", "stair",
-    "stake", "stale", "stall", "stamp", "stand", "stark", "start", "stash",
-    "state", "stays", "steam", "steel", "steep", "steer", "stern", "stock",
-    "stoic", "stone", "stood", "store", "storm", "story", "stout", "strap",
-    "straw", "stray", "strum", "stuck", "study", "style", "sugar", "suite",
-    "sunny", "super", "swamp", "swarm", "swear", "swept", "swift", "swirl",
-    "sword", "syrup", "table", "tango", "tapir", "taste", "teach", "tease",
-    "teeth", "tempo", "tense", "tenth", "tepid", "thank", "theme", "there",
-    "thick", "thing", "thorn", "three", "throw", "tiger", "timed", "tired",
-    "title", "tonal", "topic", "torch", "total", "tough", "tower", "track",
-    "trade", "trail", "train", "trait", "tramp", "trawl", "tread", "trend",
-    "triad", "tribe", "trick", "trout", "trove", "truce", "truck", "truly",
-    "truss", "trust", "truth", "tumor", "tuner", "tuxedo", "tweed", "twice",
-    "twist", "tying", "ultra", "uncle", "under", "unify", "union", "until",
-    "urban", "usher", "utter", "vague", "valid", "valor", "value", "valve",
-    "vapid", "vault", "verge", "vigor", "viola", "viper", "viral", "vista",
-    "vivid", "vocal", "vodka", "voter", "vowel", "waltz", "watch", "water",
-    "weave", "wedge", "weird", "whack", "whale", "wheat", "wheel", "where",
-    "which", "while", "white", "whole", "whose", "widen", "witty", "world",
-    "worse", "worst", "worth", "would", "wrath", "wreck", "wrist", "wrote",
-    "yacht", "yearn", "yield", "young", "yours", "youth", "zebra", "zonal",
-]
+# Blocklist of passwords that survive no attack at all, and the compensating
+# control for the low length floor above. Length and dictionary rank are
+# different axes: "password" is eight characters and falls in the first
+# thousand guesses, while "k7#qz" is five and does not appear in any wordlist.
+# Refusing the top of the list is what makes a short floor defensible.
+#
+# Weighted towards infrastructure defaults rather than the usual leaked-list
+# classics, because this is a developer tool and "admin" / "changeme" /
+# "docker" are what actually get typed into it.
+_COMMON_PASSWORDS = frozenset("""
+password password1 password123 passw0rd p@ssword p@ssw0rd pass pass123 passwd
+123456 1234567 12345678 123456789 1234567890 12345 1234 111111 000000 123123
+654321 666666 121212 112233 123321 789456 159753 987654321 11111111 00000000
+qwerty qwerty123 qwertyuiop qazwsx qwe123 1q2w3e 1q2w3e4r 1qaz2wsx zaq12wsx
+asdfgh asdfghjkl zxcvbn zxcvbnm poiuy trewq
+admin admin123 administrator adminadmin sysadmin superuser super root toor
+root123 guest guest123 user user123 test test1 test123 testing testtest demo
+demo123 default changeme change changeit letmein letmein123 welcome welcome1
+welcome123 login logon access secret secret1 secrets topsecret master master1
+monkey dragon shadow sunshine princess football baseball basketball soccer
+hockey superman batman starwars pokemon computer internet samsung google
+michael jennifer jessica ashley daniel charlie thomas robert joshua matthew
+andrew hunter tigger buster soccer1 harley ranger jordan freedom whatever
+trustno1 iloveyou lovely loveme babygirl sweetie angel flower cookie
+docker dockerhub kubernetes k8s jenkins gitlab github bitbucket ansible
+postgres postgresql mysql mariadb mongodb mongo redis oracle sqlserver mssql
+sa dba database db admin1 vault vaultpass keystore keychain
+apikey api_key apitoken token bearer secretkey privatekey
+localhost devuser dev development staging production prod stage
+temp temporary temppass abc123 abcd1234 a1b2c3 aaaaaa qwer1234
+""".split())
+
+
+def _is_common_password(password: str) -> bool:
+    """True if the password is on the blocklist.
+
+    Compares against the stripped, lowercased form: an attacker's wordlist is
+    tried case-insensitively, so treating "Admin" as distinct from "admin"
+    would be self-deception rather than a real distinction.
+    """
+    return password.strip().lower() in _COMMON_PASSWORDS
+
+
+def _password_rejection_reason(password: str) -> Optional[str]:
+    """Why this password cannot be used, or None if it is acceptable.
+
+    Pure and Tkinter-free so it can be unit-tested without a display. Checked
+    in escalating order so the message names the most basic problem first.
+    """
+    if not password:
+        return "Password cannot be empty."
+    if len(password) < MIN_PASSWORD_LEN:
+        return f"Use at least {MIN_PASSWORD_LEN} characters."
+    if _is_common_password(password):
+        return ("That is one of the most common passwords in use, so it is "
+                "among the first an attacker tries. Pick something else -- it "
+                "can still be short, just not guessable.")
+    return None
+
+# Passwords refused outright regardless of length.
+#
+# This is the cheap half of the trade-off above. Length and dictionary rank are
+# different axes: a 5-character random password needs millions of guesses, while
+# "password1" survives no attack at all -- it sits in the first few hundred
+# entries of every wordlist in existence, so an attacker holding a copy of
+# vault.enc opens it essentially instantly however expensive the KDF is.
+#
+# Blocking these costs the user nothing in memorability (nobody picks "qwerty"
+# because it is the only thing they can remember) and removes the entire
+# top-of-wordlist attack class. It is not a strength meter and deliberately does
+# not try to be one -- no complexity rules, no scoring, no nagging. Just the
+# handful of strings that are guaranteed to be tried first.
+#
+# Compared case-insensitively after stripping surrounding whitespace.
+_COMMON_PASSWORDS = frozenset({
+    # numeric runs and keyboard walks
+    "123456", "123456789", "12345678", "1234567", "12345", "1234567890",
+    "1234", "111111", "123123", "000000", "654321", "666666", "121212",
+    "112233", "789456", "159753", "987654321", "11111111", "22222222",
+    "123321", "555555", "777777", "888888", "999999", "101010", "202020",
+    "qwerty", "qwerty123", "qwertyuiop", "qwe123", "1q2w3e", "1q2w3e4r",
+    "1q2w3e4r5t", "qazwsx", "qazwsxedc", "zxcvbnm", "asdfgh", "asdfghjkl",
+    "poiuytrewq", "1qaz2wsx", "q1w2e3r4", "azerty", "wasd",
+    # the perennial classics
+    "password", "password1", "password123", "passw0rd", "p@ssw0rd",
+    "p@ssword", "pass123", "passwd", "letmein", "welcome", "welcome1",
+    "welcome123", "monkey", "dragon", "sunshine", "princess", "football",
+    "baseball", "basketball", "superman", "batman", "shadow", "master",
+    "michael", "jennifer", "jordan", "harley", "ranger", "hunter",
+    "buster", "soccer", "hockey", "killer", "george", "andrew",
+    "charlie", "thomas", "robert", "daniel", "joshua", "matthew",
+    "trustno1", "starwars", "whatever", "freedom", "iloveyou", "lovely",
+    "flower", "cookie", "chocolate", "computer", "internet", "samsung",
+    "google", "facebook", "myspace1", "abc123", "abcd1234", "abc12345",
+    "a1b2c3", "aa123456", "123abc", "696969", "7777777", "12345678910",
+    # developer and infrastructure defaults -- the ones that matter most here
+    "admin", "admin123", "administrator", "root", "root123", "toor",
+    "changeme", "change_me", "changeit", "default", "guest", "test",
+    "test123", "testing", "temp", "temp123", "secret", "secret123",
+    "docker", "jenkins", "postgres", "mysql", "oracle", "redis",
+    "mongodb", "elastic", "kibana", "grafana", "tomcat", "apache",
+    "nginx", "ubuntu", "centos", "debian", "vagrant", "raspberry",
+    "raspberrypi", "pi", "user", "user123", "demo", "demo123",
+    "public", "private", "master123", "manager", "service", "system",
+    "backup", "database", "server", "localhost", "example", "sample",
+    "dummy", "foobar", "foo", "bar", "baz", "qwerty1", "hello",
+    "hello123", "helloworld", "letmein123", "openses", "opensesame",
+    "access", "login", "logmein", "enter", "start", "install",
+    "setup", "config", "sysadmin", "operator", "supervisor", "owner",
+    "developer", "devops", "deploy", "release", "staging", "production",
+    "prod", "dev", "development", "qwer1234", "asd123", "zxc123",
+    "1234abcd", "pass1234", "mypassword", "newpassword", "oldpassword",
+    "thisisapassword", "correcthorsebatterystaple",
+    # vault- and secret-manager flavoured guesses
+    "vault", "vault123", "keychain", "keystore", "secrets", "mysecret",
+    "topsecret", "confidential", "encrypted", "decrypt", "unlock",
+    "masterkey", "master_key", "privatekey", "apikey", "token",
+})
+
 
 
 def _enable_dark_titlebar(root) -> None:
@@ -256,6 +298,79 @@ def _style(root):
     root.attributes("-topmost", True)
     root.option_add("*Font", FONT_BODY)
     _enable_dark_titlebar(root)
+
+
+def _new_window():
+    """Returns (window, run_modal) for a dialog.
+
+    Tk does not tolerate two live Tk() roots in one process. A dialog opened
+    from inside another dialog's callback -- the recovery drill during
+    first-run vault creation is exactly this -- would create a second root and
+    a NESTED mainloop, and on Windows that produces two very confusing
+    symptoms: the new window opens *behind* the one that spawned it, so it
+    looks like nothing happened, and destroy() fails to unwind the nested loop
+    cleanly, so the dialog appears frozen -- you can tick the checkbox and
+    click Confirm and never leave the page.
+
+    So the first window in a process becomes the real root and is driven with
+    mainloop(); any window opened while one is already alive becomes a
+    Toplevel of it, made transient and modal and driven with wait_window().
+    Behaviour is identical to before for the common single-dialog case.
+    """
+    existing = getattr(tk, "_default_root", None)
+    try:
+        alive = existing is not None and existing.winfo_exists()
+    except Exception:  # noqa: BLE001 -- interpreter torn down mid-teardown
+        alive = False
+
+    if alive:
+        win = tk.Toplevel(existing)
+
+        def run_modal():
+            try:
+                win.transient(existing)
+            except Exception:  # noqa: BLE001 -- transient is best-effort
+                pass
+            _foreground(win)
+            win.grab_set()
+            win.wait_window(win)
+
+        return win, run_modal
+
+    win = tk.Tk()
+
+    def run_root():
+        _foreground(win)
+        win.mainloop()
+
+    return win, run_root
+
+
+def _foreground(win):
+    """Drag the window in front of whatever the human is looking at.
+
+    focus_force() alone only moves keyboard focus *within* the application on
+    Windows -- the window can still be painted behind the editor, so the first
+    thing typed goes somewhere else entirely. lift() plus a topmost flip is
+    what actually raises it.
+    """
+    try:
+        win.lift()
+        win.attributes("-topmost", True)
+        win.focus_force()
+        # Drop the always-on-top flag once we have the foreground, so the
+        # dialog does not hover over every other window for its whole life.
+        win.after(300, lambda: _safe_untopmost(win))
+    except Exception:  # noqa: BLE001 -- window manager may refuse any of this
+        pass
+
+
+def _safe_untopmost(win):
+    try:
+        if win.winfo_exists():
+            win.attributes("-topmost", False)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _label(parent, text, **kw):
@@ -464,7 +579,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
              "offer_recovery": False}
     pad = {"padx": 18, "pady": 7}
 
-    root = tk.Tk()
+    root, _run_modal = _new_window()
     root.title("llm-env-vault")
     root.resizable(False, False)
     _style(root)
@@ -505,16 +620,6 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
             pw2.grid(row=row, column=1, **pad)
             row += 1
 
-            def gen_passphrase_add():
-                phrase = " ".join(_secrets.choice(_WORDLIST) for _ in range(4))
-                pw1.delete(0, "end")
-                pw1.insert(0, phrase)
-                pw2.delete(0, "end")
-                pw2.insert(0, phrase)
-
-            _button(container, "Generate passphrase", command=gen_passphrase_add).grid(
-                row=row, column=0, columnspan=2, pady=(0, 4))
-            row += 1
 
             # Recovery key opt-in: honest framing — it increases attack surface
             # because it turns "needs something in your head" into "needs a piece
@@ -546,8 +651,9 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
                 _show_error(root, err, "Password cannot be empty.")
                 return
             if state["first_run"]:
-                if len(password) < MIN_PASSWORD_LEN:
-                    _show_error(root, err, f"Use at least {MIN_PASSWORD_LEN} characters.")
+                pw_reason = _password_rejection_reason(password)
+                if pw_reason:
+                    _show_error(root, err, pw_reason)
                     return
                 if password != pw2.get():
                     _show_error(root, err, "Passwords do not match.")
@@ -685,7 +791,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
         _center(root)
 
     show_step1()
-    root.mainloop()
+    _run_modal()
     return outcome
 
 
@@ -694,7 +800,7 @@ def remove_secret_dialog(var_name: str, placeholder: int):
     state = {"password": None, "secrets": None}
     pad = {"padx": 18, "pady": 7}
 
-    root = tk.Tk()
+    root, _run_modal = _new_window()
     root.title("llm-env-vault")
     root.resizable(False, False)
     _style(root)
@@ -825,7 +931,7 @@ def remove_secret_dialog(var_name: str, placeholder: int):
         _center(root)
 
     show_step1()
-    root.mainloop()
+    _run_modal()
     return outcome
 
 
@@ -867,7 +973,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
              "offer_recovery": False}
     pad = {"padx": 18, "pady": 7}
 
-    root = tk.Tk()
+    root, _run_modal = _new_window()
     root.title("llm-env-vault")
     root.resizable(False, False)
     _style(root)
@@ -923,16 +1029,6 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
             pw2.grid(row=row, column=1, **pad)
             row += 1
 
-            def gen_passphrase_install():
-                phrase = " ".join(_secrets.choice(_WORDLIST) for _ in range(4))
-                pw1.delete(0, "end")
-                pw1.insert(0, phrase)
-                pw2.delete(0, "end")
-                pw2.insert(0, phrase)
-
-            _button(container, "Generate passphrase", command=gen_passphrase_install).grid(
-                row=row, column=0, columnspan=2, pady=(0, 4))
-            row += 1
 
             # Recovery key opt-in: honest framing — increases attack surface.
             # A password-only vault is a fully valid choice.
@@ -963,8 +1059,9 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                 _show_error(root, err, "Password cannot be empty.")
                 return
             if state["first_run"]:
-                if len(password) < MIN_PASSWORD_LEN:
-                    _show_error(root, err, f"Use at least {MIN_PASSWORD_LEN} characters.")
+                pw_reason = _password_rejection_reason(password)
+                if pw_reason:
+                    _show_error(root, err, pw_reason)
                     return
                 if password != pw2.get():
                     _show_error(root, err, "Passwords do not match.")
@@ -1197,7 +1294,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
         _center(root)
 
     show_step1()
-    root.mainloop()
+    _run_modal()
     return outcome
 
 
@@ -1240,13 +1337,34 @@ def _disclosure_mismatch(disclosed_names, actual_secret_names) -> Optional[str]:
 # Pure helpers — Tkinter-free, directly unit-testable
 # ---------------------------------------------------------------------------
 
-def _validate_password_fields(pw: str, confirm: str) -> Optional[str]:
-    """Validate a new-password pair. Returns an error string or None.
-    Pure and Tkinter-free so it can be unit-tested without a display."""
+def _is_common_password(pw: str) -> bool:
+    """True if pw is in the blocklist, compared case- and whitespace-insensitively."""
+    return pw.strip().lower() in _COMMON_PASSWORDS
+
+
+def _password_rejection_reason(pw: str) -> Optional[str]:
+    """Why this password cannot be used, or None if it is acceptable.
+
+    Single source of truth: every dialog that sets a password routes through
+    here, so the blocklist cannot end up enforced in one flow and not another.
+    """
     if not pw:
         return "Password cannot be empty."
     if len(pw) < MIN_PASSWORD_LEN:
         return f"Use at least {MIN_PASSWORD_LEN} characters."
+    if _is_common_password(pw):
+        return ("That is one of the most commonly used passwords in the world. "
+                "Anyone who copies vault.enc would guess it within seconds, no "
+                "matter how strong the encryption is. Please pick another.")
+    return None
+
+
+def _validate_password_fields(pw: str, confirm: str) -> Optional[str]:
+    """Validate a new-password pair. Returns an error string or None.
+    Pure and Tkinter-free so it can be unit-tested without a display."""
+    reason = _password_rejection_reason(pw)
+    if reason:
+        return reason
     if pw != confirm:
         return "Passwords do not match."
     return None
@@ -1337,7 +1455,7 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     outcome = {"secrets": None, "trust": False}
     pad = {"padx": 18, "pady": 7}
 
-    root = tk.Tk()
+    root, _run_modal = _new_window()
     root.title("llm-env-vault")
     root.resizable(False, False)
     _style(root)
@@ -1539,7 +1657,7 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     root.bind("<Return>", lambda e: on_allow())
     pw.focus_force()
     _center(root)
-    root.mainloop()
+    _run_modal()
     return outcome
 
 
@@ -1555,7 +1673,7 @@ def change_password_dialog() -> dict:
     outcome = {"old": None, "new": None}
     pad = {"padx": 18, "pady": 7}
 
-    root = tk.Tk()
+    root, _run_modal = _new_window()
     root.title("llm-env-vault")
     root.resizable(False, False)
     _style(root)
@@ -1592,11 +1710,9 @@ def change_password_dialog() -> dict:
         if not old:
             _show_error(root, err, "Current password cannot be empty.")
             return
-        if not new:
-            _show_error(root, err, "New password cannot be empty.")
-            return
-        if len(new) < MIN_PASSWORD_LEN:
-            _show_error(root, err, f"Use at least {MIN_PASSWORD_LEN} characters.")
+        new_reason = _password_rejection_reason(new)
+        if new_reason:
+            _show_error(root, err, new_reason)
             return
         if new != confirm:
             _show_error(root, err, "New passwords do not match.")
@@ -1620,7 +1736,7 @@ def change_password_dialog() -> dict:
     root.bind("<Return>", lambda e: on_change())
     old_pw.focus_force()
     _center(root)
-    root.mainloop()
+    _run_modal()
     return outcome
 
 
@@ -1655,7 +1771,7 @@ def show_recovery_key_dialog(key_text: str, slot_id: str) -> bool:
     result = [False]
     pad = {"padx": 18, "pady": 7}
 
-    root = tk.Tk()
+    root, _run_modal = _new_window()
     root.title("llm-env-vault — Recovery Key")
     root.resizable(False, False)
     _style(root)
@@ -1690,12 +1806,23 @@ def show_recovery_key_dialog(key_text: str, slot_id: str) -> bool:
     # deliberately NO copy-to-clipboard button — clipboard is readable
     # by every local process; Clipboard History syncs to the cloud.
     key_frame = tk.Frame(root, bg=WINDOW_BG)
+    # Laid out for copying by hand, which is the only way this key is ever
+    # meant to leave the screen. The canonical one-line form is 48 characters
+    # and word-wraps after "RK1", which strands the prefix on its own line and
+    # leaves an unbroken 44-character run underneath -- easy to lose your place
+    # in halfway through. Three rows of three groups in a monospace face keeps
+    # the columns aligned so the eye can track position.
+    _groups = [g for g in key_text.replace("RK1", " ").replace("-", " ").split() if g]
+    _rows = ["  ".join(_groups[i:i + 3]) for i in range(0, len(_groups), 3)]
+    _pretty = "RK1\n" + "\n".join(_rows)
     key_disp = tk.Text(key_frame, bg=FIELD_BG, fg=ACCENT,
-                       font=(FONT_FAMILY, 13, "bold"), relief="flat",
+                       font=("Consolas", 15, "bold"), relief="flat",
                        highlightthickness=1, highlightbackground=BORDER,
                        selectbackground=ACCENT, insertbackground=FG,
-                       height=3, width=46, wrap="word")
-    key_disp.insert("end", key_text)
+                       height=len(_rows) + 1, width=24, wrap="none",
+                       padx=12, pady=8)
+    key_disp.insert("end", _pretty)
+    key_disp.tag_configure("mid", justify="left")
     key_disp.config(state="disabled")
     key_disp.grid(row=0, column=0, sticky="we")
     key_frame.grid_columnconfigure(0, weight=1)
@@ -1731,7 +1858,10 @@ def show_recovery_key_dialog(key_text: str, slot_id: str) -> bool:
            justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
     row += 1
 
-    reentry = _entry(root, width=46)
+    # Wide enough for the full 48-character canonical form: if the field
+    # scrolls, the human cannot see what they typed and cannot spot their own
+    # transcription error -- which is the entire point of this step.
+    reentry = _entry(root, width=52, font=("Consolas", 11))
     reentry.grid(row=row, column=0, columnspan=2, padx=pad["padx"], pady=(4, 2))
     row += 1
 
@@ -1798,7 +1928,7 @@ def show_recovery_key_dialog(key_text: str, slot_id: str) -> bool:
     root.bind("<Escape>", lambda e: on_cancel())
     reentry.focus_force()
     _center(root)
-    root.mainloop()
+    _run_modal()
     return result[0]
 
 
@@ -1819,7 +1949,7 @@ def recover_dialog() -> dict:
     outcome = {"recovery_key": None, "new_password": None}
     pad = {"padx": 18, "pady": 7}
 
-    root = tk.Tk()
+    root, _run_modal = _new_window()
     root.title("llm-env-vault — Account Recovery")
     root.resizable(False, False)
     _style(root)
@@ -1909,7 +2039,7 @@ def recover_dialog() -> dict:
     root.bind("<Return>", lambda e: on_recover())
     rk_entry.focus_force()
     _center(root)
-    root.mainloop()
+    _run_modal()
     return outcome
 
 
@@ -1948,7 +2078,7 @@ def manage_vault_dialog() -> dict:
     rk_slot_id = info.get("recovery_slot_id", "")
     rk_created = info.get("recovery_slot_created", "")
 
-    root = tk.Tk()
+    root, _run_modal = _new_window()
     root.title("llm-env-vault")
     root.resizable(False, False)
     _style(root)
@@ -2153,5 +2283,5 @@ def manage_vault_dialog() -> dict:
         _center(root)
 
     show_main()
-    root.mainloop()
+    _run_modal()
     return outcome

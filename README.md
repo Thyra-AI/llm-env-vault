@@ -159,7 +159,7 @@ Adds one secret. The dialog has two steps: master password (this also *creates* 
 ### `change_password()`
 
 Opens a two-step dialog: master password to decrypt the vault (same as any other vault-touching
-operation), then a new-password field. The new password must be at least 12 characters. On Allow,
+operation), then a new-password field. The new password must be at least 5 characters. On Allow,
 derives a new key from the new password and a fresh salt, re-encrypts the vault, and writes both
 `vault.enc` and `vault.salt` atomically.
 
@@ -359,10 +359,20 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
 - **Threat model:** protects against an AI agent (or anyone with filesystem read access) harvesting real values from files. Does **not** protect against someone who already has your master password, or an agent granted the ability to type into GUI windows on your behalf (e.g. computer-use tooling) — don't grant that.
 - **"The agent can edit this tool's own source" is a sharper non-boundary than it sounds — mitigated, not eliminated.** `plugin_launcher.py` used to re-run `pip install -r requirements.txt` automatically whenever that file's content hash changed, on every server start — meaning an agent with filesystem write access to an *installed* plugin's `requirements.txt` (the same access the "don't protect against editing source" threat model already excludes) could get it silently pip-installed on the very next restart, with no real `claude plugin update` involved. Two reductions, both confirmed by a red-team audit: (1) the installed-plugin trigger is now keyed on `CLAUDE_PLUGIN_ROOT`'s own path, not the requirements content — a real update always moves the plugin to a new version-scoped directory, so editing `requirements.txt` alone no longer triggers anything; (2) on Windows, dependencies install from `requirements-lock.txt`, a hash-pinned lockfile (every package and transitive dependency pinned to an exact version with sha256 hashes for every published artifact) via `pip install --require-hashes`, closing the separate supply-chain risk of a compromised/typosquatted PyPI upload being pulled in silently. Neither makes "an agent can edit this tool's own source" a real boundary — an agent with that access can still edit `plugin_launcher.py` itself, or any other file — but both shrink the auto-triggered, no-real-event attack surface that existed on top of it.
 - **Dependency pinning is Windows-only.** The hash-pinned `requirements-lock.txt` described above is scoped to Windows, because `pywin32` (a transitive `mcp[cli]` dependency) only publishes wheels there and a lockfile that can't resolve is worse than none. On macOS and Linux the launcher installs from the unpinned `requirements.txt` instead, so **those installs get no hash verification** and the supply-chain mitigation above does not apply to them. This is the concrete security cost of the Windows-first scoping, not just a packaging detail.
-- **Assume `vault.enc` is exfiltratable.** An agent — or anyone with filesystem read access —
-  can copy `vault.enc` and `vault.salt`. Decryption then depends entirely on the master password,
-  which is why the minimum was raised to 12 characters. A long, random passphrase (the 4-word
-  generated option offered at creation) is strongly recommended.
+- **Assume `vault.enc` is exfiltratable, and pick your password accordingly.** An agent — or
+  anyone with filesystem read access — can copy `vault.enc`. Decryption then depends entirely on
+  the master password, and that attack happens offline where no dialog stands in the way. The
+  enforced minimum is only **5 characters**, chosen deliberately for memorability: the adversary
+  this tool is built against is an AI agent, which cannot see or drive the native dialog and so
+  cannot attack the password at all, while a password you cannot remember is a certain, permanent
+  loss of the vault. That trade only holds while the ciphertext stays on your machine. **A short
+  user-chosen password falls to a wordlist in seconds once the file is copied off it**, no matter
+  how strong the KDF — so if that is a scenario you care about, use the generated 4-word
+  passphrase offered at creation rather than the minimum. As a partial compensation, roughly 220
+  of the most common passwords (`password`, `123456`, `qwerty`) and infrastructure defaults
+  (`admin`, `root`, `changeme`, `docker`, `postgres`) are refused outright at any length. Length
+  and dictionary rank are separate problems: a short random password needs millions of guesses,
+  while a top-of-wordlist one needs a handful no matter how expensive the KDF is.
 - **The recovery key is a real increase in attack surface.** It converts "compromise requires
   something in a human's head" into "compromise requires a piece of paper" — screenshots, phone
   photos, a filing cabinet. It is opt-in for exactly that reason; a password-only vault is fully

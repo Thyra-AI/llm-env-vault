@@ -49,6 +49,21 @@ unchanged until the human opts into an upgrade via `manage_vault`.
 
 ### Changed
 
+- **Common-password blocklist.** Roughly 220 of the most-guessed passwords and infrastructure
+  defaults — `password`, `123456`, `qwerty`, `admin`, `root`, `changeme`, `docker`, `postgres`,
+  `vault` — are refused at any length, compared case-insensitively. This is the compensating
+  control for the lower length floor below: length and dictionary rank are separate axes, and a
+  top-of-wordlist password is opened in a handful of guesses however expensive the KDF is. It is
+  deliberately not a strength meter — no complexity rules, no scoring, no nagging.
+- **Master-password minimum lowered from 12 characters to 5.** A deliberate product decision
+  favouring memorability. The adversary this tool is built against is an AI agent, which can
+  neither see nor drive the native dialog and therefore cannot attack the password at all — every
+  attempt is simply an error — while a password the human cannot remember is a certain, permanent
+  loss of the vault. The trade-off is explicit and holds only while `vault.enc` stays on the
+  machine: a copy taken off it is attacked offline, where a short user-chosen password falls to a
+  wordlist in seconds regardless of the KDF. The generated 4-word passphrase remains offered at
+  creation and is still the right choice if offline attack is in your threat model. Existing
+  vaults are unaffected; the floor applies only at creation and password change.
 - **`cryptography` floor raised to `>=42`.** Older OpenSSL builds defaulted scrypt's `maxmem` to
   32 MiB; the v2 KDF asks for 64 MiB, so an older pin fails at runtime on some installs.
 

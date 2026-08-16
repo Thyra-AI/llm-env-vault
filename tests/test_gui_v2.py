@@ -81,7 +81,11 @@ def test_validate_short_password_returns_error() -> None:
 
 
 def test_validate_short_password_mentions_length() -> None:
-    short = "tooshort1"
+    # Derived from the constant, not hardcoded: this test previously used a
+    # literal 9-char password, which silently became VALID when the floor moved
+    # from 12 to 5 and turned an assertion about the message into a failure
+    # about nothing.
+    short = "x" * (MIN_PASSWORD_LEN - 1)
     result = _validate_password_fields(short, short) or ""
     assert str(MIN_PASSWORD_LEN) in result, (
         f"REGRESSION: error for short password does not mention {MIN_PASSWORD_LEN}; "

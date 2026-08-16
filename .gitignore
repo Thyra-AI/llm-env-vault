@@ -16,3 +16,8 @@ __pycache__/
 .serena/
 SECURITY_FINDINGS.md
 SECURITY_TEST_PLAN.md
+
+# Hands-on release check harness -- dev tooling, not shipped to plugin installers
+manual_check.py
+manual_check_results.txt
+manual_step.py

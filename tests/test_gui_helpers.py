@@ -24,7 +24,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Import only the helpers we're testing -- avoid importing tkinter at the
 # top level so the test file can run in a headless/CI environment.
-from vault_lib.gui import _safe_display, _collapse_whitespace, _strip_hidden, MIN_PASSWORD_LEN
+from vault_lib.gui import (_safe_display, _collapse_whitespace, _strip_hidden,
+                           _is_common_password, _password_rejection_reason,
+                           _COMMON_PASSWORDS, MIN_PASSWORD_LEN)
 
 
 # ---------------------------------------------------------------------------
@@ -364,18 +366,93 @@ def test_ellipsis_split_for_normal_max_len() -> None:
 
 
 # ---------------------------------------------------------------------------
-# MIN_PASSWORD_LEN == 12
+# MIN_PASSWORD_LEN
 #
-# The module-level constant must be exactly 12.  Tests below assert both the
-# value and its presence so a silent rename or a constant-folded literal
-# does not pass.
+# Pinned so the floor can only move as a deliberate act. It was 8, briefly 12
+# during the 1.4.0 hardening work, and is now 5 by an explicit product decision
+# favouring memorability: an AI agent -- the adversary this tool exists for --
+# cannot attack the password at all, since it can neither see nor drive the
+# native dialog. The cost is that a copy of vault.enc taken off the machine is
+# attacked offline, where a short password is the weak link. That trade is
+# documented in gui.py next to the constant and in the README.
 # ---------------------------------------------------------------------------
 
-def test_min_password_len_is_12() -> None:
-    assert MIN_PASSWORD_LEN == 12, (
-        f"REGRESSION (B6): MIN_PASSWORD_LEN is {MIN_PASSWORD_LEN!r}, expected 12; "
-        "the password floor was raised from 8 to 12 as part of security hardening"
+def test_min_password_len_is_5() -> None:
+    assert MIN_PASSWORD_LEN == 5, (
+        f"REGRESSION: MIN_PASSWORD_LEN is {MIN_PASSWORD_LEN!r}, expected 5. "
+        "Changing the password floor is a product decision with a documented "
+        "trade-off -- update the reasoning in gui.py and the README together "
+        "with this test, not just the number."
     )
+
+
+# ---------------------------------------------------------------------------
+# Common-password blocklist
+#
+# The floor is 5 characters, which is a deliberate memorability trade-off. That
+# trade only makes sense if the top-of-wordlist passwords are refused: length
+# and dictionary rank are different axes, and "password" survives no attack at
+# all regardless of the KDF. These tests pin the behaviour so the blocklist
+# cannot quietly stop being consulted by one of the dialogs.
+# ---------------------------------------------------------------------------
+
+def test_blocklist_rejects_the_classics() -> None:
+    for pw in ("password", "123456", "qwerty", "letmein", "iloveyou", "dragon"):
+        assert _is_common_password(pw), f"{pw!r} should be blocklisted"
+        assert _password_rejection_reason(pw) is not None, (
+            f"REGRESSION: {pw!r} was accepted as a master password")
+
+
+def test_blocklist_rejects_infrastructure_defaults() -> None:
+    """These matter more here than the generic classics -- this is a developer
+    tool, and 'admin'/'changeme'/'docker' are what actually get typed."""
+    for pw in ("admin", "root", "changeme", "docker", "postgres", "vault",
+               "secret", "test123", "default", "guest"):
+        assert _password_rejection_reason(pw) is not None, (
+            f"REGRESSION: infrastructure default {pw!r} was accepted")
+
+
+def test_blocklist_is_case_and_whitespace_insensitive() -> None:
+    for variant in ("ADMIN", "Admin", "aDmIn", "  admin  ", "\tadmin\n"):
+        assert _is_common_password(variant), (
+            f"REGRESSION: {variant!r} slipped past the blocklist -- comparison "
+            f"must normalise case and surrounding whitespace")
+
+
+def test_blocklist_does_not_reject_ordinary_passwords() -> None:
+    """A blocklist that fires on reasonable choices is worse than none: users
+    route around it, usually by picking something worse."""
+    for pw in ("tomato-window-lamp", "k7#qz", "my-own-thing", "abcde",
+               "correct-horse-battery", "jose-2026-vault"):
+        assert not _is_common_password(pw), f"{pw!r} was wrongly blocklisted"
+        assert _password_rejection_reason(pw) is None, (
+            f"REGRESSION: ordinary password {pw!r} was rejected")
+
+
+def test_blocklist_rejection_explains_itself() -> None:
+    reason = _password_rejection_reason("password") or ""
+    assert "common" in reason.lower(), (
+        f"the rejection should tell the user WHY, not just refuse: {reason!r}")
+
+
+def test_blocklist_entries_are_all_lowercase_and_stripped() -> None:
+    """Entries are matched against pw.strip().lower(), so an entry with capitals
+    or padding could never match anything and would be silently dead weight."""
+    for entry in _COMMON_PASSWORDS:
+        assert entry == entry.strip().lower(), (
+            f"blocklist entry {entry!r} can never match -- it must be stored "
+            f"lowercase with no surrounding whitespace")
+
+
+def test_blocklist_is_not_trivially_small() -> None:
+    assert len(_COMMON_PASSWORDS) >= 150, (
+        f"REGRESSION: the blocklist shrank to {len(_COMMON_PASSWORDS)} entries; "
+        f"it is the compensating control for a 5-character floor")
+
+
+def test_empty_and_short_still_rejected_before_blocklist() -> None:
+    assert _password_rejection_reason("") is not None
+    assert _password_rejection_reason("x" * (MIN_PASSWORD_LEN - 1)) is not None
 
 
 def test_min_password_len_is_int() -> None:
