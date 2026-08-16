@@ -43,6 +43,7 @@ jobs:
           python tests/test_gui_v2.py
           python tests/test_manage_vault.py
           python tests/test_integration_v2.py
+          python tests/test_security_invariants.py
 
       - name: Run under pytest
         run: python -m pytest -q
