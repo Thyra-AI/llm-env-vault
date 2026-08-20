@@ -211,6 +211,14 @@ def _rmtree_best_effort(path: Path) -> None:
         pass
 
 
+def _find_uv() -> str | None:
+    """Return the absolute path to the `uv` binary if it's on PATH, else None.
+    uv (https://github.com/astral-sh/uv) is 10-50x faster than pip for the
+    install step that dominates first-run provisioning time -- the main reason
+    the launcher can be killed by MCP startup timeouts before it finishes."""
+    return shutil.which("uv")
+
+
 def _install_marker() -> str:
     """What decides whether the venv needs (re)provisioning.
 
@@ -345,6 +353,8 @@ def _provision(python: Path, current_marker: str) -> None:
           f"can take a little while the first time. Progress: {INSTALL_LOG}",
           file=sys.stderr, flush=True)
 
+    uv = _find_uv()
+
     if not venv_functional:
         if sys.platform == "win32" and VENV_DIR.exists():
             # On Windows, `python -m venv --clear` removes old site-packages
@@ -365,7 +375,9 @@ def _provision(python: Path, current_marker: str) -> None:
             venv_old = DATA_DIR / "venv-old"
             _rmtree_best_effort(venv_next)
             _rmtree_best_effort(venv_old)
-            _run_logged([sys.executable, "-m", "venv", str(venv_next)], "venv creation")
+            venv_cmd = ([uv, "venv", "--seed", str(venv_next)]
+                        if uv else [sys.executable, "-m", "venv", str(venv_next)])
+            _run_logged(venv_cmd, "venv creation")
             try:
                 VENV_DIR.rename(venv_old)
             except OSError as exc:
@@ -384,10 +396,22 @@ def _provision(python: Path, current_marker: str) -> None:
             # of not reusing a stale venv across an update (confirmed by
             # actually testing it: a package removed from requirements.txt
             # stayed importable after a simulated update without this flag).
-            _run_logged([sys.executable, "-m", "venv", "--clear", str(VENV_DIR)],
-                        "venv creation")
+            if uv:
+                # uv has no --clear flag; delete the tree first (same effect).
+                _rmtree_best_effort(VENV_DIR)
+                venv_cmd = [uv, "venv", "--seed", str(VENV_DIR)]
+            else:
+                venv_cmd = [sys.executable, "-m", "venv", "--clear", str(VENV_DIR)]
+            _run_logged(venv_cmd, "venv creation")
 
-    pip_cmd = [str(python), "-m", "pip", "install"]
+    # uv pip install --python <path> targets the venv without needing
+    # activation and is typically 10-50x faster than `python -m pip install`,
+    # which matters on first run where the full pip install is what pushes
+    # provisioning past MCP startup timeouts and causes silent failures.
+    if uv:
+        pip_cmd = [uv, "pip", "install", "--python", str(python)]
+    else:
+        pip_cmd = [str(python), "-m", "pip", "install"]
     if REQUIREMENTS is _LOCKFILE:
         pip_cmd.append("--require-hashes")
     pip_cmd += ["-r", str(REQUIREMENTS)]
