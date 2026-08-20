@@ -2,7 +2,7 @@
   "mcpServers": {
     "llm-env-vault": {
       "command": "python",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/plugin_launcher.py"]
+      "args": ["plugin_launcher.py"]
     }
   }
 }
