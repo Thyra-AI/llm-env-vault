@@ -7,6 +7,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.4.6] — 2026-08-20
+
+### Fixed
+
+- **Vault tools now appear in Claude Code sessions on Windows.**
+  `os.execv` on Windows (implemented via MSVCRT `_execv`) creates a new process but does not
+  correctly transfer inherited pipe handles from a Node.js parent (Claude Code's CLI is a Node.js
+  process using libuv/IOCP for I/O). The result: `mcp_server.py` starts but its stdin/stdout are
+  disconnected from Claude Code, so no MCP response ever arrives and the client times out after
+  30 s. Fixed by using `subprocess.call` on Windows instead, which uses Python's own
+  `CreateProcess` call and correctly inherits the Windows pipe handles. POSIX platforms continue
+  to use `os.execv` (a true process replacement with zero overhead).
+
 ## [1.4.5] — 2026-08-20
 
 ### Fixed
