@@ -7,6 +7,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.4.3] — 2026-08-20
+
+### Fixed
+
+- **First-run provisioning no longer times out under MCP startup constraints.**
+  On a clean install, `pip install` of the plugin's 39 dependencies took long
+  enough that Claude Code's MCP server startup timeout would kill the launcher
+  partway through. Each restart began provisioning from zero and was killed
+  again — a self-reinforcing failure with no visible error. The fix: use `uv`
+  for both venv creation (`uv venv --seed`) and package installation
+  (`uv pip install --python <venv>`), falling back to `python -m venv` /
+  `python -m pip install` if `uv` is not on PATH. `uv` is 10–50× faster than
+  pip on a cold cache, which keeps total provisioning time well within the
+  startup timeout.
+
 ## [1.4.2] — 2026-08-20
 
 ### Fixed
