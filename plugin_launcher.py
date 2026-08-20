@@ -425,15 +425,22 @@ def main() -> None:
     python = _ensure_venv()
     server = str(PLUGIN_ROOT / "mcp_server.py")
     if sys.platform == "win32":
-        # os.execv on Windows (via MSVCRT _execv) creates a new process but
-        # does not correctly transfer the inherited pipe handles that a Node.js
-        # parent (the Claude Code CLI) set up for the child -- the new process
-        # ends up with disconnected stdio, so the MCP client never receives the
-        # initialize response and times out after 30 s. subprocess.call with no
-        # redirects inherits the launcher's stdio through Python's own
-        # CreateProcess call, which does handle the Windows pipe inheritance
-        # correctly. The launcher stays alive as a thin wrapper while
-        # mcp_server.py runs; the overhead is negligible for a long-lived server.
+        # On Windows, os.execv is not a true exec: CPython implements it via
+        # the CRT's _wexecv -> _wspawnv(_P_OVERLAY, ...) which starts a new
+        # process then terminates the caller (spawn-and-die). The stdio relay
+        # across that hop is unreliable when the grandparent is a Node.js
+        # process (the Claude Code CLI) -- mcp_server.py ends up with
+        # miswired std handles that block rather than EOF, so the MCP client
+        # never receives the initialize response and times out after 30 s.
+        #
+        # subprocess.call with no stdio args lets the child inherit stdio
+        # through Python's own CreateProcess call, which propagates the pipe
+        # handles correctly regardless of the grandparent's runtime. The
+        # launcher stays alive as a thin wrapper while mcp_server.py runs;
+        # the overhead is negligible for a long-lived server. The MCP
+        # invariant is maintained: nothing in the launcher writes to stdout
+        # (which would corrupt the JSON-RPC stream), and mcp_server.py is the
+        # sole reader of stdin.
         sys.exit(subprocess.call([str(python), server]))
     else:
         # On POSIX, execv is a true process replacement: same PID, same stdio
