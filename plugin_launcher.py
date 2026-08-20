@@ -375,7 +375,7 @@ def _provision(python: Path, current_marker: str) -> None:
             venv_old = DATA_DIR / "venv-old"
             _rmtree_best_effort(venv_next)
             _rmtree_best_effort(venv_old)
-            venv_cmd = ([uv, "venv", "--seed", str(venv_next)]
+            venv_cmd = ([uv, "venv", "--seed", "--python", sys.executable, str(venv_next)]
                         if uv else [sys.executable, "-m", "venv", str(venv_next)])
             _run_logged(venv_cmd, "venv creation")
             try:
@@ -399,7 +399,7 @@ def _provision(python: Path, current_marker: str) -> None:
             if uv:
                 # uv has no --clear flag; delete the tree first (same effect).
                 _rmtree_best_effort(VENV_DIR)
-                venv_cmd = [uv, "venv", "--seed", str(VENV_DIR)]
+                venv_cmd = [uv, "venv", "--seed", "--python", sys.executable, str(VENV_DIR)]
             else:
                 venv_cmd = [sys.executable, "-m", "venv", "--clear", str(VENV_DIR)]
             _run_logged(venv_cmd, "venv creation")
