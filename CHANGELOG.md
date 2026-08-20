@@ -7,6 +7,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.4.2] — 2026-08-20
+
+### Fixed
+
+- **Windows: venv rebuild no longer fails with WinError 32 when the old server is still running.**
+  `claude plugin update` during a live session triggered a venv rebuild. On Windows, `python -m
+  venv --clear` deletes old site-package files one by one; if the previous server process still
+  held any of them open, each `DeleteFile` call failed with "The process cannot access the file
+  because it is being used by another process," leaving the venv half-destroyed and the server
+  unable to start. The fix builds the replacement venv in a sibling directory (`venv-next`) and
+  then renames the old venv aside (`venv-old`) before renaming the new one into place. A directory
+  rename moves only the filesystem entry — it never touches individual files — so it succeeds even
+  with open handles. The orphaned `venv-old` is removed best-effort afterward; if the old server
+  is still holding files at that point, the removal silently skips and the directory is cleaned up
+  on the next update.
+
 ## [1.4.1] — 2026-08-17
 
 Follow-up to 1.4.0 from hands-on use: the executable-only trust warning fired on almost every

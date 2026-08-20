@@ -36,6 +36,7 @@ output for whichever attempt ran last, successful or not.
 import contextlib
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -200,6 +201,16 @@ def _run_logged(cmd: list[str], step: str) -> None:
         )
 
 
+def _rmtree_best_effort(path: Path) -> None:
+    """Remove a directory tree silently. On Windows, files still held open by
+    another process raise WinError 32 inside shutil.rmtree -- swallowing that
+    here is intentional: the caller handles the failure case."""
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        pass
+
+
 def _install_marker() -> str:
     """What decides whether the venv needs (re)provisioning.
 
@@ -335,17 +346,46 @@ def _provision(python: Path, current_marker: str) -> None:
           file=sys.stderr, flush=True)
 
     if not venv_functional:
-        # --clear: `python -m venv` on an already-existing directory does
-        # NOT wipe previously-installed packages on its own -- it only
-        # ensures the core venv structure (interpreter, pip) is present,
-        # leaving old site-packages alone. Without --clear, "recreate from
-        # scratch" for a genuine target change would be a no-op for
-        # already-installed packages, silently defeating the whole point
-        # of not reusing a stale venv across an update (confirmed by
-        # actually testing it: a package removed from requirements.txt
-        # stayed importable after a simulated update without this flag).
-        _run_logged([sys.executable, "-m", "venv", "--clear", str(VENV_DIR)],
-                    "venv creation")
+        if sys.platform == "win32" and VENV_DIR.exists():
+            # On Windows, `python -m venv --clear` removes old site-packages
+            # files one by one. If the previous server process still holds any
+            # of those files open (a normal race when a plugin update triggers
+            # a rebuild mid-session), each DeleteFile call fails with
+            # WinError 32 and the venv is left half-destroyed.
+            #
+            # Fix: build into a sibling directory, then swap with a directory
+            # rename. Renaming a directory moves only its filesystem entry --
+            # it never touches individual files -- so it succeeds even with
+            # open handles. Best-effort removal of the old tree follows; if
+            # the old server is still running, that rmtree may partially fail,
+            # which is harmless: the orphaned venv-old is cleaned up at the
+            # start of the next update via the same _rmtree_best_effort calls
+            # below.
+            venv_next = DATA_DIR / "venv-next"
+            venv_old = DATA_DIR / "venv-old"
+            _rmtree_best_effort(venv_next)
+            _rmtree_best_effort(venv_old)
+            _run_logged([sys.executable, "-m", "venv", str(venv_next)], "venv creation")
+            try:
+                VENV_DIR.rename(venv_old)
+            except OSError as exc:
+                _log(f"Error: could not rename old venv aside: {exc}")
+                _rmtree_best_effort(venv_next)
+                raise
+            venv_next.rename(VENV_DIR)
+            _rmtree_best_effort(venv_old)
+        else:
+            # --clear: `python -m venv` on an already-existing directory does
+            # NOT wipe previously-installed packages on its own -- it only
+            # ensures the core venv structure (interpreter, pip) is present,
+            # leaving old site-packages alone. Without --clear, "recreate
+            # from scratch" for a genuine target change would be a no-op for
+            # already-installed packages, silently defeating the whole point
+            # of not reusing a stale venv across an update (confirmed by
+            # actually testing it: a package removed from requirements.txt
+            # stayed importable after a simulated update without this flag).
+            _run_logged([sys.executable, "-m", "venv", "--clear", str(VENV_DIR)],
+                        "venv creation")
 
     pip_cmd = [str(python), "-m", "pip", "install"]
     if REQUIREMENTS is _LOCKFILE:
