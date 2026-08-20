@@ -424,10 +424,21 @@ def _provision(python: Path, current_marker: str) -> None:
 def main() -> None:
     python = _ensure_venv()
     server = str(PLUGIN_ROOT / "mcp_server.py")
-    # Replaces this process rather than subprocess.run()-ing it: the real
-    # server needs to own stdio directly for the MCP stdio transport, not
-    # inherit it through an extra layer of process indirection.
-    os.execv(str(python), [str(python), server])
+    if sys.platform == "win32":
+        # os.execv on Windows (via MSVCRT _execv) creates a new process but
+        # does not correctly transfer the inherited pipe handles that a Node.js
+        # parent (the Claude Code CLI) set up for the child -- the new process
+        # ends up with disconnected stdio, so the MCP client never receives the
+        # initialize response and times out after 30 s. subprocess.call with no
+        # redirects inherits the launcher's stdio through Python's own
+        # CreateProcess call, which does handle the Windows pipe inheritance
+        # correctly. The launcher stays alive as a thin wrapper while
+        # mcp_server.py runs; the overhead is negligible for a long-lived server.
+        sys.exit(subprocess.call([str(python), server]))
+    else:
+        # On POSIX, execv is a true process replacement: same PID, same stdio
+        # file descriptors -- no wrapper overhead at all.
+        os.execv(str(python), [str(python), server])
 
 
 if __name__ == "__main__":
