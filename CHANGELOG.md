@@ -7,6 +7,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.4.5] — 2026-08-20
+
+### Fixed
+
+- **MCP server now starts when working inside the plugin's own repository.**
+  The project-level `.mcp.json` used `${CLAUDE_PLUGIN_ROOT}/plugin_launcher.py` in its args.
+  Claude Code only substitutes `${CLAUDE_PLUGIN_ROOT}` when starting the server as an *installed
+  plugin*; when it reads the same file as a project-level MCP config (i.e. when the repo is your
+  working directory), the literal string is passed to Python, which exits immediately with "no
+  such file or directory." The fix: use the bare filename `plugin_launcher.py` — Claude Code
+  resolves it relative to the directory containing `.mcp.json`, which is the repo root in the
+  project context and the version-cached directory in the installed-plugin context. Both are
+  correct.
+
 ## [1.4.4] — 2026-08-20
 
 ### Fixed
