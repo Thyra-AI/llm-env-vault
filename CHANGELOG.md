@@ -7,6 +7,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.4.4] — 2026-08-20
+
+### Fixed
+
+- **`uv venv` now always uses the same Python as the launcher itself.**
+  Both `uv venv` calls introduced in 1.4.3 omitted `--python sys.executable`,
+  letting `uv` fall back to its own interpreter-discovery order (PATH / `.python-version` /
+  uv-managed toolchains). That could produce a venv built from a different Python than
+  `plugin_launcher.py` is running under, breaking the `_venv_is_functional` check and
+  `python -m pip` fallback which both assume `sys.executable` built the venv.
+  Fixed by passing `--python sys.executable` to every `uv venv` invocation.
+
 ## [1.4.3] — 2026-08-20
 
 ### Fixed
