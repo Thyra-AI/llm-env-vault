@@ -116,7 +116,7 @@ def _deobfuscate(data: bytes, key: bytes) -> str:
     return _xor_bytes(data, key).decode("utf-8")
 
 
-def make_signature(command, cwd, only_vars, materialize, background=False):
+def make_signature(command, cwd, only_vars, materialize, background=False, files=None):
     """A hashable key identifying "this exact run_with_env call shape".
     Any change to any of these is treated as a different, unapproved
     command.
@@ -128,6 +128,16 @@ def make_signature(command, cwd, only_vars, materialize, background=False):
     background: a foreground run and a detached background run (secrets
     sitting in an unmanaged child process's environment) are materially
     different approvals even with identical argv.
+
+    files is in here even though a run that decrypts files is never trusted
+    or auto-allowed (mcp_server skips the trust path entirely when it is
+    non-empty). Adding the parameter without adding it to the tuple would be
+    the silent-security-hole version of this change: a grant approved for
+    files=None would then match a later call carrying
+    files=["prod-root-key.levault"], and if the skip above were ever
+    refactored away, that call would auto-allow with no dialog at all. Paths
+    are normalised so two spellings of one request are one signature, and
+    None stays distinct from () for the same reason only_vars does.
     """
     return (
         tuple(command),
@@ -135,6 +145,8 @@ def make_signature(command, cwd, only_vars, materialize, background=False):
         tuple(sorted(set(only_vars))) if only_vars is not None else None,
         materialize if materialize else None,
         bool(background),
+        tuple(sorted({os.path.normcase(os.path.abspath(f)) for f in files}))
+        if files is not None else None,
     )
 
 

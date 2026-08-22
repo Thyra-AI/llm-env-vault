@@ -40,6 +40,8 @@ The vault lives as a small set of files, in one of two places depending on how y
 | `vault.enc.bak` | Pre-change backup, deleted once read-back verification passes | No (gitignored) | **No** |
 | `vault.salt` | 16-byte KDF salt (kept after a v2 upgrade — deleting it bricks v1 backups) | No (gitignored) | **No** |
 | `targets.json` | Paths of migrated `.env` files | No (gitignored — machine-local paths, not secret) | No |
+| `files.json` | Paths, names and sizes of whole files you've encrypted (no contents) | No (gitignored — machine-local paths, not secret) | Yes |
+| `*.levault` | A whole encrypted file, living in **your project**, not here | **Yes — that's the point** | Yes (it's ciphertext) |
 
 `llm.env` and `vault_index.json` contain no secrets, and a migrated project's own placeholder-only
 `.env` is genuinely safe (and often useful) to commit — it documents which variables the project
@@ -56,6 +58,11 @@ Key properties:
 - **Envelope encryption (v2):** a random data key (DEK) encrypts the body and is wrapped once per
   credential — master password and optional recovery key can both open one vault without storing the
   body twice. Every credential change rotates the DEK.
+- **Whole-file encryption** rides on a *file master key* stored inside the encrypted body, not on
+  the DEK. Every credential change rotates the DEK but carries the body through verbatim, so a
+  `.levault` written a year ago still opens after any number of password changes — which is what
+  makes committing one to git sensible. Per file: a random file key wrapped under
+  HKDF-SHA256(file master key, salt, file id), so a wrapped key can't be transplanted between files.
 - **All vault file writes are atomic** (temp file + fsync + atomic replace) — a crash or power loss mid-write can't leave a corrupted file.
 - **Nothing happens silently.** Every operation that touches a real value opens a dialog showing exactly what will change, and nothing is written until you click Allow.
 
@@ -132,6 +139,10 @@ You can also run it directly with no client for local testing: `python mcp_serve
 1. **Migrate an existing project:** ask your agent to call `install_migrate` on the project's `.env`. A dialog shows exactly which variable *names* will move (never values); on Allow, real values go into the vault and the file is rewritten with placeholders in place.
 2. **Add a one-off secret:** `add_secret("STRIPE_KEY")` — you type the real value into the GUI, never into chat.
 3. **Run your app for real:** `run_with_env(command=["python", "manage.py", "runserver"])` — password prompt, then the command runs with real values in its environment.
+4. **Encrypt a whole file:** `encrypt_file("certs/server.pem")` — for the secrets that aren't
+   variables. The file becomes `certs/server.pem.levault`, the original is destroyed, and the
+   ciphertext is safe to commit. Get it back with `decrypt_file`, or hand it to one command with
+   `run_with_env(..., files=["certs/server.pem.levault"])`.
 
 ---
 
@@ -226,7 +237,7 @@ Conservative by construction: a line is only rewritten if it's a managed variabl
 
 Two known quirks (see [Known limitations](#known-limitations)): this ongoing path is not multi-line-aware, and a resync normalizes the file's line endings even when nothing else changed.
 
-### `run_with_env(command, materialize=None, background=False, cwd=None, only_vars=None)`
+### `run_with_env(command, materialize=None, background=False, cwd=None, only_vars=None, files=None)`
 
 The consumption side: runs a real command with the vault's real values injected as environment variables. Since `llm.env` never contains real values, this is how your app actually gets its secrets.
 
@@ -244,6 +255,31 @@ run_with_env(command=["python", "send_mail.py"], only_vars=["SMTP_HOST", "SMTP_P
 - Validated against the vault index **before** any password prompt (a typo'd name fails fast).
 - `only_vars` omitted / `None` → inject everything. `only_vars=[]` → inject *nothing*. These are deliberately distinct cases — a zero-secret run and a full-vault run are very different authorizations.
 - Strongly recommended whenever the command doesn't need the whole vault: it limits both what a misbehaving command can see and what its output can leak (see Security notes).
+
+**`files`** — decrypts whole encrypted files into the command's working directory for the lifetime
+of that one run:
+
+```python
+run_with_env(command=["curl", "--cert", "server.pem", "https://api.example.com"],
+             cwd="/path/to/project",
+             files=["certs/server.pem.levault"])
+```
+
+Each file is restored under its own name with `.levault` stripped, with its recorded permissions,
+and is **deleted the moment the command exits** — including if the command fails, is interrupted, or
+the server is sent SIGTERM. If a decrypted file somehow survives cleanup, the result names every one
+of them; a leftover private key is never reported silently.
+
+- The restore name comes from the `.levault` filename, never from the name inside the ciphertext and
+  never from `files.json` — so no attacker-influenced string ever reaches path construction.
+- The restore path is enforced to stay inside `cwd`, and **an existing file is never overwritten** —
+  both re-checked immediately before writing, after the password prompt closes. (Cleanup shreds what
+  it restored, so overwriting a file you already had would destroy it.)
+- **Not compatible with `background=True`.** A detached process has no reliable moment to clean a
+  decrypted private key off disk.
+- **Never auto-allowed and never trusted** — see below.
+- Restored file *contents* are **not** redacted from this tool's output the way variable values are.
+  A command that prints one hands the real secret back verbatim.
 
 **`materialize`** — for tools that read a real `.env` *file* rather than inheriting process environment, mainly Docker's `--env-file` / Compose's `env_file:`:
 
@@ -264,6 +300,135 @@ run_with_env(
 **`background=True`** — starts the process detached (stdin closed, stdout/stderr redirected to a temp log file — never the MCP server's own stdio, which is the JSON-RPC channel) and returns immediately with the `pid` and `log_file` path. For long-running things like dev servers. The tool does not track or stop the process afterward — use your own process manager. Foreground calls block and return stdout/stderr (truncated to the last 4000 chars each) plus the exit code.
 
 Every result includes an `auto_allowed` flag, plus a `trust_note` whenever trust was used, granted, or revoked — an auto-allowed run is never silent even though no dialog appeared.
+
+---
+
+### `encrypt_file(path)`
+
+Encrypts **any whole file** into the vault under the same master password — for the secrets that
+aren't `.env` variables: certificates, private keys, kubeconfigs, service-account JSON, `.p12`
+bundles. Granularity is the whole file, deliberately: these are opaque blobs, and splitting them
+into variables would serve nobody.
+
+```
+certs/server.pem  →  encrypt_file  →  certs/server.pem.levault   (ciphertext, commit it)
+                                      certs/server.pem            (destroyed)
+```
+
+A dialog shows the file, its size and permissions, the destination, and — in red — that **the
+original will be destroyed**. Nothing is written or deleted until you click Allow.
+
+The ordering is what makes that safe: the encrypted copy is written, then re-read from disk and
+verified to contain exactly the original bytes, then registered, and only then is the original
+overwritten and deleted. A failure at any point leaves the original completely untouched.
+
+**Refuses:** symlinks and junctions (unlinking a link destroys nothing while reporting success),
+hard-linked files (the contents survive under the other name), empty files, anything already
+encrypted (checked by magic bytes, not just the extension — a renamed `.levault` is caught),
+anything inside the vault's own directory, files over 16 MiB, any path whose `.levault` sidecar
+already exists, and v1 vaults (run `manage_vault` → `upgrade_v2` first).
+
+**Deletion is best-effort, and the dialog says so.** The original is overwritten once with random
+bytes, fsynced, and unlinked. On NTFS + SSD the original bytes may still survive in wear-levelling,
+the USN journal, Volume Shadow Copy, a resident MFT record, your editor's swap file, the search
+indexer, AV quarantine, or OneDrive. Multi-pass overwriting would not change that. **If the file was
+ever exposed, rotate the credential — don't rely on this deletion.**
+
+If the plaintext was tracked by git, the result says so: encrypting it now protects nothing, because
+the real contents are still in the repository history. That needs `git filter-repo` *and* a
+credential rotation.
+
+### `decrypt_file(vault_path, output_path=None)`
+
+Restores a `.levault` to a real plaintext file on disk, permanently. The output name comes from the
+sidecar's own filename (`server.pem.levault` → `server.pem`), never from the name stored inside the
+ciphertext — pass `output_path` to choose a different one. Refuses to overwrite an existing file.
+
+The `.levault` is left in place; this does not remove the file from the vault. The decrypted file is
+**not** cleaned up — if you only need it for one command, use `run_with_env`'s `files=` instead. The
+result warns if the restored path isn't covered by a `.gitignore` rule.
+
+---
+
+## Encrypted whole files
+
+### What's in a `.levault`, and what leaks
+
+A `.levault` is a self-describing `LEVFILE` envelope: an 8-byte magic, a version, a length-prefixed
+JSON header, then AES-256-GCM ciphertext. The header bytes are the AAD, so editing any of them fails
+authentication before decryption.
+
+The **original filename and permissions live inside the ciphertext**, not the header. A `.levault`
+is meant to be committed and pushed, and a header-embedded `aws-root-key.pem` would be a permanent,
+unavoidable leak in a public repo. The sidecar filename leaks the same thing — but you control that
+and can rename it, and you cannot rename a header.
+
+What a published `.levault` *does* reveal: its approximate size (no padding — the size of a file you
+chose is already visible from the file's own length), when it was encrypted, and which key
+generation sealed it. That last one is a correlation tag: every `.levault` from one vault is
+linkable. This is a deliberate trade — the alternative turns every open into a trial-decryption loop
+and blurs the question rotation depends on.
+
+The envelope is authoritative and `files.json` is not, *for reading*. Decryption works on any
+`.levault` whether or not it's registered. Nothing in `files.json` is ever used to *parameterise a
+write* — the restored file's permissions and name come from inside the ciphertext — because it's a
+plaintext file an agent can edit.
+
+**One exception, and it's the dangerous one: retiring old file keys.** Deleting a key generation is
+only safe if nothing still needs it, and `files.json` is the only inventory of what "anything"
+means. So retirement refuses outright when the registry is empty, or when it finds a `.levault`
+beside a registered one that it has no record of. Losing `files.json` therefore does **not** cost
+only visibility — it costs the safety net on the single irreversible operation in this feature. If
+you copy `vault.enc` to another machine to open files pulled from git, bring `files.json` with it.
+
+### Back up `vault.enc`
+
+**If `vault.enc` is lost, every `.levault` you ever wrote is permanently unreadable, and your
+recovery key does not help** — it unwraps a slot *inside* `vault.enc`, so without that file it is
+worthless.
+
+This is a sharper failure than anything the variable side has. A `.env` value usually still exists
+at the service that issued it; a destroyed private key may exist nowhere else in the world. `vault.enc`
+is ciphertext — it is exactly as safe to back up as the `.levault` files themselves. Back it up.
+
+### Rotating the file key
+
+Changing your master password deliberately does **not** change the key protecting your encrypted
+files. That's the feature — it's why a committed `.levault` keeps working. The cost is that a leaked
+file key is total and retroactive: it decrypts every file ever written under it, including ones
+already pushed to a public remote.
+
+`manage_vault` → **Rotate Encrypted-File Key** mints a new key generation and re-encrypts every file
+this machine can find. Files it can't reach — on another laptop, or not yet pulled from git — are
+skipped and reported, and **keep working**, because the old key is retained. Nothing becomes
+unreadable until you separately choose **Retire Old File Keys**.
+
+Retirement is the only operation here that destroys data irrecoverably, so it is guarded by the one
+record that is machine-independent: the vault body tracks **which files** (by an unforgeable
+identity sealed into each envelope) are still on each key generation. Retirement refuses while any
+are outstanding. That record travels inside `vault.enc`, so it works on a machine that has never
+seen your `files.json`, and it cannot be steered by editing one — a duplicate registry entry
+pointing at a copy of an envelope carries the same identity, so it cannot forge a removal. The
+per-file checks additionally read each `.levault`'s own header rather than the registry, so
+restoring an older one from git history can't trick retirement into destroying the key that opens
+it.
+
+If a file genuinely no longer exists anywhere, retirement offers a second dialog that **lists each
+one by name** and requires an explicit confirmation before abandoning it. That exists so a single
+interrupted encryption can't leave you permanently unable to retire a key you believe is
+compromised — but it names exactly what is being given up rather than being a blanket override.
+
+**If you commit `.levault` files, mark them binary.** Add `*.levault binary` to your repository's
+`.gitattributes`. A `.levault` is authenticated — change one byte and it stops opening, permanently,
+and the plaintext it replaced was deliberately destroyed. Git's auto-detection does get this right
+on its own (every envelope has a NUL byte in its magic header), but this is not a file you want
+protected by accident.
+
+**One gap worth knowing about.** If the machine dies in the fraction of a second between writing a
+`.levault` and recording it, that file is in neither the registry nor the seal record. The tool
+notices on the next `encrypt_file` and offers to finish the job — take that offer. If you instead
+delete the surviving plaintext by hand and leave the orphaned `.levault` somewhere the vault has no
+other record of, retirement will not know to protect it.
 
 ---
 
@@ -321,7 +486,13 @@ Check it, click Allow once, and identical future calls auto-run with no dialog. 
 8 hours after it was granted — verified on both wall clock and monotonic clock, so neither
 a machine suspend nor a clock adjustment extends it.
 
-**"Exact" means exact.** The full argument list, `cwd`, `only_vars`, `materialize`, and `background` together form the trusted signature — change any one and a fresh Allow is required. `only_vars=[]` and `only_vars` omitted are deliberately different signatures even though both are falsy in Python, because they authorize very different exposure.
+**"Exact" means exact.** The full argument list, `cwd`, `only_vars`, `materialize`, `background` and `files` together form the trusted signature — change any one and a fresh Allow is required. `only_vars=[]` and `only_vars` omitted are deliberately different signatures even though both are falsy in Python, because they authorize very different exposure.
+
+**A run that decrypts files is never trusted.** If `files` is non-empty the checkbox isn't even
+offered, and trust is never consulted — you are asked every single time. An 8-hour unattended grant
+to inject a token into an environment is one thing; an 8-hour unattended grant to write a private key
+into a directory is another, and this feature was designed for the first. (`files` is still part of
+the signature anyway, so a grant made for a run *without* files could never match one with them.)
 
 **Drift detection.** Trust also records the SHA-256 hash of every file named directly as an
 argument on the command line (a `docker-compose.yml` after `-f`, a script path), **and of the
@@ -399,6 +570,20 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
 - **Rollback is undetectable in-file.** Someone with write access can swap in an older valid
   `vault.enc` and reinstate a revoked secret. The in-session trust fingerprint catches only the
   live case.
+- **The file master key does not rotate with the password, on purpose.** That is what lets a
+  committed `.levault` survive a password change. It also means a leaked file key is total and
+  retroactive — it decrypts every file ever written under it, including ones already pushed to a
+  public remote, and changing your password does nothing about it. `manage_vault` → Rotate
+  Encrypted-File Key is the answer, but it only reaches files this machine can find.
+- **Losing `vault.enc` destroys every `.levault`, and the recovery key does not help** — it unwraps
+  a slot inside that file. Back `vault.enc` up; it is ciphertext.
+- **Destroying the original after encryption is best-effort.** One random overwrite, fsync, unlink.
+  On NTFS + SSD the bytes may survive in wear-levelling, the USN journal, shadow copies, a resident
+  MFT record, editor swap files, the indexer, AV quarantine or OneDrive. If the file was ever
+  exposed, rotate the credential.
+- **A restored file's contents are not redacted from `run_with_env` output.** Variable values are
+  masked; file contents are not. A command that prints a restored private key hands it back
+  verbatim.
 - **Never paste the master password (or any secret value) into chat with an AI assistant.** Type
   them only into the vault's own GUI windows.
 - **`run_with_env` output is redacted before it reaches the AI, but this is accident-prevention,
@@ -494,6 +679,14 @@ plus additional pytest-only files:
   coverage: v2 format round-trips, AES-256-GCM authentication, scrypt KDF, envelope encryption,
   DEK rotation, recovery key setup and use, manage_vault / recover_vault flows, and end-to-end
   tests across both format versions.
+- `tests/test_fmk.py`, `tests/test_file_vault_crypto.py`, `tests/test_file_store.py`,
+  `tests/test_file_tools.py`, `tests/test_run_with_files.py`, `tests/test_fmk_rotation.py` — 1.5.0
+  whole-file encryption: the `LEVFILE` envelope and its tamper/DoS/transplant resistance, the file
+  master key surviving every credential operation, the encrypt ordering and its rollback, every
+  refusal rule, the registry, `run_with_env(files=)` cleanup, and key rotation and retirement.
+  `tests/fixtures/file_envelope/golden.levault` is a byte-frozen format tripwire: every other test
+  round-trips through the current code and would stay green if the on-disk format changed, which
+  would silently make real users' committed files unopenable.
 
 All tests fully isolate the real vault — running the suite never touches your actual vault. Run
 from the project venv:

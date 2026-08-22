@@ -353,14 +353,23 @@ def test_duplicate_password_slot_does_not_open_vault() -> None:
 # must raise a clean exception from the VaultCorrupted family.  One case below
 # (missing vault_id) currently surfaces a raw KeyError — see FINDING comment.
 
-def test_hdr_len_one_too_large_raises_vault_corrupted() -> None:
-    """hdr_len = actual + 1 must raise VaultCorrupted (JSON parse error)."""
+def test_hdr_len_one_too_large_never_opens() -> None:
+    """hdr_len = actual + 1 must not yield a usable vault.
+
+    Asserting that parse_envelope RAISES is not quite right, and was flaky at
+    about 1 run in 60: the extra byte is borrowed from the body, whose first
+    bytes are a random nonce, and json.loads accepts a trailing whitespace
+    byte -- 4 of the 256 possible values. The parser is deliberately
+    structural, so the guarantee that actually holds is end-to-end: the header
+    slice is the AAD, so moving the boundary means the body no longer
+    authenticates. Assert that instead of the incidental parse failure.
+    """
     env, _, _, _ = _make_vault()
     _, actual_hdr_len = _parse_header(env)
     bad = _set_hdr_len(env, actual_hdr_len + 1)
     try:
-        parse_envelope(bad)
-        assert False, "Expected VaultCorrupted"
+        open_v2_with_password(bad, _PASSWORD)
+        assert False, "Expected the vault not to open"
     except VaultCorrupted:
         pass
 

@@ -124,9 +124,15 @@ def fake_dialog(respond):
     original = gui.unlock_for_run_dialog
     calls = []
 
-    def wrapper(command_str, materialize_path=None, only_vars=None, trust_note=None):
+    def wrapper(command_str, materialize_path=None, only_vars=None, trust_note=None,
+                **kwargs):
+        # **kwargs, and recorded rather than dropped: unlock_for_run_dialog has
+        # grown a parameter more than once, and each time this wrapper's fixed
+        # signature turned that into ~30 unrelated test failures. Accepting
+        # extras keeps the next one from doing the same, while still letting a
+        # test assert on what was actually passed.
         calls.append({"command_str": command_str, "materialize_path": materialize_path,
-                       "only_vars": only_vars, "trust_note": trust_note})
+                       "only_vars": only_vars, "trust_note": trust_note, **kwargs})
         return respond(command_str, materialize_path, only_vars, trust_note)
 
     gui.unlock_for_run_dialog = wrapper

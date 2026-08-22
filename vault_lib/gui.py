@@ -18,16 +18,19 @@ child process's environment. See vault_lib/trust.py for what "trust"
 means there -- an in-memory-only cache scoped to this one server
 process, never written to disk.
 """
+import hashlib
 import re
 import sys
 import tkinter as tk
 import tkinter.font as tkfont
 import unicodedata
+from pathlib import Path
 from typing import Optional
 
 from . import store, trust
 from .crypto import (WrongPassword, MalformedRecoveryKey, NoRecoverySlot,
-                     format_recovery_key, new_recovery_key, parse_recovery_key)
+                     VaultCorrupted, format_recovery_key, new_recovery_key,
+                     parse_recovery_key)
 
 
 def _strip_hidden(text: str) -> str:
@@ -1315,6 +1318,569 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
     return outcome
 
 
+# ---------------------------------------------------------------------------
+# Whole-file encryption dialogs
+# ---------------------------------------------------------------------------
+#
+# Both follow remove_secret_dialog's two-step shape: unlock, then confirm a
+# specific proposed change. Every path is shown in a scrollable, non-eliding
+# textbox rather than through _safe_display -- consent-critical text must not
+# be truncated, for the reason already written at _collapse_whitespace and in
+# unlock_for_run_dialog. A path is exactly the kind of string an ellipsis
+# ruins: "C:\\proj\\...\\server.pem" is not something a human can approve.
+#
+# All vault work happens inside on_allow, so the password and the file master
+# key never leave this process, and nothing is written until the human clicks.
+
+
+def _format_bytes(count) -> str:
+    """Human-readable byte count for a consent dialog. Pure; unit-tested."""
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        return "unknown size"
+    if count < 1024:
+        return f"{count} bytes"
+    for unit in ("KiB", "MiB", "GiB"):
+        count /= 1024.0
+        if count < 1024 or unit == "GiB":
+            return f"{count:.1f} {unit}"
+    return f"{count:.1f} GiB"
+
+
+def _path_box(parent, text, height=2, width=56):
+    """A scrollable, read-only, non-eliding box for one filesystem path."""
+    frame = tk.Frame(parent, bg=WINDOW_BG)
+    box = _textbox(frame, fg=FG, font=FONT_BODY, height=height, width=width)
+    box.insert("end", _collapse_whitespace(str(text)))
+    box.config(state="disabled")
+    box.grid(row=0, column=0, sticky="we")
+    frame.grid_columnconfigure(0, weight=1)
+    return frame
+
+
+_OVERWRITE_CAVEAT = (
+    "Overwriting is best-effort. On SSDs and journaling filesystems the "
+    "original bytes may still exist in storage this program cannot reach -- "
+    "wear-levelling, shadow copies, backups, your editor's swap file. If this "
+    "file was ever exposed, rotate the credential; do not rely on this deletion."
+)
+
+_DURABILITY_CAVEAT = (
+    "If vault.enc on this machine is lost, this file cannot be recovered. The "
+    "recovery key alone is not enough -- it only works together with vault.enc. "
+    "Back that file up."
+)
+
+
+def encrypt_file_dialog(path):
+    """Confirm encrypting one file into a .levault sidecar and destroying it.
+
+    Returns {"approved": bool, "partial_failure": str|None, "result": dict|None}.
+    """
+    outcome = {"approved": False, "partial_failure": None, "result": None}
+    state = {"password": None, "info": None, "resume": False}
+    pad = {"padx": 18, "pady": 7}
+    path = Path(path)
+
+    root, _run_modal = _new_window()
+    root.title("llm-env-vault")
+    root.resizable(True, True)
+    _style(root)
+
+    container = tk.Frame(root, bg=WINDOW_BG)
+    container.pack()
+    _branding_footer(root).pack(side="bottom", fill="x")
+
+    def clear():
+        for w in container.winfo_children():
+            w.destroy()
+
+    def show_step1():
+        clear()
+        row = 0
+        _label(container, "Unlock Vault to Encrypt a File", font=FONT_TITLE).grid(
+            row=row, column=0, columnspan=2, sticky="w",
+            padx=pad["padx"], pady=(pad["pady"], 14))
+        row += 1
+        _label(container, "File to encrypt:").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        _path_box(container, path).grid(
+            row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
+        row += 1
+        _label(container, "Master password:").grid(row=row, column=0, sticky="e", **pad)
+        pw = _entry(container, show="*", width=30)
+        pw.grid(row=row, column=1, **pad)
+        row += 1
+
+        err = _label(container, "", fg=DANGER)
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+        row += 1
+
+        def on_continue():
+            password = pw.get()
+            if not password:
+                _show_error(root, err, "Password cannot be empty.")
+                return
+            try:
+                # Verify by decrypting, the pattern every other dialog uses.
+                # Deliberately NOT get_or_create_fmk: minting writes to the
+                # vault, and nothing may be written before Allow.
+                store.load_secrets(password)
+                info = store.precheck_encrypt(path)
+            except WrongPassword as e:
+                _show_error(root, err, str(e))
+                return
+            except (FileNotFoundError, ValueError, OSError) as e:
+                _show_error(root, err, str(e))
+                return
+
+            if info["sidecar_exists"]:
+                # The crash-limbo case: a verified sidecar beside an intact
+                # original. Offer to finish only if it really holds this file.
+                if store._sidecar_matches(info["vault_path"], password,
+                                          hashlib.sha256(
+                                              info["path"].read_bytes()).hexdigest()):
+                    state["resume"] = True
+                else:
+                    _show_error(root, err, (
+                        f"{info['vault_path'].name} already exists and does not "
+                        f"contain this file's current contents. Resolve that by "
+                        f"hand -- one of the two files is not what you think."))
+                    return
+
+            state["password"] = password
+            state["info"] = info
+            show_step2()
+
+        def on_cancel():
+            root.destroy()
+
+        btns = tk.Frame(container, bg=WINDOW_BG)
+        btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+        _button(btns, "Cancel", command=on_cancel).pack(side="left", padx=6)
+        _button(btns, "Continue", command=on_continue, kind="primary").pack(side="left", padx=6)
+        root.bind("<Escape>", lambda e: on_cancel())
+        root.bind("<Return>", lambda e: on_continue())
+        pw.focus_force()
+        _center(root)
+
+    def show_step2():
+        clear()
+        info = state["info"]
+        row = 0
+        title = ("Finish Encrypting File" if state["resume"] else "Confirm Encrypt File")
+        _label(container, title, font=FONT_TITLE).grid(
+            row=row, column=0, columnspan=2, sticky="w",
+            padx=pad["padx"], pady=(pad["pady"], 14))
+        row += 1
+
+        if state["resume"]:
+            _label(container, (
+                "An encrypted copy of this file already exists and has been "
+                "verified to contain exactly its current contents -- a previous "
+                "run was interrupted before the original could be destroyed. "
+                "Only the deletion below is left to do."), fg=WARNING,
+                justify="left", wraplength=430).grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+
+        _label(container, "File to encrypt:").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        _path_box(container, info["path"]).grid(
+            row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
+        row += 1
+        _label(container,
+               f"Size: {_format_bytes(info['size'])}     Permissions: {info['mode']}",
+               fg=FG_MUTED).grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+
+        _label(container, "Encrypted copy will be written to:").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        _path_box(container, info["vault_path"]).grid(
+            row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
+        row += 1
+
+        _label(container, "THE ORIGINAL FILE WILL BE DESTROYED.", fg=DANGER,
+               font=FONT_BODY_BOLD).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(14, 2))
+        row += 1
+        _label(container, (
+            f"After the encrypted copy is written and verified, "
+            f"{_safe_display(info['path'].name, 60)} is overwritten with random "
+            f"bytes and deleted. The only way back is this vault's master "
+            f"password or its recovery key."), justify="left",
+            wraplength=430).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+        row += 1
+        _label(container, _OVERWRITE_CAVEAT, fg=WARNING, justify="left",
+               wraplength=430).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(8, 0))
+        row += 1
+        _label(container, _DURABILITY_CAVEAT, fg=WARNING, justify="left",
+               wraplength=430).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(8, 0))
+        row += 1
+        _label(container, (
+            "The .levault file is pure ciphertext and is safe to commit to git. "
+            "Its filename still reveals the original filename."), fg=FG_MUTED,
+            justify="left", wraplength=430).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(8, 0))
+        row += 1
+
+        err = _label(container, "", fg=DANGER)
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+        row += 1
+
+        def on_allow():
+            try:
+                result = store.encrypt_file_in_place(
+                    state["info"]["path"], state["password"],
+                    allow_resume=state["resume"])
+            except Exception as e:  # noqa: BLE001
+                _show_error(root, err, f"Encryption failed: {e}")
+                return
+            if not result.get("original_destroyed"):
+                # The ciphertext is good and registered; only the removal
+                # failed. WHICH half failed decides what the user should do,
+                # and getting it wrong is dangerous: telling someone a
+                # random-byte husk "still contains the real secret" invites
+                # them to delete the .levault instead, which by then is the
+                # only copy.
+                if result.get("not_destroyed_reason"):
+                    msg = result["not_destroyed_reason"]
+                elif result.get("original_overwritten"):
+                    msg = (
+                        f"The encrypted copy was written and verified. The original "
+                        f"{result['original_name']} was overwritten with random bytes "
+                        f"but could not be deleted (it may be open in another "
+                        f"program). It no longer contains your secret -- the "
+                        f".levault file does. Delete the leftover yourself."
+                    )
+                else:
+                    msg = (
+                        f"The encrypted copy was written and verified, but the "
+                        f"original {result['original_name']} could NOT be removed "
+                        f"(it may be open in another program). It still contains "
+                        f"the real secret -- close whatever is holding it and "
+                        f"delete it yourself. Your data is safe either way: the "
+                        f".levault file is complete and verified."
+                    )
+                outcome["partial_failure"] = msg
+                outcome["result"] = result
+                _show_error(root, err, msg)
+                return
+            outcome["approved"] = True
+            outcome["result"] = result
+            root.destroy()
+
+        def on_deny():
+            root.destroy()
+
+        def on_back():
+            state["resume"] = False
+            show_step1()
+
+        btns = tk.Frame(container, bg=WINDOW_BG)
+        btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+        _button(btns, "Back", command=on_back).pack(side="left", padx=6)
+        _button(btns, "Deny", command=on_deny).pack(side="left", padx=6)
+        _button(btns, "Allow", command=on_allow, kind="danger").pack(side="left", padx=6)
+        root.bind("<Escape>", lambda e: on_deny())
+        # No <Return>-to-Allow: this screen has no input field gating it, and
+        # an Enter carried over from step 1's password box would destroy a
+        # file before the human had read a word of this. Rebind rather than
+        # merely omit -- see remove_secret_dialog for why that distinction
+        # matters (a live handler fires against destroyed widgets).
+        root.bind("<Return>", lambda e: None)
+        _center(root)
+
+    show_step1()
+    _run_modal()
+    return outcome
+
+
+def decrypt_file_dialog(vault_path, output_path=None):
+    """Confirm restoring a .levault to a real plaintext file on disk.
+
+    Returns {"approved": bool, "partial_failure": str|None, "result": dict|None}.
+    """
+    outcome = {"approved": False, "partial_failure": None, "result": None}
+    state = {"password": None, "info": None, "meta": None, "size": None}
+    pad = {"padx": 18, "pady": 7}
+    vault_path = Path(vault_path)
+
+    root, _run_modal = _new_window()
+    root.title("llm-env-vault")
+    root.resizable(True, True)
+    _style(root)
+
+    container = tk.Frame(root, bg=WINDOW_BG)
+    container.pack()
+    _branding_footer(root).pack(side="bottom", fill="x")
+
+    def clear():
+        for w in container.winfo_children():
+            w.destroy()
+
+    def show_step1():
+        clear()
+        row = 0
+        _label(container, "Unlock Vault to Decrypt a File", font=FONT_TITLE).grid(
+            row=row, column=0, columnspan=2, sticky="w",
+            padx=pad["padx"], pady=(pad["pady"], 14))
+        row += 1
+        _label(container, "Encrypted file:").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        _path_box(container, vault_path).grid(
+            row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
+        row += 1
+        _label(container, "Master password:").grid(row=row, column=0, sticky="e", **pad)
+        pw = _entry(container, show="*", width=30)
+        pw.grid(row=row, column=1, **pad)
+        row += 1
+
+        err = _label(container, "", fg=DANGER)
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+        row += 1
+
+        def on_continue():
+            password = pw.get()
+            if not password:
+                _show_error(root, err, "Password cannot be empty.")
+                return
+            try:
+                info = store.precheck_decrypt(vault_path, output_path)
+                # Open it now so step 2 can state the real size, permissions
+                # and original name rather than the registry's version of them.
+                file_bytes, meta = store.read_encrypted_file(info["vault_path"], password)
+            except WrongPassword as e:
+                _show_error(root, err, str(e))
+                return
+            except (FileNotFoundError, ValueError, OSError, VaultCorrupted) as e:
+                _show_error(root, err, str(e))
+                return
+            state["password"] = password
+            state["info"] = info
+            state["meta"] = meta
+            state["size"] = len(file_bytes)
+            show_step2()
+
+        def on_cancel():
+            root.destroy()
+
+        btns = tk.Frame(container, bg=WINDOW_BG)
+        btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+        _button(btns, "Cancel", command=on_cancel).pack(side="left", padx=6)
+        _button(btns, "Continue", command=on_continue, kind="primary").pack(side="left", padx=6)
+        root.bind("<Escape>", lambda e: on_cancel())
+        root.bind("<Return>", lambda e: on_continue())
+        pw.focus_force()
+        _center(root)
+
+    def show_step2():
+        clear()
+        info, meta = state["info"], state["meta"]
+        row = 0
+        _label(container, "Confirm Decrypt File", font=FONT_TITLE).grid(
+            row=row, column=0, columnspan=2, sticky="w",
+            padx=pad["padx"], pady=(pad["pady"], 14))
+        row += 1
+
+        _label(container, "Encrypted file:").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        _path_box(container, info["vault_path"]).grid(
+            row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
+        row += 1
+
+        _label(container, "Will write the real, decrypted contents to:").grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        _path_box(container, info["output_path"]).grid(
+            row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
+        row += 1
+        _label(container, (
+            f"Size: {_format_bytes(state['size'])}     "
+            f"Permissions will be restored to: {meta.get('mode', 'unknown')}"),
+            fg=FG_MUTED).grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+
+        stored_name = meta.get("name")
+        if stored_name and stored_name != info["output_path"].name:
+            _label(container, (
+                f"Note: this was encrypted as {_safe_display(stored_name, 60)}, but "
+                f"will be restored under the name above -- the output name comes "
+                f"from the .levault file's name, not from what is stored inside it."),
+                fg=WARNING, justify="left", wraplength=430).grid(
+                row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+            row += 1
+
+        _label(container, (
+            "This writes a real secret to disk permanently. It is NOT cleaned "
+            "up. The AI assistant can see this path and has been instructed not "
+            "to read the file -- that instruction is not enforced."),
+            fg=WARNING, justify="left", wraplength=430).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(12, 0))
+        row += 1
+        _label(container, (
+            "The .levault file is left in place; this does not remove the file "
+            "from the vault."), fg=FG_MUTED, justify="left", wraplength=430).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(8, 0))
+        row += 1
+
+        err = _label(container, "", fg=DANGER)
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+        row += 1
+
+        def on_allow():
+            try:
+                result = store.decrypt_file_to(
+                    state["info"]["vault_path"], state["password"],
+                    output_path=str(state["info"]["output_path"]))
+            except Exception as e:  # noqa: BLE001
+                _show_error(root, err, f"Decryption failed: {e}")
+                return
+            outcome["approved"] = True
+            outcome["result"] = result
+            root.destroy()
+
+        def on_deny():
+            root.destroy()
+
+        btns = tk.Frame(container, bg=WINDOW_BG)
+        btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+        _button(btns, "Back", command=show_step1).pack(side="left", padx=6)
+        _button(btns, "Deny", command=on_deny).pack(side="left", padx=6)
+        # primary, not danger: this creates a file rather than destroying one.
+        # The risk it does carry is carried by the amber warning above.
+        _button(btns, "Allow", command=on_allow, kind="primary").pack(side="left", padx=6)
+        root.bind("<Escape>", lambda e: on_deny())
+        root.bind("<Return>", lambda e: None)  # same reasoning as encrypt step 2
+        _center(root)
+
+    show_step1()
+    _run_modal()
+    return outcome
+
+
+def confirm_abandon_files_dialog(outstanding: dict, registry_names: dict):
+    """Second-stage confirm for retiring keys that files still depend on.
+
+    *outstanding* is {generation_id: [file_id, ...]} from
+    store.file_keys_outstanding; *registry_names* maps file_id -> a
+    human-recognisable name where one is known.
+
+    Exists because refusing forever is its own failure. A single crashed
+    encrypt, or a file that genuinely no longer exists anywhere, would
+    otherwise leave someone permanently unable to retire a key they believe is
+    compromised -- and with no way to discover what was blocking it. This
+    names exactly what is being given up, which is why it takes the specific
+    identities rather than being a blanket "force" flag.
+
+    Returns the list of file_ids the human confirmed abandoning, or None.
+    """
+    outcome = {"abandon": None}
+    pad = {"padx": 18, "pady": 7}
+    ids = [(gen, fid) for gen, group in sorted(outstanding.items()) for fid in group]
+
+    root, _run_modal = _new_window()
+    root.title("llm-env-vault")
+    root.resizable(True, True)
+    _style(root)
+
+    # container is not decoration: pack and grid must never share a parent.
+    # The footer is packed onto root, so everything else grids into a frame,
+    # exactly as the other two-step dialogs do. Mixing the two managers on one
+    # widget makes Tk loop forever negotiating geometry -- it hangs inside
+    # .grid() itself, which no amount of teardown guarding in the test harness
+    # can rescue.
+    container = tk.Frame(root, bg=WINDOW_BG)
+    container.pack()
+    _branding_footer(root).pack(side="bottom", fill="x")
+
+    row = 0
+    _label(container, "Abandon Unreachable Files?", font=FONT_TITLE).grid(
+        row=row, column=0, columnspan=2, sticky="w",
+        padx=pad["padx"], pady=(pad["pady"], 14))
+    row += 1
+
+    _label(container, (
+        f"{len(ids)} file(s) were encrypted by this vault and have not been moved "
+        f"to the current key. Retiring the old key(s) makes them PERMANENTLY "
+        f"UNREADABLE -- including any copy on another machine, in a backup, or in "
+        f"git history."), fg=DANGER, justify="left", wraplength=430).grid(
+        row=row, column=0, columnspan=2, sticky="w", **pad)
+    row += 1
+
+    _label(container, "Only continue if you are certain these no longer exist anywhere:",
+           justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+    row += 1
+
+    frame = tk.Frame(container, bg=WINDOW_BG)
+    listing = _textbox(frame, fg=FG, font=FONT_BODY,
+                       height=min(8, max(2, len(ids))), width=52)
+    for gen, fid in ids:
+        label = registry_names.get(fid)
+        # The name is a hint from the registry, which an agent can edit, so it
+        # is shown as supplementary to the identity rather than instead of it.
+        shown = f"{label}  ({fid[:12]}...)" if label else f"unknown file  ({fid[:12]}...)"
+        listing.insert("end", f"{shown}  [key {gen}]\n")
+    listing.config(state="disabled")
+    scroll = _scrollbar(frame, orient="vertical", command=listing.yview)
+    listing.config(yscrollcommand=scroll.set)
+    listing.grid(row=0, column=0, sticky="nsew")
+    scroll.grid(row=0, column=1, sticky="ns")
+    frame.grid_rowconfigure(0, weight=1)
+    frame.grid_columnconfigure(0, weight=1)
+    frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
+    row += 1
+
+    _label(container, (
+        "If any of them might still exist, cancel: make it reachable and run "
+        "rotation again instead."), fg=FG_MUTED, justify="left",
+        wraplength=430).grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+    row += 1
+
+    confirm_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(
+        container, text="These files are gone forever. Abandon them.",
+        variable=confirm_var, bg=WINDOW_BG, fg=FG, font=FONT_BODY,
+        selectcolor=FIELD_BG, activebackground=WINDOW_BG, activeforeground=FG,
+        highlightthickness=0, wraplength=430, justify="left", anchor="w").grid(
+        row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 6))
+    row += 1
+
+    err = _label(container, "", fg=DANGER)
+    err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+    row += 1
+
+    def on_allow():
+        if not confirm_var.get():
+            _show_error(root, err,
+                        "Tick the box to confirm these files no longer exist.")
+            return
+        outcome["abandon"] = [fid for _gen, fid in ids]
+        root.destroy()
+
+    btns = tk.Frame(container, bg=WINDOW_BG)
+    btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+    _button(btns, "Cancel", command=root.destroy).pack(side="left", padx=6)
+    _button(btns, "Abandon and Retire", command=on_allow, kind="danger").pack(
+        side="left", padx=6)
+    root.bind("<Escape>", lambda e: root.destroy())
+    # Never Enter-to-confirm on a screen that destroys data irrecoverably.
+    root.bind("<Return>", lambda e: None)
+    _center(root)
+
+    _run_modal()
+    return outcome["abandon"]
+
+
 def _disclosure_mismatch(disclosed_names, actual_secret_names) -> Optional[str]:
     """None if what was disclosed to the human matches what's actually in
     the vault; otherwise a human-facing message naming the difference.
@@ -1413,9 +1979,14 @@ def _parse_rk_input(text: str):
         return None, "Could not read recovery key (unexpected format)."
 
 
-def _applicable_manage_actions(info: dict) -> list:
+def _applicable_manage_actions(info: dict, encrypted_file_count: int = 0) -> list:
     """Return the list of manage_vault_dialog action IDs that make sense for
     the current vault state described by *info* (from store.vault_info()).
+
+    *encrypted_file_count* gates the two file-key actions: offering "rotate the
+    key that protects your encrypted files" to someone who has never encrypted
+    one is noise, and a menu of mostly-inapplicable options is how people stop
+    reading menus.
 
     Ordering matches the recommended display order.
     Pure and Tkinter-free so it can be unit-tested without a display."""
@@ -1430,6 +2001,9 @@ def _applicable_manage_actions(info: dict) -> list:
             actions.append("reissue_recovery")
         else:
             actions.append("setup_recovery")
+        if encrypted_file_count:
+            actions.append("rotate_file_key")
+            actions.append("retire_file_keys")
     return actions
 
 
@@ -1439,13 +2013,14 @@ def _manage_action_result_keys(action: str) -> frozenset:
     base = {"action"}
     if action == "change_password":
         return frozenset(base | {"old_password", "new_password"})
-    if action in ("setup_recovery", "reissue_recovery", "upgrade_v2"):
+    if action in ("setup_recovery", "reissue_recovery", "upgrade_v2",
+                  "rotate_file_key", "retire_file_keys"):
         return frozenset(base | {"password"})
     return frozenset(base)
 
 
 def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None,
-                          trust_note: str = None):
+                          trust_note: str = None, files=None):
     """Used by the run_with_env MCP tool. Returns an outcome dict:
     {"secrets": dict_or_None, "trust": bool}. secrets is None if
     denied/failed, in which case trust is always False. When only_vars is
@@ -1457,6 +2032,16 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     "Trust this exact command" -- see vault_lib/trust.py for what the
     caller does with that (an in-memory-only, this-session-only cache,
     never written to disk).
+
+    files: optional list of (vault_path, restore_path) pairs to decrypt for
+    the lifetime of this one command. When it is non-empty the outcome also
+    carries "files": {vault_path_str: {"name", "mode", "bytes"}} -- the
+    DECRYPTED CONTENTS, never the file master key, so key material stays
+    inside store.py exactly as the vault DEK does. The trust checkbox is
+    hidden in that case: writing a private key to disk unattended is a
+    different risk from injecting a token into an environment, and this
+    feature was designed for the latter. Every files= run is approved by a
+    human, every time.
 
     trust_note: optional text shown above the command box, e.g. an
     explanation that a *previous* trust grant for this same command was
@@ -1563,6 +2148,33 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     cmd_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
     row += 1
 
+    if files:
+        _label(root, f"Also decrypts {len(files)} file(s) to disk for the lifetime "
+                     f"of this command:", fg=FG_MUTED, justify="left").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(6, 0))
+        row += 1
+        files_frame = tk.Frame(root, bg=WINDOW_BG)
+        files_txt = _textbox(files_frame, fg=FG, font=FONT_BODY,
+                             height=min(6, max(2, len(files))), width=52)
+        for _vault_path, _restore_path in files:
+            files_txt.insert("end", f"{_collapse_whitespace(str(_restore_path))}\n")
+        files_txt.config(state="disabled")
+        files_yscroll = _scrollbar(files_frame, orient="vertical", command=files_txt.yview)
+        files_txt.config(yscrollcommand=files_yscroll.set)
+        files_txt.grid(row=0, column=0, sticky="nsew")
+        files_yscroll.grid(row=0, column=1, sticky="ns")
+        files_frame.grid_rowconfigure(0, weight=1)
+        files_frame.grid_columnconfigure(0, weight=1)
+        files_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
+        row += 1
+        _label(root, "(deleted the moment the command exits)", fg=FG_MUTED).grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        _label(root, "File contents are NOT redacted from this command's output.",
+               fg=WARNING, justify="left").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+        row += 1
+
     if materialize_path:
         # A1: be explicit about what the file contains, not just that it's cleaned up.
         _label(root, "Also writes real secret values to disk for the lifetime of the command:",
@@ -1587,19 +2199,30 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     row += 1
 
     trust_var = tk.BooleanVar(value=False)
-    trust_check = tk.Checkbutton(
-        # Hours derived from trust._TRUST_TTL_SECONDS rather than written out,
-        # so the number the human consents to here can never drift from the
-        # number check() actually enforces.
-        root, text=f"Trust this exact command for the next "
-                   f"{trust._TRUST_TTL_SECONDS // 3600} hours "
-                   f"(auto-runs with no prompt until then, or until this "
-                   f"server restarts -- whichever comes first)",
-        variable=trust_var, bg=WINDOW_BG, fg=FG, font=FONT_BODY,
-        selectcolor=FIELD_BG, activebackground=WINDOW_BG, activeforeground=FG,
-        highlightthickness=0, wraplength=480, justify="left", anchor="w")
-    trust_check.grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 6))
-    row += 1
+    if files:
+        # No trust offer at all for a run that writes decrypted files to disk.
+        # An 8-hour grant would mean a private key can be written out
+        # repeatedly with no human present, which is not the risk this
+        # checkbox was written for. Say why, rather than silently omitting it.
+        _label(root, "This run decrypts files to disk, so it cannot be trusted "
+                     "for later re-use -- you will be asked again every time.",
+               fg=FG_MUTED, justify="left").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 6))
+        row += 1
+    else:
+        trust_check = tk.Checkbutton(
+            # Hours derived from trust._TRUST_TTL_SECONDS rather than written out,
+            # so the number the human consents to here can never drift from the
+            # number check() actually enforces.
+            root, text=f"Trust this exact command for the next "
+                       f"{trust._TRUST_TTL_SECONDS // 3600} hours "
+                       f"(auto-runs with no prompt until then, or until this "
+                       f"server restarts -- whichever comes first)",
+            variable=trust_var, bg=WINDOW_BG, fg=FG, font=FONT_BODY,
+            selectcolor=FIELD_BG, activebackground=WINDOW_BG, activeforeground=FG,
+            highlightthickness=0, wraplength=480, justify="left", anchor="w")
+        trust_check.grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 6))
+        row += 1
 
     err = _label(root, "", fg=DANGER)
     err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
@@ -1632,6 +2255,25 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
         # A3: filter to only_vars when the caller scoped the run -- the whole
         # vault was decrypted (unavoidable to get any key), but we must hand
         # back only what was disclosed and approved, not everything.
+        if files:
+            # Decrypt here, inside the Allow handler, and hand back only the
+            # plaintext bytes. The file master key never crosses this boundary
+            # -- the same contract the vault DEK has always had.
+            decrypted = {}
+            for _vault_path, _restore_path in files:
+                try:
+                    _bytes, _meta = store.read_encrypted_file(_vault_path, password)
+                except Exception as e:  # noqa: BLE001
+                    _show_error(root, err, f"Could not decrypt {_vault_path}: {e}")
+                    return
+                decrypted[str(_vault_path)] = {
+                    "name": _meta.get("name"),
+                    "mode": _meta.get("mode"),
+                    "bytes": _bytes,
+                    "restore_path": str(_restore_path),
+                }
+            outcome["files"] = decrypted
+
         if only_vars is not None:
             outcome["secrets"] = {k: v for k, v in secrets.items() if k in only_vars}
         else:
@@ -2127,7 +2769,11 @@ def manage_vault_dialog() -> dict:
     except Exception as exc:
         info = {"error": str(exc)}
 
-    actions = _applicable_manage_actions(info)
+    try:
+        encrypted_file_count = len(store.load_file_registry())
+    except (OSError, ValueError):
+        encrypted_file_count = 0
+    actions = _applicable_manage_actions(info, encrypted_file_count)
     fmt = info.get("format")
     has_rk = info.get("recovery_slot", False)
     rk_slot_id = info.get("recovery_slot_id", "")
@@ -2189,6 +2835,8 @@ def manage_vault_dialog() -> dict:
             ("upgrade_v2",       "Upgrade Vault to v2"),
             ("setup_recovery",   "Set Up Paper Recovery Key"),
             ("reissue_recovery", "Reissue Recovery Key"),
+            ("rotate_file_key",  "Rotate Encrypted-File Key"),
+            ("retire_file_keys", "Retire Old File Keys"),
         ]
 
         if not actions:
@@ -2220,6 +2868,8 @@ def manage_vault_dialog() -> dict:
             "setup_recovery":   "Set Up Paper Recovery Key",
             "reissue_recovery": "Reissue Recovery Key",
             "upgrade_v2":       "Upgrade Vault to v2",
+            "rotate_file_key":  "Rotate Encrypted-File Key",
+            "retire_file_keys": "Retire Old File Keys",
         }
         _label(container, titles.get(action, action), font=FONT_TITLE).grid(
             row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"],
@@ -2244,6 +2894,35 @@ def manage_vault_dialog() -> dict:
                    "the paper can reset your password. "
                    "A password-only vault is also a valid and secure choice.",
                    fg=FG_MUTED, justify="left").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+
+        if action == "rotate_file_key":
+            _label(container,
+                   f"Changing your master password does NOT change the key that "
+                   f"protects your encrypted files -- that is deliberate, and it is "
+                   f"why a .levault committed to git keeps working. Rotate that key "
+                   f"here if you believe it may have been exposed.\n\n"
+                   f"Every encrypted file this machine can find "
+                   f"({encrypted_file_count} registered) is re-encrypted under a new "
+                   f"key. Files that are missing -- on another machine, or not yet "
+                   f"pulled from git -- are skipped and keep working under the old "
+                   f"key, which is RETAINED. Nothing becomes unreadable until you "
+                   f"separately retire the old keys.",
+                   fg=WARNING, justify="left").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+
+        if action == "retire_file_keys":
+            _label(container,
+                   "This permanently deletes every old file key from the vault. Any "
+                   ".levault file still encrypted under one -- including copies on "
+                   "other machines, in backups, or in git history -- becomes "
+                   "PERMANENTLY UNREADABLE.\n\n"
+                   "It is refused unless every registered file has already been "
+                   "rotated onto the current key and is readable right now. Files "
+                   "this vault has never been told about cannot be checked.",
+                   fg=DANGER, justify="left").grid(
                 row=row, column=0, columnspan=2, sticky="w", **pad)
             row += 1
 
@@ -2315,6 +2994,8 @@ def manage_vault_dialog() -> dict:
                 "setup_recovery":   "Set Up Recovery Key",
                 "reissue_recovery": "Reissue Recovery Key",
                 "upgrade_v2":       "Upgrade to v2",
+                "rotate_file_key":  "Rotate File Key",
+                "retire_file_keys": "Retire Old Keys",
             }
 
             def on_confirm():
@@ -2329,10 +3010,17 @@ def manage_vault_dialog() -> dict:
             btns = tk.Frame(container, bg=WINDOW_BG)
             btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
             _button(btns, "Back", command=show_main).pack(side="left", padx=6)
-            _button(btns, confirm_labels.get(action, "Confirm"),
-                    command=on_confirm, kind="primary").pack(side="left", padx=6)
+            _button(btns, confirm_labels.get(action, "Confirm"), command=on_confirm,
+                    kind="danger" if action == "retire_file_keys" else "primary").pack(
+                side="left", padx=6)
             root.bind("<Escape>", lambda e: show_main())
-            root.bind("<Return>", lambda e: on_confirm())
+            if action == "retire_file_keys":
+                # The one action here that can permanently destroy data the user
+                # cannot get back. Everything else is recoverable or additive, so
+                # Enter-to-confirm is a convenience; here it is a hazard.
+                root.bind("<Return>", lambda e: None)
+            else:
+                root.bind("<Return>", lambda e: on_confirm())
             pw_entry.focus_force()
 
         _center(root)

@@ -4,6 +4,9 @@ vault.salt
 vault.format.txt
 targets.json
 targets.json.lock
+files.json
+vault.enc.lock
+files.json.lock
 vault_index.json
 # Generated from whatever vault happens to be local. Plugin installs are git
 # clones and ignore this file, so anything tracked here ships to every user --
@@ -21,3 +24,4 @@ SECURITY_TEST_PLAN.md
 manual_check.py
 manual_check_results.txt
 manual_step.py
+manual_whereami.py

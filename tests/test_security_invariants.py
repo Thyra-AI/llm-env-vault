@@ -207,7 +207,12 @@ def test_dialog_checks_pass_in_a_clean_interpreter() -> None:
     script = os.path.join(repo, "tests", "_tk_checks.py")
 
     proc = subprocess.run([python, script], cwd=repo, capture_output=True,
-                          text=True, timeout=300)
+                          # A clean sweep takes about 5 seconds. 300 s meant a
+                          # dialog that hangs -- a pack/grid deadlock inside
+                          # .grid(), say, which no teardown guard can rescue --
+                          # sat on someone's screen for five minutes before the
+                          # test admitted it. Fail fast instead.
+                          text=True, timeout=90)
     out = (proc.stdout or "") + (proc.stderr or "")
 
     if "tk wasn't installed properly" in out or "no display name" in out:
@@ -266,9 +271,9 @@ def test_agent_instructions_are_honest_about_redaction_limits() -> None:
 # ---------------------------------------------------------------------------
 
 EXPECTED_TOOLS = {
-    "add_secret", "change_password", "install_migrate", "manage_vault",
-    "recover_vault", "remove_secret", "resync_targets", "run_with_env",
-    "sync_llm_env", "vault_status",
+    "add_secret", "change_password", "decrypt_file", "encrypt_file",
+    "install_migrate", "manage_vault", "recover_vault", "remove_secret",
+    "resync_targets", "run_with_env", "sync_llm_env", "vault_status",
 }
 
 
