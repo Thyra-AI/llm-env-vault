@@ -73,6 +73,18 @@ process exits. Wait for the process to finish before reading the log.
 - Never read a materialize target file -- it contains real secret values and \
 is deleted the instant the foreground command exits. Its path should be \
 treated as write-only from your perspective.
+- Never read a file this server decrypts. encrypt_file and decrypt_file move \
+whole files -- certificates, private keys, kubeconfigs, service-account JSON -- \
+in and out of the vault, and their decrypted contents are precisely the values \
+you are not meant to see. Treat the path decrypt_file writes to as write-only, \
+exactly like a materialize target. vault_status() lists every encrypted file's \
+path, original name, size and date; that is the only information about them you \
+should ever hold.
+- A .levault file is pure ciphertext. It is safe to read, commit, and move, but \
+there is nothing in it for you -- do not try to decrypt one outside this server.
+- Never propose encrypt_file on a file you were not asked to encrypt. It \
+destroys the original after encrypting, and the only way back is the master \
+password or the recovery key.
 """
 
 mcp = FastMCP("llm-env-vault", instructions=_AGENT_INSTRUCTIONS)
@@ -161,6 +173,9 @@ def _vault_status_impl() -> dict:
     try:
         index = store.load_index()
         targets = store.load_targets()
+        # Paths, names, sizes and dates -- never contents. Same principle as
+        # vault_index.json exposing variable NAMES but never values.
+        files = store.file_registry_status()
     except (OSError, UnicodeDecodeError, ValueError) as e:
         return {"error": str(e)}
 
@@ -172,6 +187,7 @@ def _vault_status_impl() -> dict:
         "variables": index,
         "llm_env_path": str(store.ENV_FILE),
         "targets": targets,
+        "files": files,
         "format_version": store.vault_format_version(),
     }
 
@@ -195,10 +211,16 @@ def _vault_status_impl() -> dict:
 def vault_status() -> dict:
     """Read-only snapshot of the vault: which variables are managed, their
     llm.env placeholder numbers, which project files are registered for
-    resync_targets, the vault format version, and whether a recovery slot
-    exists. Reads vault.enc headers for format metadata but never decrypts
-    -- no password needed, safe to call anytime. Secret values are never
-    returned; vault_id is deliberately omitted (internal identifier only)."""
+    resync_targets, which whole files are encrypted, the vault format version,
+    and whether a recovery slot exists. Reads vault.enc headers for format
+    metadata but never decrypts -- no password needed, safe to call anytime.
+    Secret values are never returned; vault_id is deliberately omitted
+    (internal identifier only).
+
+    The "files" list gives each encrypted file's path, original name, size and
+    date -- never its contents -- plus a status: ok, missing (the .levault is
+    gone), modified (re-encrypted elsewhere), plaintext_present (a decrypted
+    copy is sitting next to it), or error."""
     return _vault_status_impl()
 
 
@@ -283,6 +305,174 @@ def remove_secret(var_name: str) -> dict:
     password, then the proposed removal); nothing is removed until the
     human clicks Allow."""
     return _remove_secret_impl(var_name)
+
+
+def _git_tracks(path: Path) -> Optional[bool]:
+    """Is *path* tracked by a git repo? None if the question can't be answered.
+
+    Best-effort and never fatal: git may not be installed, the directory may
+    not be a repo, or the call may hang on a network filesystem.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", path.name],
+            cwd=str(path.parent), capture_output=True, timeout=10,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _git_ignores(path: Path) -> Optional[bool]:
+    """Is *path* covered by a .gitignore rule? None if unanswerable."""
+    try:
+        proc = subprocess.run(
+            ["git", "check-ignore", "-q", "--", path.name],
+            cwd=str(path.parent), capture_output=True, timeout=10,
+        )
+        if proc.returncode in (0, 1):
+            return proc.returncode == 0
+        return None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _encrypt_file_impl(path: str) -> dict:
+    try:
+        target = Path(path)
+        # Fast-fail before opening a window. precheck runs again inside the
+        # Allow handler, because the dialog can sit open for minutes.
+        info = store.precheck_encrypt(target)
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        return {"applied": False, "error": str(e)}
+
+    # Ask git BEFORE the file is destroyed -- afterwards the path is gone and
+    # the answer is unobtainable.
+    tracked = _git_tracks(info["path"])
+
+    outcome = gui.encrypt_file_dialog(info["path"])
+    if outcome["approved"]:
+        result = outcome["result"] or {}
+        if not result.get("vault_path"):
+            # Cannot happen with the real dialog, which always returns
+            # encrypt_file_in_place's result on approval. But this tool must
+            # never raise, and a KeyError here would surface as a protocol
+            # error rather than something the caller can act on.
+            return {"applied": False,
+                    "error": "Internal error: the encrypt dialog approved the change "
+                              "but returned no result."}
+        response = {
+            "applied": True,
+            "message": (f"{result.get('original_name')} encrypted to "
+                        f"{result.get('vault_path')}; the original was destroyed."),
+            "vault_path": result.get("vault_path"),
+            "original_name": result.get("original_name"),
+            "plaintext_size": result.get("plaintext_size"),
+        }
+        warnings = []
+        if tracked:
+            # Encrypting now does nothing for a secret already in history.
+            warnings.append(
+                f"{result.get('original_name')} was tracked by git. If it was ever "
+                f"committed, the real contents are still in the repository history "
+                f"and encrypting it now protects nothing -- the plaintext must be "
+                f"purged (git filter-repo or similar) AND the credential rotated. "
+                f"Add the plaintext name to .gitignore and commit the .levault file "
+                f"instead.")
+        if _git_ignores(Path(result["vault_path"])) is True:
+            # The one file that SHOULD be committed is being ignored.
+            warnings.append(
+                f"{Path(result['vault_path']).name} is covered by a .gitignore rule. "
+                f"It is pure ciphertext and is the file you want in the repository -- "
+                f"without it, this secret exists only on this machine.")
+        if warnings:
+            response["warnings"] = warnings
+        return response
+
+    if outcome["partial_failure"]:
+        return {"applied": False, "error": outcome["partial_failure"]}
+    return {"applied": False, "message": "Denied by user."}
+
+
+@mcp.tool()
+def encrypt_file(path: str) -> dict:
+    """Encrypt any whole file into the vault, under the same master password.
+
+    For secrets that are not .env variables -- certificates, private keys,
+    kubeconfigs, service-account JSON, .p12 bundles. certs/server.pem becomes
+    certs/server.pem.levault beside it, and the ORIGINAL IS DESTROYED once the
+    encrypted copy has been written and verified. The .levault file is pure
+    ciphertext and is safe to commit to git.
+
+    Opens a GUI window where the human types the master password and confirms
+    the specific file; nothing is written or deleted until they click Allow.
+    The file's contents are never returned to you.
+
+    Requires a v2 vault (run manage_vault -> upgrade_v2 first). Refuses
+    symlinks, hard-linked files, empty files, anything already encrypted,
+    anything inside the vault's own directory, files over 16 MiB, and any path
+    whose .levault sidecar already exists."""
+    return _encrypt_file_impl(path)
+
+
+def _decrypt_file_impl(vault_path: str, output_path: Optional[str] = None) -> dict:
+    try:
+        target = Path(vault_path)
+        store.precheck_decrypt(target, output_path)  # fast-fail before the window
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        return {"applied": False, "error": str(e)}
+    except (VaultCorrupted, VaultTampered) as e:
+        return {"applied": False, "error": str(e)}
+
+    outcome = gui.decrypt_file_dialog(target, output_path)
+    if outcome["approved"]:
+        result = outcome["result"] or {}
+        if not result.get("output_path"):
+            return {"applied": False,
+                    "error": "Internal error: the decrypt dialog approved the change "
+                              "but returned no result."}
+        out = Path(result["output_path"])
+        response = {
+            "applied": True,
+            "message": (f"{result.get('vault_path')} decrypted to {out}. "
+                        f"This is a real secret on disk -- do not read it."),
+            "output_path": str(out),
+            "size": result.get("size"),
+        }
+        warnings = list(result.get("warnings") or [])
+        if _git_ignores(out) is False and _git_tracks(out) is not None:
+            # A real secret just landed in a working tree with no rule to keep
+            # it out of the next commit.
+            warnings.append(
+                f"{out.name} is NOT covered by any .gitignore rule. It now contains "
+                f"a real secret in plaintext -- add it to .gitignore before your next "
+                f"commit, or re-encrypt it when you are done.")
+        if warnings:
+            response["warnings"] = warnings
+        return response
+
+    if outcome["partial_failure"]:
+        return {"applied": False, "error": outcome["partial_failure"]}
+    return {"applied": False, "message": "Denied by user."}
+
+
+@mcp.tool()
+def decrypt_file(vault_path: str, output_path: Optional[str] = None) -> dict:
+    """Restore a .levault file to a real, plaintext file on disk, permanently.
+
+    The decrypted file is NOT cleaned up -- use run_with_env's files= parameter
+    instead when a command just needs the file for the duration of one run.
+
+    Opens a GUI window where the human types the master password and confirms
+    the output path; nothing is written until they click Allow. The .levault
+    file is left in place. The restored contents are never returned to you, and
+    you must not read the file this creates.
+
+    By default the output name comes from the .levault file's own name
+    (server.pem.levault -> server.pem), never from the name stored inside the
+    ciphertext. Pass output_path to choose a different one. Refuses to
+    overwrite an existing file."""
+    return _decrypt_file_impl(vault_path, output_path)
 
 
 def _install_migrate_impl(target_path: str) -> dict:
@@ -528,6 +718,8 @@ def _manage_vault_impl() -> dict:
       change_password  -- "old_password" (str), "new_password" (str)
       setup_recovery   -- "password" (str)
       reissue_recovery -- "password" (str)
+      rotate_file_key  -- "password" (str)
+      retire_file_keys -- "password" (str)
       upgrade_v2       -- "password" (str). The dialog never sets "recovery";
                           the kwarg is still passed through to store because
                           upgrade_to_v2 accepts it, but no UI path produces
@@ -582,6 +774,88 @@ def _manage_vault_impl() -> dict:
                 }
         return {"applied": True, "action": "change_password",
                 "message": "Master password changed successfully."}
+
+    # ------------------------------------------------------------------ #
+    # rotate_file_key / retire_file_keys                                  #
+    # The file key deliberately survives a password change, so it needs   #
+    # its own rotation path -- see store.rotate_file_key.                 #
+    # ------------------------------------------------------------------ #
+    if action == "rotate_file_key":
+        password = outcome.get("password")
+        if password is None:
+            return {"applied": False, "message": "Cancelled by user."}
+        try:
+            report = store.rotate_file_key(password)
+        except WrongPassword:
+            return {"applied": False, "error": "Incorrect master password."}
+        except (OSError, ValueError, RuntimeError, VaultCorrupted, VaultTampered) as e:
+            return {"applied": False, "error": str(e)}
+        skipped = [r for r in report["results"] if r["status"] != "ok"]
+        result = {
+            "applied": True,
+            "action": "rotate_file_key",
+            "message": (f"Encrypted-file key rotated. {report['rotated']} file(s) "
+                        f"re-encrypted under the new key."),
+            "rotated": report["rotated"],
+            "results": report["results"],
+        }
+        if skipped:
+            # Never let this be silent. A file that did not rotate is still
+            # readable with the key the user just decided to stop trusting.
+            result["warning"] = (
+                f"{len(skipped)} file(s) were NOT rotated and still open under the "
+                f"old key, which has been retained so they keep working: "
+                + ", ".join(f"{r['path']} ({r['status']})" for r in skipped[:10])
+                + ". Make them reachable and run rotation again before retiring the "
+                  "old keys.")
+        return result
+
+    if action == "retire_file_keys":
+        password = outcome.get("password")
+        if password is None:
+            return {"applied": False, "message": "Cancelled by user."}
+        try:
+            report = store.retire_file_keys(password)
+        except WrongPassword:
+            return {"applied": False, "error": "Incorrect master password."}
+        except (OSError, RuntimeError, VaultCorrupted, VaultTampered) as e:
+            return {"applied": False, "error": str(e)}
+        except ValueError as e:
+            # Files this vault sealed are unaccounted for. Refusing forever is
+            # its own failure mode -- a single crashed encrypt would leave the
+            # user unable to retire a key they believe is compromised, with no
+            # way to see what was blocking it. Show the identities and let a
+            # human deliberately abandon them.
+            try:
+                outstanding = store.file_keys_outstanding(password)
+            except Exception:  # noqa: BLE001
+                outstanding = {}
+            if not outstanding:
+                return {"applied": False, "error": str(e)}
+            names = {}
+            try:
+                for entry in store.load_file_registry().values():
+                    if entry.get("file_id"):
+                        names[entry["file_id"]] = entry.get("original_name")
+            except (OSError, ValueError):
+                pass
+            abandon = gui.confirm_abandon_files_dialog(outstanding, names)
+            if not abandon:
+                return {"applied": False, "message": "Cancelled by user."}
+            try:
+                report = store.retire_file_keys(password, abandon=abandon)
+            except WrongPassword:
+                return {"applied": False, "error": "Incorrect master password."}
+            except (OSError, ValueError, RuntimeError,
+                    VaultCorrupted, VaultTampered) as exc:
+                return {"applied": False, "error": str(exc)}
+        if not report.get("retired"):
+            return {"applied": False,
+                    "message": report.get("message", "Nothing to retire.")}
+        return {"applied": True, "action": "retire_file_keys",
+                "message": (f"Retired {len(report['retired'])} old file key(s). Any "
+                            f".levault still encrypted under one is now permanently "
+                            f"unreadable.")}
 
     # ------------------------------------------------------------------ #
     # setup_recovery / reissue_recovery                                   #
@@ -763,6 +1037,23 @@ def recover_vault() -> dict:
     return _recover_vault_impl()
 
 
+def _cleanup_restored(paths: list) -> list:
+    """Shred every restored plaintext. Returns the ones that survived.
+
+    Only ever called with paths this run created -- see where restored_paths
+    is built. secure_delete never raises, so this is safe in a finally block
+    and on every error path.
+    """
+    survivors = []
+    for path in paths:
+        try:
+            if not store.secure_delete(path):
+                survivors.append(path)
+        except OSError:
+            survivors.append(path)
+    return survivors
+
+
 class _Terminated(Exception):
     pass
 
@@ -783,14 +1074,88 @@ def _resolve_materialize_path(materialize: str, cwd: Optional[str]) -> Path:
     return resolved
 
 
+def _resolve_restore_paths(files: list, cwd: Optional[str]) -> list:
+    """Map each .levault path to where its plaintext will be written.
+
+    Returns a list of (vault_path, restore_path) pairs.
+
+    The restore name comes from the SIDECAR's own filename -- server.pem.levault
+    restores as server.pem -- never from the name stored inside the ciphertext
+    and never from files.json. Both of those are influenced by someone other
+    than the person clicking Allow: the in-ciphertext name travels with a file
+    that may have come from anywhere, and files.json is a plaintext file an
+    agent can edit. Deriving from the sidecar name instead means there is no
+    "..", no drive letter and no reserved device name to sanitise, because no
+    attacker-supplied string ever reaches path construction.
+
+    The file lands in `cwd` rather than beside the .levault, because `cwd` is
+    where the command will actually look for it.
+
+    Raises ValueError with a message written for a human.
+    """
+    base = (Path(cwd) if cwd else Path.cwd()).resolve()
+    pairs, seen_restore = [], {}
+    for raw in files:
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError("files must be a list of non-empty path strings.")
+        try:
+            vault_path = Path(raw)
+            vault_path = (vault_path if vault_path.is_absolute() else base / vault_path).resolve()
+        except OSError as exc:
+            raise ValueError(f"Cannot resolve {raw}: {exc}") from None
+
+        # check_output=False: this validates the .levault itself -- existence,
+        # size, magic bytes, suffix -- and nothing about where the plaintext
+        # goes. The default would check a path BESIDE the sidecar, which is
+        # not where this writes (it writes into the command's cwd), so it
+        # would both miss the path that matters and refuse over a leftover
+        # file it was never going to touch. The real restore path is checked
+        # below and again immediately before writing.
+        info = store.precheck_decrypt(vault_path, check_output=False)
+        name = store.derived_plaintext_path(info["vault_path"]).name
+        restore_path = (base / name).resolve()
+
+        if not restore_path.is_relative_to(base):
+            raise ValueError(
+                f"{name} would restore to {restore_path}, outside the command's "
+                f"working directory ({base}). Refusing.")
+        if restore_path.exists():
+            # Never overwrite. Cleanup shreds every path this run wrote, so
+            # overwriting here would mean irreversibly destroying a file the
+            # user already had -- e.g. one they restored with decrypt_file
+            # yesterday.
+            raise ValueError(
+                f"{restore_path} already exists -- refusing to overwrite it. A file "
+                f"restored for a command is deleted when that command exits, so "
+                f"overwriting yours would destroy it.")
+        prior = seen_restore.get(restore_path)
+        if prior is not None:
+            raise ValueError(
+                f"{Path(prior).name} and {info['vault_path'].name} would both "
+                f"restore to {restore_path}. Rename one of them.")
+        seen_restore[restore_path] = info["vault_path"]
+        pairs.append((info["vault_path"], restore_path))
+    return pairs
+
+
 def _run_with_env_impl(command: list, materialize: Optional[str], background: bool,
-                        cwd: Optional[str], only_vars: Optional[list] = None) -> dict:
+                        cwd: Optional[str], only_vars: Optional[list] = None,
+                        files: Optional[list] = None) -> dict:
     if not command or not all(isinstance(c, str) for c in command):
         return {"error": "command must be a non-empty list of strings."}
     if background and materialize:
         return {"error": "materialize is not supported together with background=True "
                           "(there's no reliable moment to clean the file up if the "
                           "process is left running)."}
+    if background and files:
+        # The highest-severity rule in this feature. A detached process has no
+        # reliable moment at which the decrypted file can be removed, so a
+        # private key would be left in the working directory indefinitely --
+        # and unlike a materialized .env, nothing else would ever notice.
+        return {"error": "files is not supported together with background=True "
+                          "(there's no reliable moment to delete the decrypted "
+                          "file if the process is left running, and it would be "
+                          "left on disk indefinitely)."}
     if not store.vault_exists():
         return {"error": "No vault exists yet. Call add_secret first."}
 
@@ -817,7 +1182,11 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
         if materialized_path is not None and materialized_path.exists():
             return {"error": f"{materialized_path} already exists -- refusing to overwrite it. "
                               f"Pick a path that doesn't exist yet."}
-    except (OSError, ValueError) as e:
+        # Resolved and validated before the dialog opens, so a doomed request
+        # never puts a modal window in front of a human. Re-checked again
+        # right before writing, because the dialog can sit open for minutes.
+        file_pairs = _resolve_restore_paths(files, cwd) if files else []
+    except (OSError, ValueError, VaultCorrupted, VaultTampered) as e:
         return {"error": str(e)}
 
     # Trust is scoped to this exact (command, cwd, only_vars, materialize,
@@ -825,8 +1194,17 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
     # the command line -- see vault_lib/trust.py. Everything it tracks
     # lives only in this server process's memory; it's forgotten the
     # moment the process exits, same as if the feature didn't exist.
-    signature = trust.make_signature(command, cwd, only_vars, materialize, background)
-    auto_ok, invalidated_reason = trust.check(signature, command, cwd)
+    signature = trust.make_signature(command, cwd, only_vars, materialize, background,
+                                      files)
+    if file_pairs:
+        # A run that writes decrypted files to disk is NEVER auto-allowed and
+        # never grants trust: a human sees the paths and approves every single
+        # time. Injecting a token into an environment for 8 unattended hours is
+        # one risk; writing a private key into a directory unattended is
+        # another, and the trust feature was designed for the first.
+        auto_ok, invalidated_reason = False, None
+    else:
+        auto_ok, invalidated_reason = trust.check(signature, command, cwd)
     trust_info = {}
 
     # trust.check()'s own contract guarantees cached_secrets(signature) is
@@ -889,14 +1267,18 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
                                              materialize_path=str(materialized_path)
                                              if materialized_path else None,
                                              only_vars=only_vars,
-                                             trust_note=dialog_trust_note)
+                                             trust_note=dialog_trust_note,
+                                             files=file_pairs or None)
         raw_secrets = outcome["secrets"]
         if raw_secrets is None:
             result = {"applied": False, "message": "Denied by user."}
             if invalidated_reason:
                 result["trust_note"] = invalidated_reason
             return result
-        if outcome["trust"]:
+        if outcome["trust"] and not file_pairs:
+            # The dialog hides the checkbox for a files run, so this should
+            # already be False. Belt to that braces: a grant here would let a
+            # later identical call decrypt a private key with no human present.
             trust.trust(signature, pre_hashes)
             # Cache only what was actually approved for this signature, not
             # the whole vault raw_secrets holds -- a command trusted with a
@@ -967,6 +1349,19 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
     if only_vars is not None:
         secrets = {k: v for k, v in secrets.items() if k in only_vars}
 
+    # Defence in depth. The vault body holds reserved keys alongside user
+    # variables -- the file master key lives there -- and load_secrets filters
+    # them out, so in a correct build none can be here. But this is the exact
+    # spot where being wrong is worst: Windows CreateProcess will happily hand
+    # a "#"-prefixed name to the child, so a filtering bug upstream would ship
+    # the key that decrypts every vaulted file into an arbitrary subprocess's
+    # environment. Refuse to launch instead.
+    leaked = sorted(k for k in secrets if store.is_reserved_key(k))
+    if leaked:
+        return _finish({"applied": False,
+                "error": f"Internal error: reserved vault key(s) {leaked} reached the "
+                          f"environment builder -- refusing to launch the command."})
+
     env = os.environ.copy()
     env.update(secrets)
 
@@ -984,6 +1379,39 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
             store.write_materialized_env(materialized_path, secrets)
         except (OSError, ValueError) as e:
             return _finish({"applied": False, "error": str(e)})
+
+    # Only paths this run actually created go in here, and cleanup touches
+    # nothing else. Shredding a path we merely found would destroy a file the
+    # user already had.
+    restored_paths = []
+    if file_pairs:
+        decrypted = outcome.get("files") if not auto_ok else None
+        if not decrypted:
+            return _finish({"applied": False,
+                    "error": "Internal error: the unlock dialog approved a run with "
+                              "files= but returned no decrypted contents."})
+        for vault_path, restore_path in file_pairs:
+            payload = decrypted.get(str(vault_path))
+            if payload is None:
+                _cleanup_restored(restored_paths)
+                return _finish({"applied": False,
+                        "error": f"Internal error: {vault_path} was approved but not "
+                                  f"decrypted."})
+            if restore_path.exists():
+                # Re-check right before writing: the password dialog can sit
+                # open for minutes, and the earlier check was a fast-fail UX
+                # nicety, not the guard.
+                _cleanup_restored(restored_paths)
+                return _finish({"applied": False,
+                        "error": f"{restore_path} came into existence while the password "
+                                  f"prompt was open -- refusing to overwrite it. Try again."})
+            try:
+                store.write_restored_file(restore_path, payload["bytes"], payload)
+            except (OSError, ValueError) as e:
+                _cleanup_restored(restored_paths)
+                return _finish({"applied": False,
+                        "error": f"Could not restore {restore_path}: {e}"})
+            restored_paths.append(restore_path)
 
     if background:
         # Under the stdio transport this process's own stdout/stdin ARE the
@@ -1032,13 +1460,17 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
                         "Use the OS/your own process manager to stop it later."})
 
     old_sigterm = None
-    if materialized_path is not None:
+    if materialized_path is not None or restored_paths:
+        # `or restored_paths` is load-bearing: without it a SIGTERM during a
+        # files-only run skips the handler entirely and leaves decrypted
+        # private keys sitting in the working directory.
         try:
             old_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
         except (ValueError, OSError):
             pass
 
     cleanup_error = None
+    survivors = []
     try:
         try:
             # stdin=DEVNULL: under the stdio transport this process's own
@@ -1061,6 +1493,7 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
                 materialized_path.unlink(missing_ok=True)
             except OSError as e:
                 cleanup_error = str(e)
+        survivors = _cleanup_restored(restored_paths)
 
     # Redact BEFORE the [-4000:] slice so a secret value that straddles the
     # cut point is still caught. The full output is redacted first, then
@@ -1085,13 +1518,24 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
     if cleanup_error:
         result["warning"] = (f"Could not delete {materialized_path}, it still contains real "
                               f"secret values -- remove it by hand: {cleanup_error}")
+    if survivors:
+        # Name every one. These are decrypted private keys and certificates;
+        # a silent leftover is not acceptable, and "some files" would leave the
+        # user hunting.
+        result["files_warning"] = (
+            "Could not delete the following decrypted file(s) -- they still contain "
+            "real secret contents, remove them by hand: "
+            + ", ".join(str(p) for p in survivors))
+    if restored_paths and not survivors:
+        result["files_restored"] = len(restored_paths)
     return _finish(result)
 
 
 @mcp.tool()
 def run_with_env(command: list[str], materialize: Optional[str] = None,
                   background: bool = False, cwd: Optional[str] = None,
-                  only_vars: Optional[list[str]] = None) -> dict:
+                  only_vars: Optional[list[str]] = None,
+                  files: Optional[list[str]] = None) -> dict:
     """Run a real command with the vault's real secret values injected as
     environment variables. Prompts once for the master password via a GUI
     (which also lists which variable names -- never values -- will be
@@ -1126,7 +1570,23 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     returned log file, stdin closed -- never inherited, since this
     server's own stdio is the MCP protocol channel) and return immediately
     with its PID, for long-running commands (e.g. a dev server) instead of
-    blocking until it exits. Not compatible with materialize.
+    blocking until it exits. Not compatible with materialize or files.
+
+    files: paths to .levault files (as listed by vault_status) to decrypt
+    into the command's working directory for the lifetime of this one run --
+    a certificate, private key or kubeconfig the command needs as a real
+    file. Each is restored under its own name with .levault stripped
+    (certs/server.pem.levault -> server.pem inside cwd), with its recorded
+    permissions, and is deleted the moment the command exits. The restore
+    path is enforced to stay inside cwd and an existing file is NEVER
+    overwritten -- both re-checked immediately before writing, after the
+    password prompt closes. Not compatible with background=True: a detached
+    process has no reliable moment to clean a decrypted private key off disk.
+    A run using files is never auto-allowed and never grants trust, so a
+    human approves it every time. Restored file CONTENTS are not redacted
+    from this tool's output the way variable values are -- a command that
+    prints one hands you the real secret verbatim, so never write one that
+    does.
 
     Trusted commands: the dialog offers a "Trust this exact command for
     the rest of this session" checkbox. If checked, this exact
@@ -1144,7 +1604,7 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     README.md's "Trusted commands" section, which also covers what this
     can't catch -- e.g. a Dockerfile only referenced indirectly via a
     compose file's `context:`)."""
-    return _run_with_env_impl(command, materialize, background, cwd, only_vars)
+    return _run_with_env_impl(command, materialize, background, cwd, only_vars, files)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,16 @@
+# Encrypted files are binary and must never be line-ending converted.
+#
+# A .levault is authenticated with AES-256-GCM: change one byte and it stops
+# opening, permanently, and the plaintext it replaced was deliberately
+# destroyed. Git's auto-detection does get this right on its own (every
+# envelope has a NUL at byte 7, in the LEVFILE magic), but "correct by
+# accident" is not a good enough guarantee for a file that cannot be
+# regenerated. Say it explicitly.
+#
+# If you commit .levault files in YOUR repository, put this line in your own
+# .gitattributes too.
+*.levault binary
+
+# The v1 vault fixture is a byte-frozen tripwire for the legacy Fernet path.
+tests/fixtures/v1_vault/v1_vault.enc binary
+tests/fixtures/v1_vault/v1_vault.salt binary

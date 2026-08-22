@@ -117,6 +117,7 @@ class MalformedRecoveryKey(ValueError):
 
 VAULT_MAGIC: bytes = b"LEVAULT\x00"
 FORMAT_VERSION: int = 2
+FMK_BYTES: int = 32
 RECOVERY_KEY_BYTES: int = 20  # 160 bits → 32 Crockford base32 chars, no padding
 
 # Crockford base32: excludes I L O U (uppercase only on output; normalise on input)
@@ -349,6 +350,30 @@ def new_dek() -> bytearray:
 def new_vault_id() -> bytes:
     """Return 16 random bytes to identify this vault instance."""
     return os.urandom(16)
+
+
+def new_fmk() -> bytearray:
+    """Return a fresh 32-byte File Master Key.
+
+    The FMK is the stable root for whole-file encryption.  It lives inside the
+    vault BODY rather than in a header slot, so that it survives the DEK
+    rotation every credential operation performs -- see store.py's reserved-key
+    section for why that matters.
+    """
+    return bytearray(os.urandom(FMK_BYTES))
+
+
+def new_fmk_id() -> str:
+    """Return 8 random Crockford base32 characters labelling an FMK generation.
+
+    A label only, never derived from the key.  It goes in the PLAINTEXT header
+    of every encrypted file so that rotation can tell generations apart without
+    trial-unwrapping.  That makes it a correlation tag across artifacts the
+    user may well publish -- accepted deliberately, and documented, because the
+    alternative turns every open into a guess-and-check loop and blurs the one
+    question rotation depends on.
+    """
+    return "".join(_CROCKFORD_ALPHABET[b & 0x1F] for b in os.urandom(8))
 
 
 # ---------------------------------------------------------------------------
@@ -721,3 +746,387 @@ def open_v2_with_recovery(
 
     plaintext = open_body(bytes(dek), body, aad)
     return plaintext, dek, header
+
+
+# ---------------------------------------------------------------------------
+# File envelope (LEVFILE) — whole-file encryption
+# ---------------------------------------------------------------------------
+#
+# Deliberately a PARALLEL implementation rather than a `magic=` parameter on
+# build_envelope/parse_envelope. Those two encode vault semantics — the 64 KiB
+# header cap, the slots array, the version byte that means "v2 vault" — and a
+# caller passing the wrong constant would let a file envelope be parsed as a
+# vault. Forty-odd lines of near-duplicate structure is cheaper than a
+# parameter a bug can set wrong. What IS shared is everything below the
+# framing: seal_body, open_body, wrap_dek, unwrap_dek are all magic-agnostic
+# and already correct.
+#
+# slot_aad is NOT reused — it hardcodes VAULT_MAGIC. Files get their domain
+# separation from the HKDF info string instead, which additionally binds the
+# key-encryption key to the file's own id, so a wrapped DEK cannot be
+# transplanted between two files sealed under the same FMK.
+#
+#   off  0           8       FILE_MAGIC
+#   off  8           1       FILE_FORMAT_VERSION
+#   off  9           4       hdr_len, uint32 big-endian, capped
+#   off 13           hdr_len UTF-8 JSON header
+#                            AAD = data[0 : 13 + hdr_len], the literal byte
+#                            slice, passed verbatim to open_body and never
+#                            re-serialised from the parsed dict
+#   off 13+hdr_len   12      body nonce
+#   +                N+16    ciphertext || GCM tag
+#
+# Inside the sealed body, so that the metadata is CONFIDENTIAL and not merely
+# authenticated:
+#
+#   4 bytes   meta_len, uint32 big-endian, capped
+#   meta_len  UTF-8 JSON meta
+#   rest      the original file bytes, verbatim, unpadded
+#
+# No PKCS7 padding here. The vault body pads because Fernet's CBC leaked
+# length in v1 and it was free to keep; a file's size is already visible from
+# the length of the .levault itself, so padding would be a lie rather than a
+# defence.
+
+FILE_MAGIC: bytes = b"LEVFILE\x00"
+FILE_FORMAT_VERSION: int = 1
+
+# Header/meta caps. Both are checked BEFORE any allocation keyed off them:
+# this project's threat model explicitly grants filesystem write access, so a
+# hostile length field must not be able to OOM the MCP server. Same reasoning
+# as validate_scrypt_params.
+FILE_HDR_CAP: int = 8192
+FILE_META_CAP: int = 4096
+
+# AESGCM is one-shot — there is no streaming API — so an N-byte file costs
+# roughly 4N transient bytes to encrypt (read, inner-frame concat, ciphertext,
+# prefix concat) and ~3N more across verified read-back. At 16 MiB that peaks
+# around 64 MiB, the same order as one scrypt run at n=2**16 which this server
+# already does routinely; at 64 MiB it would be ~256 MiB in a long-lived
+# process, which is not acceptable.
+#
+# Chunking was considered and rejected: a correct segmented AEAD needs
+# counter-derived per-segment nonces, a final-segment marker to defeat
+# truncation, and cross-file splice resistance, which is the most bug-prone
+# code in the whole feature — and every artifact this exists for (.pem, .p12,
+# kubeconfig, service-account JSON) is under 100 KiB. Capping rather than
+# streaming is also what this module already does elsewhere.
+MAX_FILE_PLAINTEXT_BYTES: int = 16 * 1024 * 1024
+# Envelope overhead is 13 + hdr_len + 12 + 16 + 4 + meta_len; 64 KiB is a
+# generous ceiling on all of it. INVARIANT: this must stay below
+# trust._MAX_HASH_BYTES so that every .levault is always hashable and trust's
+# drift detection never has a silent gap. Asserted in the test suite.
+MAX_FILE_ENVELOPE_BYTES: int = MAX_FILE_PLAINTEXT_BYTES + 64 * 1024
+
+_FILE_KEK_INFO: str = "llm-env-vault/file/v1/kek"
+
+
+class FileEnvelopeCorrupted(VaultCorrupted):
+    """Structurally invalid .levault file (bad magic, truncated, illegal
+    header). Subclasses VaultCorrupted so existing handlers still catch it."""
+
+
+class FileEnvelopeTampered(VaultTampered):
+    """AESGCM authentication failed for a .levault's body or wrapped DEK.
+
+    Note what this must NEVER be reported as: a wrong password. The password
+    is not what opens a file envelope — the file master key is — so "wrong
+    password" would send the user to fix something that isn't broken. The
+    honest statement is that the file does not belong to this vault, or was
+    modified after it was written."""
+
+
+def _file_structural_errors_are_corruption(func):
+    """File-envelope twin of _structural_errors_are_corruption.
+
+    Everything read out of a file header is attacker-controlled JSON. The
+    envelope stays shut regardless (the GCM tags see to that), so this is not
+    a confidentiality fix — it is about not leaking a KeyError from this
+    module's internals when the honest answer is "this file is damaged".
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except VaultCorrupted:
+            raise  # FileEnvelopeCorrupted/Tampered arrive here too
+        except (KeyError, TypeError, IndexError, ValueError, AttributeError) as exc:
+            raise FileEnvelopeCorrupted(
+                f"Encrypted file header is malformed or incomplete "
+                f"({type(exc).__name__}: {exc}). The file is damaged, or was "
+                f"written by a different tool."
+            ) from exc
+    return wrapper
+
+
+def new_file_id() -> bytes:
+    """Return 16 random bytes identifying one encrypted file."""
+    return os.urandom(16)
+
+
+def derive_file_kek(fmk: bytes, salt: bytes, file_id: bytes) -> bytes:
+    """Derive a 32-byte key-encryption key for one file from the FMK.
+
+    HKDF-SHA256, not scrypt, for exactly the reason given at
+    derive_recovery_kek: the input is 256 bits of machine-generated entropy,
+    so there is no dictionary to grind and a slow KDF would buy nothing.
+
+    The file's own id goes into the info string, which binds the KEK to that
+    one file: copying a wrapped_dek from one envelope into another under the
+    same FMK produces a KEK that cannot unwrap it.
+    """
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=(_FILE_KEK_INFO + "/").encode("ascii") + file_id,
+    )
+    return hkdf.derive(fmk)
+
+
+def _frame_inner(meta: dict, plaintext: bytes) -> bytes:
+    """``meta_len || meta JSON || file bytes`` — the sealed inner layout."""
+    meta_bytes = json.dumps(meta, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    if len(meta_bytes) > FILE_META_CAP:
+        raise FileEnvelopeCorrupted(
+            f"File metadata is {len(meta_bytes)} bytes > {FILE_META_CAP} limit."
+        )
+    return struct.pack(">I", len(meta_bytes)) + meta_bytes + plaintext
+
+
+def _unframe_inner(inner: bytes) -> tuple:
+    """Split the sealed inner layout into ``(meta_dict, file_bytes)``."""
+    if len(inner) < 4:
+        raise FileEnvelopeCorrupted("Encrypted file contents are truncated.")
+    (meta_len,) = struct.unpack(">I", inner[:4])
+    if meta_len > FILE_META_CAP:
+        raise FileEnvelopeCorrupted(
+            f"File metadata length {meta_len} exceeds the {FILE_META_CAP}-byte cap."
+        )
+    if 4 + meta_len > len(inner):
+        raise FileEnvelopeCorrupted(
+            "File metadata length runs past the end of the decrypted contents."
+        )
+    try:
+        meta = json.loads(inner[4:4 + meta_len].decode("utf-8"))
+    except Exception as exc:
+        raise FileEnvelopeCorrupted(f"File metadata JSON is malformed: {exc}") from None
+    if not isinstance(meta, dict):
+        raise FileEnvelopeCorrupted("File metadata is not a JSON object.")
+    return meta, inner[4 + meta_len:]
+
+
+def build_file_envelope(fmk: bytes, fmk_id: str, plaintext: bytes, meta: dict) -> bytes:
+    """Seal *plaintext* and *meta* into a complete LEVFILE envelope.
+
+    A fresh file DEK is minted on every call — never reuse one across two
+    seals, even with fresh nonces. Callers who re-encrypt an existing file
+    (rotation) get a new DEK for free by going through here.
+    """
+    if len(plaintext) > MAX_FILE_PLAINTEXT_BYTES:
+        raise FileEnvelopeCorrupted(
+            f"File is {len(plaintext)} bytes, over the "
+            f"{MAX_FILE_PLAINTEXT_BYTES} byte limit for vault encryption."
+        )
+
+    file_id = new_file_id()
+    salt = os.urandom(16)
+    dek = new_dek()
+    kek = derive_file_kek(fmk, salt, file_id)
+    wrap_nonce, wrapped = wrap_dek(kek, bytes(dek), _file_wrap_aad(file_id, fmk_id))
+
+    header = {
+        "format": "llm-env-vault-file",
+        "version": FILE_FORMAT_VERSION,
+        "cipher": "AES-256-GCM",
+        "file_id": _b64(file_id),
+        "fmk_id": fmk_id,
+        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "kdf": {"name": "hkdf-sha256", "salt": _b64(salt), "info": _FILE_KEK_INFO},
+        # wrap_nonce, not nonce: there are two nonces in this format and the
+        # other one lives in the body at 13+hdr_len. Naming them apart is the
+        # cheapest way to stop someone eventually swapping them.
+        "wrap_nonce": _b64(wrap_nonce),
+        "wrapped_dek": _b64(wrapped),
+    }
+    header_bytes = json.dumps(header, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    if len(header_bytes) > FILE_HDR_CAP:
+        raise FileEnvelopeCorrupted(
+            f"File header is {len(header_bytes)} bytes > {FILE_HDR_CAP} limit."
+        )
+
+    prefix = (FILE_MAGIC + bytes([FILE_FORMAT_VERSION])
+              + struct.pack(">I", len(header_bytes)) + header_bytes)
+    body = seal_body(bytes(dek), _frame_inner(meta, plaintext), prefix)
+    return prefix + body
+
+
+def _file_wrap_aad(file_id: bytes, fmk_id: str) -> bytes:
+    """AAD for a file's wrapped DEK.
+
+    ``FILE_MAGIC || version || file_id || b"|" || fmk_id``
+
+    Binds the wrapped DEK to this file AND this key generation, so neither a
+    cross-file transplant nor a header that lies about which generation sealed
+    it can survive. The header's own bytes separately cover the body via the
+    envelope AAD.
+    """
+    return (FILE_MAGIC + bytes([FILE_FORMAT_VERSION]) + file_id + b"|"
+            + fmk_id.encode("utf-8"))
+
+
+def parse_file_envelope(data: bytes) -> tuple:
+    """Parse a LEVFILE envelope into ``(header_dict, aad_bytes, body_bytes)``.
+
+    Structural only — no key material involved, nothing decrypted. *aad_bytes*
+    is the literal slice ``data[0 : 13 + hdr_len]``; callers MUST pass it to
+    open_body verbatim and never re-serialise the parsed header to rebuild it.
+    """
+    if len(data) > MAX_FILE_ENVELOPE_BYTES:
+        raise FileEnvelopeCorrupted(
+            f"Encrypted file is {len(data)} bytes, over the "
+            f"{MAX_FILE_ENVELOPE_BYTES} byte limit."
+        )
+    if len(data) < 13:
+        raise FileEnvelopeCorrupted("Encrypted file is too short to be valid.")
+    if data[:8] != FILE_MAGIC:
+        raise FileEnvelopeCorrupted(
+            "This file is not a llm-env-vault encrypted file (unrecognised header)."
+        )
+    version = data[8]
+    if version != FILE_FORMAT_VERSION:
+        raise FileEnvelopeCorrupted(
+            f"Unsupported encrypted-file format version {version}; "
+            f"expected {FILE_FORMAT_VERSION}. A newer llm-env-vault wrote this file."
+        )
+    (hdr_len,) = struct.unpack(">I", data[9:13])
+    if hdr_len > FILE_HDR_CAP:
+        raise FileEnvelopeCorrupted(
+            f"Header length field {hdr_len} exceeds the {FILE_HDR_CAP}-byte hard cap."
+        )
+    min_total = 13 + hdr_len + 12 + 16  # nonce + GCM tag
+    if len(data) < min_total:
+        raise FileEnvelopeCorrupted(
+            f"Encrypted file is truncated (need at least {min_total} bytes, "
+            f"have {len(data)})."
+        )
+    try:
+        header = json.loads(data[13:13 + hdr_len].decode("utf-8"))
+    except Exception as exc:
+        raise FileEnvelopeCorrupted(f"File header JSON is malformed: {exc}") from None
+    if not isinstance(header, dict):
+        raise FileEnvelopeCorrupted("File header is not a JSON object.")
+    return header, data[0:13 + hdr_len], data[13 + hdr_len:]
+
+
+def _b64d_exact(text, expected_len: int, what: str) -> bytes:
+    """Decode a header base64 field and require an exact byte length."""
+    if not isinstance(text, str):
+        raise FileEnvelopeCorrupted(f"File header field {what} is not a string.")
+    try:
+        raw = base64.urlsafe_b64decode(text + "==")
+    except Exception:
+        raise FileEnvelopeCorrupted(f"File header field {what} is not valid base64.") from None
+    if len(raw) != expected_len:
+        raise FileEnvelopeCorrupted(
+            f"File header field {what} is {len(raw)} bytes, expected {expected_len}."
+        )
+    return raw
+
+
+def _validate_file_header(header: dict) -> tuple:
+    """Check every attacker-controlled header field before it is used.
+
+    Returns ``(file_id, fmk_id, salt, wrap_nonce, wrapped_dek)``.
+
+    In particular the KDF name and info are compared against hardcoded
+    constants rather than trusted: feeding an arbitrary header string into
+    HKDF as the info parameter would let a crafted file steer key derivation.
+    """
+    kdf = header.get("kdf")
+    if not isinstance(kdf, dict):
+        raise FileEnvelopeCorrupted("File header has no kdf section.")
+    if kdf.get("name") != "hkdf-sha256":
+        raise FileEnvelopeCorrupted(
+            f"Unsupported file KDF {kdf.get('name')!r}; expected hkdf-sha256."
+        )
+    if kdf.get("info") != _FILE_KEK_INFO:
+        raise FileEnvelopeCorrupted("File header declares an unexpected KDF info string.")
+
+    fmk_id = header.get("fmk_id")
+    if not isinstance(fmk_id, str) or not fmk_id:
+        raise FileEnvelopeCorrupted("File header has no usable fmk_id.")
+
+    return (
+        _b64d_exact(header.get("file_id"), 16, "file_id"),
+        fmk_id,
+        _b64d_exact(kdf.get("salt"), 16, "kdf.salt"),
+        _b64d_exact(header.get("wrap_nonce"), 12, "wrap_nonce"),
+        _b64d_exact(header.get("wrapped_dek"), 48, "wrapped_dek"),
+    )
+
+
+@_file_structural_errors_are_corruption
+def open_file_envelope(fmk: bytes, data: bytes) -> tuple:
+    """Open a LEVFILE envelope. Returns ``(file_bytes, meta_dict, header)``.
+
+    *fmk* is the raw 32-byte key for the generation the header names — the
+    caller resolves the generation, because the shape of the stored key record
+    is the store layer's business, not this module's.
+
+    Raises FileEnvelopeCorrupted for a structurally bad file and
+    FileEnvelopeTampered when authentication fails.
+    """
+    header, aad, body = parse_file_envelope(data)
+    file_id, fmk_id, salt, wrap_nonce, wrapped = _validate_file_header(header)
+
+    kek = derive_file_kek(fmk, salt, file_id)
+    try:
+        dek = unwrap_dek(kek, wrap_nonce, wrapped, _file_wrap_aad(file_id, fmk_id))
+    except VaultTampered:
+        raise FileEnvelopeTampered(
+            "This encrypted file does not belong to this vault, or has been "
+            "modified since it was written."
+        ) from None
+
+    try:
+        inner = open_body(bytes(dek), body, aad)
+    except VaultTampered:
+        raise FileEnvelopeTampered(
+            "This encrypted file has been modified since it was written."
+        ) from None
+
+    meta, file_bytes = _unframe_inner(inner)
+    return file_bytes, meta, header
+
+
+def is_file_envelope(data: bytes) -> bool:
+    """True iff *data* starts with the LEVFILE magic bytes.
+
+    A startswith check, never a JSON parse — the same discipline as is_v2, and
+    the reason the two formats can never be confused for one another.
+    """
+    return data.startswith(FILE_MAGIC)
+
+
+@_file_structural_errors_are_corruption
+def file_envelope_info(data: bytes) -> dict:
+    """Non-secret facts about a .levault file. Decrypts nothing.
+
+    Note that the plaintext size is NOT recoverable exactly: meta_len lives
+    inside the ciphertext, so all this can offer is an upper bound. That is
+    deliberate — an authoritative size field in the header would be a second
+    source of truth to keep consistent, for a number the caller can get from
+    the registry or by opening the file.
+    """
+    header, aad, body = parse_file_envelope(data)
+    file_id, fmk_id, _salt, _nonce, _wrapped = _validate_file_header(header)
+    return {
+        "version": header.get("version"),
+        "file_id": _b64(file_id),
+        "fmk_id": fmk_id,
+        "created": header.get("created"),
+        "envelope_size": len(data),
+        # body is nonce(12) || ct || tag(16); ct covers meta_len(4) + meta + file
+        "max_plaintext_size": max(0, len(body) - 12 - 16 - 4),
+    }

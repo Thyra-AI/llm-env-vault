@@ -7,6 +7,138 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.5.0] — 2026-08-21
+
+### Added
+
+- **Whole-file encryption.** `encrypt_file(path)` moves any file — a certificate, a private key, a
+  kubeconfig, a service-account JSON, a `.p12` bundle — into the vault under the same master
+  password. `certs/server.pem` becomes `certs/server.pem.levault` beside it and the original is
+  destroyed once the encrypted copy has been written and verified. Granularity is deliberately the
+  whole file rather than per-variable: these are opaque blobs, and one unlock should return the
+  whole thing. The `.levault` is pure ciphertext and is meant to be committed.
+
+  `decrypt_file(vault_path, output_path=None)` restores one permanently. `run_with_env(...,
+  files=[...])` restores them only for the lifetime of one command and deletes them when it exits.
+  `vault_status()` lists every encrypted file by path, original name, size and date — never
+  contents.
+
+- **A file master key that survives credential changes.** Every credential operation rotates the
+  DEK, so file ciphertext could not ride on it: one password change would have orphaned every
+  `.levault`, including ones already pushed to a remote where they cannot be re-encrypted. Instead a
+  32-byte file master key lives *inside* the encrypted body, which `change_password`,
+  `reissue_recovery_key` and `recover_with_recovery_key` all carry through verbatim. A file
+  encrypted a year ago opens after any number of password changes, and the recovery key reaches it
+  too. An old password cannot, because it can no longer open the vault to reach the key.
+
+- **`LEVFILE` envelope format,** domain-separated from the vault's own `LEVAULT` magic. AES-256-GCM
+  with the header bytes as AAD; a random per-file key wrapped under HKDF-SHA256(file master key,
+  salt, file id), which binds the wrapped key to that one file so it cannot be transplanted to
+  another. The original filename and permissions live *inside* the ciphertext, not the header — a
+  `.levault` is designed to be pushed to a public repo, and a header-embedded `aws-root-key.pem`
+  would be a permanent leak the user cannot rename away. The in-ciphertext name is never used to
+  construct a filesystem path, which removes the entire path-traversal class rather than sanitising
+  it. Files are capped at 16 MiB: `AESGCM` is one-shot, and a correct segmented AEAD is the most
+  bug-prone code this feature could have contained for artifacts that are almost always under
+  100 KiB.
+
+- **File key rotation,** as two `manage_vault` actions. Changing the master password deliberately
+  does not change the file key — that is what makes a committed `.levault` durable — so a leaked
+  file key needs its own answer. **Rotate Encrypted-File Key** mints a new generation and
+  re-encrypts every file this machine can find; files it cannot reach are reported and keep working,
+  because the old key is retained. **Retire Old File Keys** deletes the old generations, and is
+  refused unless every registered file is verified as already rotated. That precondition reads each
+  file's *envelope header*, not `files.json`, so restoring an older `.levault` from git history
+  cannot trick it into destroying the only key that opens it.
+
+- **Git-awareness warnings.** `encrypt_file` reports when the plaintext was tracked by git —
+  encrypting it now protects nothing if it is already in history, which needs `git filter-repo` and
+  a credential rotation. `decrypt_file` reports when the restored path is not covered by a
+  `.gitignore` rule.
+
+### Changed
+
+- `load_secrets`/`load_secrets_ex` now return user variables only, and `save_secrets` re-reads the
+  on-disk body and merges vault-internal keys back in. Every existing call site is correct with no
+  edits; raw access lives behind the deliberately unlovely `load_vault_body`/`save_vault_body`. The
+  hazard this closes is not a leak but a deletion: every mutation here is load → mutate → save, and
+  a single site saving a variables-only dict would have silently deleted the file master key,
+  surfacing weeks later on a file whose plaintext was already destroyed. `save_secrets` now raises
+  rather than accepting an internal key, so the mistake fails loudly instead of half-working.
+
+- `run_with_env` gained `files`, which is part of the trust signature but never trusted: a run that
+  decrypts files is never auto-allowed and never grants trust, and the checkbox is not offered.
+  An unattended 8-hour grant to inject a token into an environment is a different thing from one to
+  write a private key into a directory, and the feature was designed for the first. It is also
+  refused outright with `background=True` — a detached process has no reliable moment at which a
+  decrypted key could be cleaned up.
+
+- Every read-modify-write of `vault.enc` now holds a lock file, `save_secrets` included. The
+  `expect_fingerprint` compare-and-swap compares and *then* replaces with nothing in between, and
+  what sits in between is a full scrypt derivation (~100 ms) — a TOCTOU window wide enough to drive
+  a truck through. Two Claude Code sessions are two server processes: one could mint a file key
+  while the other was mid-`save_secrets`, and the stale body would overwrite it. Since
+  `encrypt_file` had already destroyed the plaintext by then, every file under that key became
+  permanently unopenable, silently. A safety audit reproduced this before release. The lock is
+  re-entrant per thread, because the operations that need it naturally nest. The compare-and-swap
+  is kept as a second layer, `encrypt_file` re-checks that its key generation is still on disk
+  before destroying anything, and `rotate_file_key` re-checks after its walk rather than reporting
+  a success it cannot back up.
+
+- The four credential operations (`change_password`, `upgrade_to_v2`, `reissue_recovery_key`,
+  `recover_with_recovery_key`) hold the vault lock too. An earlier version of this work exempted
+  them, on the reasoning that they carry the body plaintext through verbatim rather than
+  reconstructing it. Carrying it verbatim is precisely the hazard: they read the body, spend ~250 ms
+  in two scrypt derivations and a backup write, then write that stale plaintext back — erasing a
+  file key another session minted in between exactly as `save_secrets` did. A follow-up audit pass
+  destroyed a private key through `change_password` this way, after the first fix had landed.
+  Backup-and-rollback does not help, because nothing fails: the credential change succeeds and the
+  loss is silent.
+
+- The `#fmk` record tracks **which files** are sealed under each key generation — a list of the
+  `file_id`s baked into each envelope, not a count. `retire_file_keys` refuses while any are
+  outstanding. This is the only guard here that is machine-independent: every other check is scoped
+  to paths `files.json` names, so a `.levault` in a directory this vault was never told about —
+  pulled from git on a second machine — was invisible to all of them.
+
+  Identities rather than counts, because a count can be driven wrong in three ways that a set
+  cannot, all found by the audit after the counting version was written: two registry entries
+  pointing at copies of one envelope decremented it twice while one file moved; a crash-then-resume
+  incremented it twice and stranded the user permanently; and a resumed encryption credited the
+  active generation instead of the one that actually sealed the file. Removals are idempotent and
+  the identity is bound into both the wrapped-DEK AAD and the body AAD, so it cannot be forged
+  without the file key. The record's storage travels inside `vault.enc` and no agent can edit it,
+  though its inputs still come from disk — a strong backstop, not an oracle.
+
+- Retiring keys that files still depend on now opens a confirmation listing each file by name and
+  requiring an explicit tick before abandoning it. Refusing forever is its own failure mode: one
+  interrupted encryption could otherwise leave a user unable to retire a key they believe is
+  compromised, with no way to discover what was blocking it. Only the identities shown are waived,
+  so this names what is being destroyed instead of acting as a blanket override.
+
+- `retire_file_keys` — the one irreversible operation here — now refuses when it cannot account for
+  what the old keys protect: an empty registry, or a `.levault` sitting beside a registered one that
+  `files.json` has no record of. Its per-file generation check already read envelope headers rather
+  than the registry, but every check was *scoped* to the paths the registry named, so an absent
+  `files.json` silently removed the safety net entirely. That state needs no adversary — copying
+  `vault.enc` to a second machine to open files pulled from git produces it.
+
+- `encrypt_file` re-verifies the plaintext immediately before destroying it (hash, symlink and
+  hard-link re-check). Two hundred milliseconds elapse between reading the file and deleting it, and
+  it used to delete whatever was at that path by then — losing an editor's autosave, or shredding
+  whatever a swapped-in hard link pointed at.
+
+- "Could not delete the original" now distinguishes overwritten-but-not-unlinked from
+  untouched. The old message told the user a random-byte husk "still contains the real secret",
+  which pointed them at deleting the `.levault` — by then the only copy.
+
+### Fixed
+
+- The dialog test harness now destroys its Tk root unconditionally. A failure while driving a
+  dialog previously left a live root behind, which both leaked a real modal window onto the user's
+  screen with nothing able to answer it, and caused the next harness call to bypass the auto-closing
+  root entirely (`_new_window()` returns a `Toplevel` when a root is already alive).
+
 ## [1.4.6] — 2026-08-20
 
 ### Fixed
@@ -299,6 +431,12 @@ Pre-1.0.0 history is a long series of security fixes found by repeated red-team 
 credential-shaped text in parse warnings, consent before registering unowned targets, and honest
 reporting of partial writes. See `git log` for the full sequence.
 
+[1.5.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.5.0
+[1.4.6]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.4.6
+[1.4.5]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.4.5
+[1.4.4]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.4.4
+[1.4.3]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.4.3
+[1.4.2]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.4.2
 [1.4.1]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.4.1
 [1.4.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.4.0
 [1.3.0]: https://github.com/Thyra-AI/llm-env-vault/releases/tag/v1.3.0
