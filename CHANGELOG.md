@@ -7,6 +7,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.5.1] — 2026-09-13
+
+### Fixed
+
+- **MCP server now starts when the installed plugin is used in a project other than its own repo.**
+  1.4.5 switched `.mcp.json`'s `args` from `${CLAUDE_PLUGIN_ROOT}/plugin_launcher.py` to the bare
+  filename `plugin_launcher.py`, reasoning that Claude Code resolves relative paths against the
+  directory containing `.mcp.json`. That's false: Claude Code always spawns MCP servers with cwd
+  set to whatever project is currently open, never the plugin's own directory and never relative
+  to `.mcp.json` itself — confirmed upstream in
+  [anthropics/claude-code#17565](https://github.com/anthropics/claude-code/issues/17565), which
+  also shows the documented `cwd` field in `.mcp.json` is silently ignored, so it can't be used to
+  pin it either. The installed plugin only ever worked by coincidence, when the open project
+  happened to be this repo (whose root happens to contain `plugin_launcher.py`); opening any other
+  project produced an immediate `FileNotFoundError` in the child process — no traceback visible
+  anywhere a user would look, just `CONNECTION_CLOSED` from the client. Fixed by routing through
+  `python -c "..."`, which resolves the launcher via `CLAUDE_PLUGIN_ROOT` when set (the
+  installed-plugin case, regardless of which project is open) and falls back to the bare filename
+  against cwd when it isn't (the project-level dev case, where cwd is the repo root either way).
+
 ## [1.5.0] — 2026-08-21
 
 ### Added

@@ -2,7 +2,7 @@
   "mcpServers": {
     "llm-env-vault": {
       "command": "python",
-      "args": ["plugin_launcher.py"]
+      "args": ["-c", "import os,runpy; runpy.run_path(os.path.join(os.environ.get('CLAUDE_PLUGIN_ROOT','.'),'plugin_launcher.py'), run_name='__main__')"]
     }
   }
 }
