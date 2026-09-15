@@ -116,7 +116,8 @@ def _deobfuscate(data: bytes, key: bytes) -> str:
     return _xor_bytes(data, key).decode("utf-8")
 
 
-def make_signature(command, cwd, only_vars, materialize, background=False, files=None):
+def make_signature(command, cwd, only_vars, materialize, background=False, files=None,
+                   swap=None):
     """A hashable key identifying "this exact run_with_env call shape".
     Any change to any of these is treated as a different, unapproved
     command.
@@ -138,6 +139,16 @@ def make_signature(command, cwd, only_vars, materialize, background=False, files
     refactored away, that call would auto-allow with no dialog at all. Paths
     are normalised so two spellings of one request are one signature, and
     None stays distinct from () for the same reason only_vars does.
+
+    swap is a sequence of (path, names) pairs -- the registered file AND the
+    exact set of variables whose placeholder lines would be swapped, as
+    computed at call time from targets.json and the file's current
+    contents. The names are in here, not just the paths, on purpose:
+    targets.json is agent-writable, so a signature keyed on paths alone
+    would let a grant approved for "swap 2 values into .env" auto-allow a
+    later call that swaps 20, after the agent appended 18 names to the
+    registry. Binding the names means any such change is a new, unapproved
+    signature.
     """
     return (
         tuple(command),
@@ -147,6 +158,9 @@ def make_signature(command, cwd, only_vars, materialize, background=False, files
         bool(background),
         tuple(sorted({os.path.normcase(os.path.abspath(f)) for f in files}))
         if files is not None else None,
+        tuple(sorted((os.path.normcase(os.path.abspath(p)), tuple(sorted(set(n))))
+                     for p, n in swap))
+        if swap is not None else None,
     )
 
 
@@ -280,11 +294,13 @@ def _reads_implicit_config(command) -> bool:
     return Path(command[0]).stem.lower() in _IMPLICIT_CONFIG_FILES
 
 
-def _candidate_paths(command, cwd):
+def _candidate_paths(command, cwd, extra_paths=None):
     """Returns (paths, truncated). paths is every command argument that
     resolves to an existing regular file, PLUS the resolved program being
-    executed (see _resolve_argv0), capped at _MAX_HASHED_FILES; truncated
-    is True if more distinct files were found than that cap.
+    executed (see _resolve_argv0), PLUS any `extra_paths` the caller names
+    (run_with_env passes its swap targets -- see referenced_file_hashes),
+    capped at _MAX_HASHED_FILES; truncated is True if more distinct files
+    were found than that cap.
 
     A relative argument is only checked against `cwd` (the directory the
     command will actually run in) -- never against this server process's
@@ -315,6 +331,22 @@ def _candidate_paths(command, cwd):
         if extra not in seen:
             seen.add(extra)
             paths.append(extra)
+    # Swap targets. A grant for a swap run binds to the placeholder file the
+    # human reviewed; if anything in it changes -- a line added for a name
+    # that was registered but absent, a placeholder hand-edited -- the next
+    # run must go back through the dialog rather than write real values
+    # into a file that no longer looks like the approved one.
+    for raw in (extra_paths or ()):
+        try:
+            candidate = Path(raw)
+            if not candidate.is_file():
+                continue
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            paths.append(resolved)
     argv0 = _resolve_argv0(command, cwd)
     if argv0 is not None and argv0 not in seen:
         seen.add(argv0)
@@ -336,14 +368,14 @@ def _hash_file(path: Path) -> Optional[str]:
         return None
 
 
-def referenced_file_hashes(command, cwd) -> dict:
+def referenced_file_hashes(command, cwd, extra_paths=None) -> dict:
     """sha256 of every file the command appears to reference on disk.
     Files too large or unreadable to hash cheaply are skipped rather than
     included with a placeholder -- a skipped file just never contributes
     to drift detection, same as if the command didn't reference it. See
     unmonitored_file_warning() for surfacing that gap to the human."""
     hashes = {}
-    paths, _truncated = _candidate_paths(command, cwd)
+    paths, _truncated = _candidate_paths(command, cwd, extra_paths)
     for path in paths:
         digest = _hash_file(path)
         if digest is not None:
@@ -485,7 +517,7 @@ def trust(signature, file_hashes: dict) -> None:
     }
 
 
-def check(signature, command, cwd):
+def check(signature, command, cwd, extra_paths=None):
     """Returns (ok, invalidated_reason).
 
     ok=True: this exact signature was trusted, its referenced files are
@@ -540,7 +572,7 @@ def check(signature, command, cwd):
                         "master password to refresh it.")
 
     approved_hashes = entry["hashes"]
-    current_hashes = referenced_file_hashes(command, cwd)
+    current_hashes = referenced_file_hashes(command, cwd, extra_paths)
     if current_hashes == approved_hashes:
         return True, None
 

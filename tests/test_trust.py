@@ -798,7 +798,7 @@ def test_create_secrets_vault_refuses_inside_plugin_cache_without_plugin_data() 
         fake_plugin_dir = Path(fake_repo) / "plugins" / "cache" / "llm-env-vault" / "1.0.0"
         fake_vault_lib = fake_plugin_dir / "vault_lib"
         fake_vault_lib.mkdir(parents=True)
-        for name in ("__init__.py", "store.py", "crypto.py"):
+        for name in ("__init__.py", "store.py", "crypto.py", "procs.py"):
             (fake_vault_lib / name).write_bytes((REPO_ROOT / "vault_lib" / name).read_bytes())
         (fake_plugin_dir / "mcp_server.py").touch()  # not imported, just makes the layout plausible
 

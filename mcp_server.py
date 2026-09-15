@@ -85,6 +85,22 @@ there is nothing in it for you -- do not try to decrypt one outside this server.
 - Never propose encrypt_file on a file you were not asked to encrypt. It \
 destroys the original after encrypting, and the only way back is the master \
 password or the recovery key.
+- run_with_env(swap=[path]) writes REAL values into an already-migrated .env \
+for the duration of one foreground command and restores the placeholders when \
+it exits. Use it only when the tool is known to read that file and nothing \
+else reaches it: a loader with override/overload semantics, `source .env`, \
+compose `env_file:`, `docker run --env-file .env`, kubectl --from-env-file, \
+or a test harness that scrubs the child environment. Prefer plain injection \
+when the tool reads its environment (almost all do by default), and \
+materialize= when it accepts an env-file path of your choosing. Always pair \
+swap with only_vars.
+- While a swap run is active, never read, cat, copy, hash, diff, commit or \
+stash the swapped file, and never run a git write command in that project. \
+Never edit targets.json, target_styles.json or swap.journal.json.
+- If a result contains swap_restore_conflicts, swap_restore_failed, \
+swap_verify_failed or swap_recovered, stop, quote that field to the user \
+verbatim, and wait for their instruction before running anything else -- it \
+means real values may still be on disk somewhere the user needs to look.
 """
 
 mcp = FastMCP("llm-env-vault", instructions=_AGENT_INSTRUCTIONS)
@@ -94,6 +110,45 @@ mcp = FastMCP("llm-env-vault", instructions=_AGENT_INSTRUCTIONS)
 # run that finished long ago, never one from a process that might still be
 # writing to it.
 _STALE_RUN_LOG_AGE_SECONDS = 7 * 24 * 60 * 60  # 7 days
+
+
+# Reports from a recovery performed at server start, before any tool call
+# existed to return them in. Drained into the first tool result that can carry
+# them, so a restore the user never asked for is never a restore they never
+# hear about.
+_startup_recovery: list = []
+
+
+def _recover_swaps() -> list:
+    """Restore any swapped .env whose owning server died or whose own restore
+    failed (see store.recover_stale_swaps), plus anything server start found.
+    Never raises: a broken journal is reported as an entry, because the
+    tool call this runs inside must still do its own job."""
+    reports = list(_startup_recovery)
+    _startup_recovery.clear()
+    try:
+        reports.extend(store.recover_stale_swaps())
+    except (OSError, ValueError, RuntimeError) as e:
+        reports.append({"error": f"could not process swap.journal.json: {e}"})
+    return reports
+
+
+def _live_swap_paths() -> dict:
+    """{normcased path: entry} for files some live server has real values in."""
+    try:
+        return {os.path.normcase(k): v for k, v in store.live_swaps().items()}
+    except (OSError, ValueError, RuntimeError):
+        return {}
+
+
+def _with_swap_recovery(result_fn) -> dict:
+    """Run a tool body after stale-swap recovery, attaching the recovery
+    report to whatever it returns."""
+    recovered = _recover_swaps()
+    result = result_fn()
+    if recovered and isinstance(result, dict):
+        result["swap_recovered"] = recovered
+    return result
 
 
 def _cleanup_stale_run_logs() -> None:
@@ -170,6 +225,10 @@ def _redact_secrets(text: str, secrets: dict) -> tuple:
 
 
 def _vault_status_impl() -> dict:
+    return _with_swap_recovery(_vault_status_core)
+
+
+def _vault_status_core() -> dict:
     try:
         index = store.load_index()
         targets = store.load_targets()
@@ -190,6 +249,13 @@ def _vault_status_impl() -> dict:
         "files": files,
         "format_version": store.vault_format_version(),
     }
+    # Files another live server currently has real values written into.
+    # Disclosed so an agent can see why a resync skipped them and so a
+    # human asking "is anything unlocked right now" gets a true answer.
+    live = _live_swap_paths()
+    if live:
+        result["swaps_in_progress"] = [
+            {"path": k, "names": e["names"], "pid": e["pid"]} for k, e in sorted(live.items())]
 
     # Non-secret recovery-slot metadata so the agent can surface "you have no
     # recovery slot set up" without ever touching private key material.
@@ -482,6 +548,16 @@ def _install_migrate_impl(target_path: str) -> dict:
             return {"applied": False, "error": f"{target} does not exist."}
         if not target.is_file():
             return {"applied": False, "error": f"{target} is not a file."}
+        live = _live_swap_paths().get(os.path.normcase(str(target)))
+        if live:
+            # The file holds REAL values right now, written by a run_with_env
+            # swap in another session. Migrating it would re-capture them as
+            # "new" secrets and rewrite the lines that session is about to
+            # restore. Refuse; the swap finishes on its own.
+            return {"applied": False,
+                    "error": f"{target} currently has real values swapped into it by "
+                             f"another llm-env-vault session (pid {live['pid']}) -- wait "
+                             f"for that command to finish, then try again."}
 
         parsed = store.parse_env_file(target)
         index_now = store.load_index()
@@ -598,10 +674,14 @@ def install_migrate(target_path: str) -> dict:
     another registered project's vault entry -- the human must click
     Allow before anything is written. Safe to call again later on the
     same file; already-migrated variables are skipped automatically."""
-    return _install_migrate_impl(target_path)
+    return _with_swap_recovery(lambda: _install_migrate_impl(target_path))
 
 
 def _resync_targets_impl() -> dict:
+    return _with_swap_recovery(_resync_targets_core)
+
+
+def _resync_targets_core() -> dict:
     try:
         index = store.load_index()
         targets = store.load_targets()
@@ -610,11 +690,20 @@ def _resync_targets_impl() -> dict:
     if not targets:
         return {"message": "No target files registered. Call install_migrate first."}
 
+    live = _live_swap_paths()
     results = {}
     for path_str, names in targets.items():
         path = Path(path_str)
         if not path.exists():
             results[path_str] = {"status": "missing"}
+            continue
+        entry = live.get(os.path.normcase(path_str))
+        if entry:
+            # Every managed line in this file is a real value at the moment,
+            # so a resync would report all of them as conflicts (names only,
+            # never values -- sync_target_file's conflict list is names) and
+            # touch nothing. Say why instead.
+            results[path_str] = {"status": "swap_in_progress", "pid": entry["pid"]}
             continue
         try:
             conflicts = store.sync_target_file(path, index, names)
@@ -1138,11 +1227,138 @@ def _resolve_restore_paths(files: list, cwd: Optional[str]) -> list:
     return pairs
 
 
+def _resolve_swap_plan(swap: list, cwd: Optional[str], only_vars: Optional[list],
+                       files_restore_paths: list) -> list:
+    """Turn the caller's swap list into [{key, path, names, skipped,
+    git_tracked, git_ignored}] or raise ValueError -- all before the dialog
+    opens, and all without a single secret: what would be swapped is a
+    function of targets.json, the index, and the placeholder lines currently
+    in the file.
+
+    Each entry must be a registered install_migrate target: the registry is
+    the only record of which names in that file are the vault's to touch,
+    and a swap into an unregistered file would have nothing to restore
+    against. `names` is the set that will actually change -- registered,
+    present in the vault, requested by only_vars if given, and currently
+    sitting on a placeholder line. A file where that set is empty is a
+    pointless request and is refused; so is an only_vars name the caller
+    explicitly asked to swap into a file where it cannot be, because that
+    is a contradiction the human should not be asked to approve.
+    """
+    if not isinstance(swap, list) or not all(isinstance(x, str) and x.strip() for x in swap):
+        raise ValueError("swap must be a list of non-empty path strings.")
+    targets = store.load_targets()
+    index = store.load_index()
+    by_norm = {os.path.normcase(k): k for k in targets}
+    base = (Path(cwd) if cwd else Path.cwd()).resolve()
+    plan, seen = [], set()
+    for raw in swap:
+        candidate = Path(raw) if os.path.isabs(raw) else base / raw
+        try:
+            resolved = candidate.resolve()
+        except OSError as e:
+            raise ValueError(f"swap path {raw!r} could not be resolved: {e}") from None
+        key = by_norm.get(os.path.normcase(str(resolved)))
+        if key is None:
+            raise ValueError(
+                f"{resolved} is not a registered install_migrate target, so it cannot be "
+                f"swapped (registered: {', '.join(sorted(targets)) or 'none'}). Migrate it "
+                f"first, or use materialize= for a file the vault does not manage.")
+        if key in seen:
+            continue
+        seen.add(key)
+        path = Path(key)
+        if not path.is_file():
+            raise ValueError(f"{key} is registered but is not a file on disk.")
+        if path.is_symlink():
+            raise ValueError(f"{key} is a symlink -- refusing to rewrite it in place.")
+        if not os.access(path, os.W_OK):
+            raise ValueError(f"{key} is not writable -- the placeholders could not be "
+                             f"restored after the run, so it is refused before it.")
+        if any(os.path.normcase(str(r)) == os.path.normcase(key) for r in files_restore_paths):
+            raise ValueError(f"{key} is both a swap target and the restore path of a "
+                             f"files= entry -- pick one.")
+        registered = set(targets[key])
+        candidates = registered & set(index)
+        if only_vars is not None:
+            candidates &= set(only_vars)
+        preview = store.preview_swap(path, candidates)
+        names = preview["swappable"]
+        skipped = {}
+        for n in preview["not_in_file"]:
+            skipped[n] = "no line for this name in the file"
+        for n in preview["not_placeholder"]:
+            skipped[n] = "current value is not a vault placeholder"
+        for n in sorted(registered - set(index)):
+            if only_vars is None or n in only_vars:
+                skipped[n] = "no longer in the vault"
+        if only_vars is not None:
+            contradicted = sorted((set(only_vars) & registered) - set(names))
+            if contradicted:
+                raise ValueError(
+                    f"only_vars names {', '.join(contradicted)} for {key}, but they cannot be "
+                    f"swapped there: "
+                    + "; ".join(f"{n}: {skipped.get(n, 'unknown')}" for n in contradicted))
+        if not names:
+            why = "; ".join(f"{n}: {r}" for n, r in sorted(skipped.items())) or                 "it has no registered variables in the vault"
+            raise ValueError(f"nothing in {key} would be swapped ({why}).")
+        plan.append({
+            "key": key, "path": path, "names": names, "skipped": skipped,
+            "duplicates": preview["duplicates"],
+            "git_tracked": _git_tracks(path), "git_ignored": _git_ignores(path),
+        })
+    return plan
+
+
+def _restore_swaps(swapped: list, index: dict) -> dict:
+    """Undo every swap in `swapped` ([(key, path, record)]) in reverse order,
+    each independently, then release or flag its journal entry. Returns the
+    per-file outcome the result reports. Never raises."""
+    outcome = {"restored": {}, "conflicts": {}, "verify_failed": {}, "failed": {}}
+    for key, path, record in reversed(swapped):
+        try:
+            res = store.unswap_target_file(path, record, index)
+        except Exception as e:  # noqa: BLE001 -- must reach the journal step regardless
+            res = {"restored": [], "conflicts": [], "verify_failed": [],
+                   "error": f"{type(e).__name__}: {e}"}
+        if res["restored"]:
+            outcome["restored"][key] = res["restored"]
+        if res["conflicts"]:
+            outcome["conflicts"][key] = res["conflicts"]
+        if res["verify_failed"]:
+            outcome["verify_failed"][key] = res["verify_failed"]
+        try:
+            if res["error"]:
+                outcome["failed"][key] = res["error"]
+                store.journal_mark_restore_failed(key)
+            else:
+                store.journal_remove(key)
+        except (OSError, ValueError, RuntimeError) as e:
+            outcome["failed"][key] = (outcome["failed"].get(key) or "") +                 f" (journal update failed: {e})"
+    return outcome
+
+
 def _run_with_env_impl(command: list, materialize: Optional[str], background: bool,
                         cwd: Optional[str], only_vars: Optional[list] = None,
-                        files: Optional[list] = None) -> dict:
+                        files: Optional[list] = None, swap: Optional[list] = None) -> dict:
+    return _with_swap_recovery(
+        lambda: _run_with_env_core(command, materialize, background, cwd, only_vars, files,
+                                   swap))
+
+
+def _run_with_env_core(command: list, materialize: Optional[str], background: bool,
+                        cwd: Optional[str], only_vars: Optional[list] = None,
+                        files: Optional[list] = None, swap: Optional[list] = None) -> dict:
     if not command or not all(isinstance(c, str) for c in command):
         return {"error": "command must be a non-empty list of strings."}
+    if swap == []:
+        swap = None
+    if background and swap:
+        return {"error": "swap is not supported together with background=True (a detached "
+                         "process has no exit moment at which the placeholders could be "
+                         "restored, and a .env full of real values left behind indefinitely "
+                         "is exactly what this tool exists to prevent). Run it in the "
+                         "foreground, or rely on environment injection alone."}
     if background and materialize:
         return {"error": "materialize is not supported together with background=True "
                           "(there's no reliable moment to clean the file up if the "
@@ -1186,8 +1402,11 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
         # never puts a modal window in front of a human. Re-checked again
         # right before writing, because the dialog can sit open for minutes.
         file_pairs = _resolve_restore_paths(files, cwd) if files else []
-    except (OSError, ValueError, VaultCorrupted, VaultTampered) as e:
+        swap_plan = _resolve_swap_plan(swap, cwd, only_vars,
+                                       [rp for _vp, rp in file_pairs]) if swap else []
+    except (OSError, ValueError, VaultCorrupted, VaultTampered, UnicodeDecodeError) as e:
         return {"error": str(e)}
+    swap_keys = [e["key"] for e in swap_plan]
 
     # Trust is scoped to this exact (command, cwd, only_vars, materialize,
     # background) shape AND the content of every file named directly on
@@ -1195,7 +1414,9 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
     # lives only in this server process's memory; it's forgotten the
     # moment the process exits, same as if the feature didn't exist.
     signature = trust.make_signature(command, cwd, only_vars, materialize, background,
-                                      files)
+                                      files,
+                                      swap=[(e["key"], e["names"]) for e in swap_plan]
+                                      if swap_plan else None)
     if file_pairs:
         # A run that writes decrypted files to disk is NEVER auto-allowed and
         # never grants trust: a human sees the paths and approves every single
@@ -1204,7 +1425,7 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
         # another, and the trust feature was designed for the first.
         auto_ok, invalidated_reason = False, None
     else:
-        auto_ok, invalidated_reason = trust.check(signature, command, cwd)
+        auto_ok, invalidated_reason = trust.check(signature, command, cwd, swap_keys)
     trust_info = {}
 
     # trust.check()'s own contract guarantees cached_secrets(signature) is
@@ -1241,7 +1462,7 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
         # the dialog can sit open for minutes while a human reads it, and
         # trust must bind to the file content they actually reviewed, not
         # to whatever it happens to contain the instant they click Allow.
-        pre_hashes = trust.referenced_file_hashes(command, cwd)
+        pre_hashes = trust.referenced_file_hashes(command, cwd, swap_keys)
         # Determine what the trust grant will actually monitor, so we can
         # warn the human BEFORE they tick the trust checkbox -- not only in
         # the tool result they see afterward.
@@ -1268,7 +1489,12 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
                                              if materialized_path else None,
                                              only_vars=only_vars,
                                              trust_note=dialog_trust_note,
-                                             files=file_pairs or None)
+                                             files=file_pairs or None,
+                                             swap=[{"path": e["key"], "names": e["names"],
+                                                    "skipped": e["skipped"],
+                                                    "git_tracked": e["git_tracked"],
+                                                    "git_ignored": e["git_ignored"]}
+                                                   for e in swap_plan] or None)
         raw_secrets = outcome["secrets"]
         if raw_secrets is None:
             result = {"applied": False, "message": "Denied by user."}
@@ -1341,9 +1567,12 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
         elif invalidated_reason:
             trust_info["trust_note"] = invalidated_reason
 
+    _swap_state = {"swapped": [], "outcome": None, "notes": []}
+
     def _finish(result: dict) -> dict:
         result.update(trust_info)
-        return result
+        return _attach_swap_outcome(result, _swap_state["swapped"], _swap_state["outcome"],
+                                    _swap_state["notes"])
 
     secrets = raw_secrets
     if only_vars is not None:
@@ -1413,6 +1642,55 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
                         "error": f"Could not restore {restore_path}: {e}"})
             restored_paths.append(restore_path)
 
+    # Swap last among the preparations, so the window with real values in
+    # the project's own file is as short as it can be, and journal each file
+    # BEFORE its first byte is written -- a crash between the two leaves an
+    # entry whose recovery finds only placeholders and does nothing, which is
+    # the harmless direction. A crash the other way round would leave real
+    # values with no record.
+    swapped = []
+    swap_notes = []
+    redact_map = dict(raw_secrets)
+    if swap_plan:
+        try:
+            index_now = store.load_index()
+            styles_all = store.load_target_styles()
+        except (OSError, UnicodeDecodeError, ValueError) as e:
+            _cleanup_restored(restored_paths)
+            if materialized_path is not None:
+                materialized_path.unlink(missing_ok=True)
+            return _finish({"applied": False, "error": str(e)})
+        for entry in swap_plan:
+            key, path = entry["key"], entry["path"]
+            try:
+                store.journal_add(key, entry["names"])
+                record = store.swap_target_file(path, entry["names"], secrets,
+                                                styles_all.get(key, {}))
+            except (OSError, ValueError, RuntimeError) as e:
+                # Includes SwapInProgress and a value with a newline. Undo
+                # whatever was already swapped, then everything else.
+                if not isinstance(e, store.SwapInProgress):
+                    try:
+                        store.journal_remove(key)
+                    except (OSError, ValueError, RuntimeError):
+                        pass
+                undo = _restore_swaps(swapped, index_now)
+                _swap_state["swapped"], _swap_state["outcome"] = swapped, undo
+                _cleanup_restored(restored_paths)
+                if materialized_path is not None:
+                    materialized_path.unlink(missing_ok=True)
+                return _finish({"applied": False, "error": f"could not swap {key}: {e}"})
+            swapped.append((key, path, record))
+            swap_notes.extend(f"{path.name}: {n}" for n in record["notes"])
+            _swap_state["swapped"], _swap_state["notes"] = swapped, swap_notes
+            # The rendered form can differ from the raw value (quotes,
+            # escapes). A command that prints the file would otherwise hand
+            # back the real value in a form the redactor does not know.
+            for line_entry in record["lines"].values():
+                rendered = line_entry["rendered_value"]
+                if rendered != secrets.get(line_entry["name"]):
+                    redact_map[f"{line_entry['name']} (as written to {path.name})"] = rendered
+
     if background:
         # Under the stdio transport this process's own stdout/stdin ARE the
         # JSON-RPC channel -- a detached child inheriting them would either
@@ -1460,7 +1738,7 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
                         "Use the OS/your own process manager to stop it later."})
 
     old_sigterm = None
-    if materialized_path is not None or restored_paths:
+    if materialized_path is not None or restored_paths or swapped:
         # `or restored_paths` is load-bearing: without it a SIGTERM during a
         # files-only run skips the handler entirely and leaves decrypted
         # private keys sitting in the working directory.
@@ -1471,6 +1749,8 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
 
     cleanup_error = None
     survivors = []
+    swap_outcome = None
+    early = None
     try:
         try:
             # stdin=DEVNULL: under the stdio transport this process's own
@@ -1482,12 +1762,21 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
             proc = subprocess.run(command, env=env, cwd=cwd, capture_output=True, text=True,
                                    stdin=subprocess.DEVNULL)
         except OSError as e:
-            return _finish({"applied": False, "error": f"could not run {command[0]!r}: {e}"})
+            # Not returned from inside the try: the result must be built
+            # AFTER the finally block below has restored the swapped files,
+            # or it could not report how that restore went.
+            early = {"applied": False, "error": f"could not run {command[0]!r}: {e}"}
         except (KeyboardInterrupt, _Terminated):
-            return _finish({"applied": False, "message": "Interrupted."})
+            early = {"applied": False, "message": "Interrupted."}
     finally:
         if old_sigterm is not None:
             signal.signal(signal.SIGTERM, old_sigterm)
+        # Swapped files first: they are the project's own .env, the one
+        # place a leftover is most likely to be committed or synced. Each
+        # step here is independent -- a failure in one never skips the next.
+        if swapped:
+            swap_outcome = _restore_swaps(swapped, index_now)
+            _swap_state["outcome"] = swap_outcome
         if materialized_path is not None:
             try:
                 materialized_path.unlink(missing_ok=True)
@@ -1495,14 +1784,25 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
                 cleanup_error = str(e)
         survivors = _cleanup_restored(restored_paths)
 
+    if early is not None:
+        if cleanup_error:
+            early["warning"] = (f"Could not delete {materialized_path}, it still contains "
+                                f"real secret values -- remove it by hand: {cleanup_error}")
+        if survivors:
+            early["files_warning"] = (
+                "Could not delete the following decrypted file(s) -- they still contain "
+                "real secret contents, remove them by hand: "
+                + ", ".join(str(p) for p in survivors))
+        return _finish(early)
+
     # Redact BEFORE the [-4000:] slice so a secret value that straddles the
     # cut point is still caught. The full output is redacted first, then
     # truncated -- the truncation can split a [REDACTED:NAME] marker but
     # cannot leave a raw secret value visible.
     _stdout_full = proc.stdout or ""
     _stderr_full = proc.stderr or ""
-    _stdout_redacted, _stdout_skipped = _redact_secrets(_stdout_full, raw_secrets)
-    _stderr_redacted, _stderr_skipped = _redact_secrets(_stderr_full, raw_secrets)
+    _stdout_redacted, _stdout_skipped = _redact_secrets(_stdout_full, redact_map)
+    _stderr_redacted, _stderr_skipped = _redact_secrets(_stderr_full, redact_map)
     _all_skipped = sorted(set(_stdout_skipped) | set(_stderr_skipped))
     result = {
         "applied": True,
@@ -1531,11 +1831,55 @@ def _run_with_env_impl(command: list, materialize: Optional[str], background: bo
     return _finish(result)
 
 
+def _attach_swap_outcome(result: dict, swapped: list, swap_outcome: Optional[dict],
+                         swap_notes: list) -> dict:
+    """Report the swap the way the rest of this tool reports leftovers: by
+    name, loudly, never silently. Names only -- no field here may ever
+    carry a value or a line."""
+    if not swapped:
+        return result
+    result["swapped"] = {key: record["swapped"] for key, _p, record in swapped}
+    skipped = {key: record["skipped"] for key, _p, record in swapped if record["skipped"]}
+    if skipped:
+        result["swap_skipped"] = skipped
+    if swap_notes:
+        result["swap_note"] = "; ".join(swap_notes)
+    if swap_outcome is None:
+        return result
+    if swap_outcome["conflicts"]:
+        result["swap_restore_conflicts"] = swap_outcome["conflicts"]
+        result["swap_warning"] = (
+            "These variables were changed by something else while the command ran, so "
+            "their lines were left as they are -- if one still holds a real value, put "
+            "the placeholder back by hand: "
+            + "; ".join(f"{k}: {', '.join(v)}" for k, v in swap_outcome["conflicts"].items()))
+    if swap_outcome["failed"]:
+        result["swap_restore_failed"] = swap_outcome["failed"]
+        result["swap_warning"] = (result.get("swap_warning", "") + " " if "swap_warning"
+                                  in result else "") + (
+            "The placeholders could NOT be written back to these files -- they still "
+            "contain REAL values. The swap journal keeps the entry, so the next tool call "
+            "(any tool, any session) retries the restore; you can also call vault_status "
+            "to trigger it now: "
+            + "; ".join(f"{k}: {v}" for k, v in swap_outcome["failed"].items()))
+    if swap_outcome["verify_failed"]:
+        result["swap_verify_failed"] = swap_outcome["verify_failed"]
+        result["swap_warning"] = (result.get("swap_warning", "") + " " if "swap_warning"
+                                  in result else "") + (
+            "After the restore, a real value was STILL found in the file for: "
+            + "; ".join(f"{k}: {', '.join(v)}" for k, v in
+                        swap_outcome["verify_failed"].items())
+            + " -- something rewrote the file after the placeholders went back (an editor "
+              "saving a stale buffer is the usual cause). Check it by hand.")
+    return result
+
+
 @mcp.tool()
 def run_with_env(command: list[str], materialize: Optional[str] = None,
                   background: bool = False, cwd: Optional[str] = None,
                   only_vars: Optional[list[str]] = None,
-                  files: Optional[list[str]] = None) -> dict:
+                  files: Optional[list[str]] = None,
+                  swap: Optional[list[str]] = None) -> dict:
     """Run a real command with the vault's real secret values injected as
     environment variables. Prompts once for the master password via a GUI
     (which also lists which variable names -- never values -- will be
@@ -1588,9 +1932,35 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     prints one hands you the real secret verbatim, so never write one that
     does.
 
+    swap: paths of already-migrated .env files (registered install_migrate
+    targets, resolved relative to cwd) whose placeholder lines are rewritten
+    with the REAL values for the lifetime of this one foreground command and
+    restored the instant it exits -- including on error, Ctrl+C or SIGTERM,
+    and, if this server dies, by the next tool call in any session via a
+    journal written before the first byte lands. This is materialize at the
+    canonical path, for the consumers nothing else reaches: loaders that
+    override the environment from the file (load_dotenv(override=True),
+    godotenv.Overload, `source .env`, direnv), tools hard-wired to read
+    `.env` (compose env_file:, docker run --env-file .env, kubectl
+    --from-env-file, an IDE's envFile) and test harnesses that scrub the
+    child environment before a loader runs. Every mainstream loader lets
+    the environment win by default, so try plain injection first. Only
+    lines whose value is currently a vault placeholder are touched; each
+    value is written back in the quoting its original line used (recorded
+    at migration), because no quoting works for every parser. only_vars
+    scopes the swap exactly as it scopes injection. Not compatible with
+    background=True. The dialog names every file, the number of values,
+    and whether git tracks it -- do not commit, stash or `git add -A` while
+    the command runs. While it runs the file is readable by anything that
+    can read files, including you: never read it. Results report `swapped`
+    and, if anything could not be put back, `swap_restore_conflicts`,
+    `swap_restore_failed` or `swap_verify_failed` -- stop and show those to
+    the user. See docs/env-consumption-research.md for which consumer needs
+    which mode.
+
     Trusted commands: the dialog offers a "Trust this exact command for
     the rest of this session" checkbox. If checked, this exact
-    (command, cwd, only_vars, materialize, background) combination
+    (command, cwd, only_vars, materialize, background, files, swap) combination
     auto-runs on every later call with no dialog at all, as long as every
     file named directly on the command line (e.g. a compose file named
     after -f) hasn't changed, and the vault itself hasn't changed (a
@@ -1604,8 +1974,23 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     README.md's "Trusted commands" section, which also covers what this
     can't catch -- e.g. a Dockerfile only referenced indirectly via a
     compose file's `context:`)."""
-    return _run_with_env_impl(command, materialize, background, cwd, only_vars, files)
+    return _run_with_env_impl(command, materialize, background, cwd, only_vars, files, swap)
 
 
 if __name__ == "__main__":
+    # A swap left behind by a server that died is restored here, before the
+    # first tool call can even arrive, and the report is stashed for the
+    # first result that can carry it. `--recover` does only that and exits,
+    # so a user can clean up from a terminal without opening a chat.
+    try:
+        _startup_recovery.extend(store.recover_stale_swaps())
+    except (OSError, ValueError, RuntimeError) as _e:
+        _startup_recovery.append({"error": f"could not process swap.journal.json: {_e}"})
+    if "--recover" in sys.argv[1:]:
+        import json as _json
+        print(_json.dumps(_startup_recovery or [{"message": "nothing to recover"}], indent=2))
+        sys.exit(0)
+    if _startup_recovery:
+        print(f"llm-env-vault: restored {len(_startup_recovery)} swapped file(s) left by a "
+              f"previous server -- details in the next tool result.", file=sys.stderr)
     mcp.run()

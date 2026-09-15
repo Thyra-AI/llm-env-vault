@@ -108,9 +108,10 @@ def fake_dialog(approve=True, trust_it=False):
     calls = []
 
     def wrapper(command_str, materialize_path=None, only_vars=None, trust_note=None,
-                files=None):
+                files=None, swap=None):
         calls.append({"command_str": command_str, "materialize_path": materialize_path,
-                       "only_vars": only_vars, "trust_note": trust_note, "files": files})
+                       "only_vars": only_vars, "trust_note": trust_note, "files": files,
+                       "swap": swap})
         if not approve:
             return {"secrets": None, "trust": False}
         secrets = store.load_secrets(TEST_PASSWORD)
