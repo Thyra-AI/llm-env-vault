@@ -233,7 +233,11 @@ def test_restore_writes_in_place_when_replace_is_blocked() -> None:
         return _skip("os.replace sharing violation is Windows-specific")
     with workspace() as (project, env_path):
         record = store.swap_target_file(env_path, ["PLAIN"], SECRETS, {})
-        holder = subprocess.Popen([sys.executable, "-c",
+        # The base interpreter, not the venv launcher: the launcher's real
+        # python is a grandchild, and killing the launcher would leave it
+        # holding the file through the temp dir's cleanup.
+        python = getattr(sys, "_base_executable", None) or sys.executable
+        holder = subprocess.Popen([python, "-c",
                                    "import sys,time; f=open(sys.argv[1]); time.sleep(20)",
                                    str(env_path)])
         try:
@@ -430,6 +434,32 @@ def test_plain_runs_are_not_bound_but_swap_runs_are() -> None:
         finally:
             mcp_server._run_command = original
         assert seen == [False, True, True]
+
+
+def test_watchdog_never_touches_a_closed_job_and_ends_lingering_descendants() -> None:
+    """The main thread closes the Job the moment communicate() returns; the
+    watchdog wakes up two seconds later. Its terminate must be a no-op on a
+    closed job (a reused handle value could be an unrelated object), and a
+    descendant the command left behind must still be gone -- on Windows via
+    the job close, on POSIX via the watchdog's killpg after the leader was
+    reaped (which a poll() guard used to make unreachable)."""
+    # Many fast runs: the watchdog fires after close every single time.
+    for _ in range(8):
+        r = procs.run_bound([sys.executable, "-c", "print(1)"], os.environ.copy(), None, 10)
+        assert r.returncode == 0 and r.stdout.strip() == "1"
+    # A command that leaves a grandchild holding the output pipe and exits.
+    code = ("import subprocess,sys\n"
+            "g=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'])\n"
+            "print('grandchild', g.pid, flush=True)\n")
+    t = time.time()
+    r = procs.run_bound([sys.executable, "-c", code], os.environ.copy(), None, 30)
+    elapsed = time.time() - t
+    gpid = int(r.stdout.split()[1])
+    assert r.returncode == 0 and not r.timed_out
+    assert elapsed < 15, f"tool blocked on the orphan's pipe for {elapsed:.0f}s"
+    time.sleep(procs._DESCENDANT_GRACE_SECONDS + 1)
+    if r.binding in ("job", "session"):
+        assert procs.process_start_time(gpid)[0] is False, "descendant outlived the command"
 
 
 _CHILD_SWAPPER = r"""
