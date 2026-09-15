@@ -102,7 +102,13 @@ FMK_BYTES = 32
 ENV_LINE_RE = re.compile(
     r'^(?P<indent>\s*)(?P<export>export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*)$'
 )
-PLACEHOLDER_VALUE_RE = re.compile(r'^"?value \d+"?$')
+# `value ?` is the PENDING marker: a placeholder whose number could not be
+# looked up when it was written (swap recovery with an unreadable index, or a
+# name that had left the vault). It carries no secret and is renumbered -- or
+# commented out, if the name is really gone -- by the next resync_targets.
+PLACEHOLDER_VALUE_RE = re.compile(r'^(?:"value (?:\d+|\?)"|value (?:\d+|\?))$')
+PENDING_VALUE_RE = re.compile(r'^(?:"value \?"|value \?)$')
+PENDING_PLACEHOLDER = '"value ?"'
 
 # Well-known OS/runtime-critical environment variable names.  Vaulting a
 # secret under one of these names and then calling run_with_env will
@@ -925,8 +931,61 @@ _UNQUOTED_SAFE_CHARS = frozenset(
     chr(c) for c in range(0x21, 0x7F) if chr(c) not in "#$'\"`\\")
 
 
+# A .env is a few KiB. A registered path replaced by something huge is not
+# one, and reading it whole into memory on every vault_status is a DoS lever.
+_MAX_ENV_BYTES = 1024 * 1024
+
+
 class SwapInProgress(ValueError):
     """Another live server process has real values written into this file."""
+
+
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _looks_like_unc(text: str) -> bool:
+    t = text.replace("/", "\\")
+    return t.startswith("\\\\")
+
+
+def validate_target_key(key, names, targets: dict) -> str:
+    """The one gate between agent-writable input and the filesystem.
+
+    A path from swap.journal.json or from a swap= argument is acted on only
+    if it is a plain, absolute, LOCAL path that is already a registered
+    install_migrate target, and the names are that target's own. Returns
+    the registry's own key string so every later step uses one spelling.
+
+    String checks come first and touch nothing on disk: a UNC path
+    (`\\\\host\\share\\.env`) would make the very first stat open SMB to
+    `host` with the user's credentials -- write-a-JSON-file turned into
+    network egress. The registry check confines recovery and swap to files
+    the vault was already trusted to manage; anything else is refused,
+    reported, and never opened.
+    """
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError("path must be a non-empty string")
+    if any(ord(c) < 0x20 or c == "\x7f" for c in key):
+        raise ValueError(f"path contains control characters: {key!r}")
+    if _looks_like_unc(key) or key.startswith(("\\\\?\\", "\\\\.\\", "//?/", "//./")):
+        raise ValueError(f"{key} is a UNC or device path -- only local drive paths can be "
+                         f"managed (a mapped drive letter is fine)")
+    if not os.path.isabs(key):
+        raise ValueError(f"{key} is not an absolute path")
+    if os.name == "nt" and not _WINDOWS_DRIVE_RE.match(key):
+        raise ValueError(f"{key} is not a drive-letter path")
+    by_norm = {os.path.normcase(k): k for k in targets}
+    registry_key = by_norm.get(os.path.normcase(key))
+    if registry_key is None:
+        raise ValueError(f"{key} is not a registered install_migrate target")
+    if not isinstance(names, (list, tuple, set)) or not all(isinstance(n, str) for n in names):
+        raise ValueError("names must be a list of strings")
+    for n in names:
+        validate_var_name(n)
+    extra = sorted(set(names) - set(targets[registry_key]))
+    if extra:
+        raise ValueError(f"{', '.join(extra)} are not registered for {registry_key}")
+    return registry_key
 
 
 def _styles_path() -> Path:
@@ -1015,8 +1074,21 @@ def render_swap_value(value: str, style: Optional[str]) -> tuple:
     if "\n" in value or "\r" in value:
         raise ValueError("value contains a newline -- there is no single-line .env "
                          "representation for it, so it cannot be swapped into a file.")
-    if style == '"':
+    if style == '"' and not _ends_in_odd_backslashes(value):
         return '"' + value.replace('"', '\\"') + '"', None
+    if style == '"':
+        # `"abc\"` is an unterminated string to every dotenv parser: the
+        # trailing backslash escapes the closing quote. Single quotes carry
+        # it literally; if the value also holds a `'`, double every backslash
+        # (python-dotenv, dotenvy and phpdotenv unescape `\\`; node's dotenv
+        # does not, and the note says so).
+        if "'" not in value:
+            return ("'" + value + "'",
+                    "ends in a backslash, which would escape a closing double quote; "
+                    "written single-quoted instead")
+        return ('"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"',
+                "ends in a backslash and contains a single quote; written double-quoted "
+                "with every backslash doubled -- node's dotenv delivers them doubled")
     if style == "'":
         return "'" + value.replace("'", "\\'") + "'", None
     if style == "" and value and value == value.strip() and not re.search(r"\s#", value):
@@ -1033,8 +1105,18 @@ def render_swap_value(value: str, style: Optional[str]) -> tuple:
             "and the value contains a single quote); node's dotenv delivers \\\" verbatim")
 
 
-def _placeholder_line(prefix: str, name: str, index: dict) -> str:
-    return f'{prefix}{name}="value {index[name]}"'
+def _ends_in_odd_backslashes(value: str) -> bool:
+    n = len(value) - len(value.rstrip("\\"))
+    return n % 2 == 1
+
+
+def _placeholder_line(prefix: str, name: str, index: Optional[dict]) -> str:
+    """The canonical placeholder line, or the pending marker when the number
+    is unknown -- a line, not a comment, so resync_targets can finish the job
+    without anyone un-commenting anything by hand."""
+    if index and name in index:
+        return f'{prefix}{name}="value {index[name]}"'
+    return f"{prefix}{name}={PENDING_PLACEHOLDER}"
 
 
 def _scan_env_bytes(path: Path) -> tuple:
@@ -1048,6 +1130,16 @@ def _scan_env_bytes(path: Path) -> tuple:
     so a restore that is not byte-exact would revoke a trusted command on
     every single run. Only \\n, \\r\\n and \\r split lines here.
     """
+    if _is_link(path):
+        # Read follows the link; os.replace would replace the LINK with a
+        # regular file holding real values, and the in-place restore
+        # fallback would write THROUGH it into whatever it points at. A
+        # registered target that has become a link is refused everywhere.
+        raise ValueError(f"{path} is a symlink or junction -- refusing to read or rewrite "
+                         f"a managed file through a link.")
+    if path.stat().st_size > _MAX_ENV_BYTES:
+        raise ValueError(f"{path} is {path.stat().st_size} bytes -- larger than any .env "
+                         f"this tool will parse ({_MAX_ENV_BYTES} bytes).")
     raw = path.read_bytes()
     bom = b""
     if raw.startswith(b"\xef\xbb\xbf"):
@@ -1064,6 +1156,17 @@ def _scan_env_bytes(path: Path) -> tuple:
     return bom, lines, texts
 
 
+def _is_link(path: Path) -> bool:
+    """Symlink on any platform; junction or any other reparse point on Windows."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    return bool(getattr(st, "st_reparse_tag", 0))
+
+
 def _terminator(line: bytes) -> bytes:
     return line[len(line.rstrip(b"\r\n")):]
 
@@ -1076,14 +1179,17 @@ def preview_swap(path: Path, names) -> dict:
     file that cannot be rewritten safely."""
     names = set(names)
     _bom, _lines, texts = _scan_env_bytes(path)
-    seen, placeholder, other = {}, set(), set()
+    seen, placeholder, pending, other = {}, set(), set(), set()
     for text in texts:
         m = ENV_LINE_RE.match(text)
         if not m or m.group("name") not in names:
             continue
         name = m.group("name")
         seen[name] = seen.get(name, 0) + 1
-        if PLACEHOLDER_VALUE_RE.match(m.group("value").strip()):
+        value = m.group("value").strip()
+        if PENDING_VALUE_RE.match(value):
+            pending.add(name)
+        elif PLACEHOLDER_VALUE_RE.match(value):
             placeholder.add(name)
         else:
             other.add(name)
@@ -1091,6 +1197,9 @@ def preview_swap(path: Path, names) -> dict:
         "swappable": sorted(placeholder),
         "not_in_file": sorted(names - set(seen)),
         "not_placeholder": sorted(other - placeholder),
+        # `value ?` lines: no secret, but not finished either -- resync
+        # numbers them. Reported separately so vault_status can show them.
+        "pending": sorted(pending - placeholder - other),
         "duplicates": sorted(n for n, c in seen.items() if c > 1),
     }
 
@@ -1136,7 +1245,7 @@ def swap_target_file(path: Path, names, secrets: dict, styles: dict) -> dict:
         prefix = f'{m.group("indent")}{m.group("export") or ""}'
         new_line = f"{prefix}{name}={rendered}".encode("utf-8") + _terminator(line)
         record["lines"][i] = {"name": name, "original": line, "rendered_line": new_line,
-                              "rendered_value": rendered}
+                              "rendered_value": rendered, "secret": secrets[name]}
         out.append(new_line)
     swapped = sorted({e["name"] for e in record["lines"].values()})
     record["swapped"] = swapped
@@ -1154,12 +1263,23 @@ def swap_target_file(path: Path, names, secrets: dict, styles: dict) -> dict:
     return record
 
 
-def _write_with_retries(path: Path, data: bytes, mode: int) -> Optional[str]:
+def _write_with_retries(path: Path, data: bytes, mode: int,
+                        allow_in_place: bool = False) -> Optional[str]:
     """_atomic_write_bytes, retried. Returns None on success or the last
     error text. The restore is the one write that must not give up
     easily: a transient lock from an editor, indexer or AV that fires the
     instant the child exits is exactly the moment the placeholders need
-    to go back."""
+    to go back.
+
+    allow_in_place: after the atomic attempts are exhausted, truncate and
+    rewrite the existing file in place. On Windows os.replace fails while
+    any process holds the file open without FILE_SHARE_DELETE -- which is
+    every CPython open() -- so an orphaned dev server that still has .env
+    open would otherwise defeat every restore attempt, forever. For a
+    RESTORE, success is the property that matters: a torn placeholder line
+    is far better than an intact real one. Never used for the swap write
+    itself, where a torn real value would be the worst of both.
+    """
     delay = 0.05
     last = None
     for _attempt in range(10):
@@ -1170,7 +1290,18 @@ def _write_with_retries(path: Path, data: bytes, mode: int) -> Optional[str]:
             last = str(e)
             time.sleep(delay)
             delay = min(delay * 2, 0.5)
-    return last
+    if not allow_in_place:
+        return last
+    try:
+        with open(path, "r+b") as f:
+            f.seek(0)
+            f.truncate()
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        return None
+    except OSError as e:
+        return f"{last}; in-place rewrite also failed: {e}"
 
 
 def unswap_target_file(path: Path, record: dict, index: dict) -> dict:
@@ -1218,7 +1349,7 @@ def unswap_target_file(path: Path, record: dict, index: dict) -> dict:
                 continue
             m = ENV_LINE_RE.match(text)
             if m and m.group("name") == entry["name"] and \
-                    m.group("value").strip() == entry["rendered_value"]:
+                    _carries_value(m.group("value"), entry):
                 hit = (j, m)
                 break
         if hit is None:
@@ -1226,13 +1357,8 @@ def unswap_target_file(path: Path, record: dict, index: dict) -> dict:
             continue
         j, m = hit
         prefix = f'{m.group("indent")}{m.group("export") or ""}'
-        if entry["name"] in index:
-            out[j] = _placeholder_line(prefix, entry["name"], index).encode("utf-8") + \
-                _terminator(lines[j])
-        else:
-            out[j] = (f'{m.group("indent")}# [llm-env-vault] {entry["name"]} was removed '
-                      f'from the vault during a swap run; value cleared').encode("utf-8") + \
-                _terminator(lines[j])
+        out[j] = _placeholder_line(prefix, entry["name"], index).encode("utf-8") + \
+            _terminator(lines[j])
         done.add(j)
     restored_names = sorted({record["lines"][i]["name"] for i in record["lines"]
                              if record["lines"][i]["name"] not in result["conflicts"]})
@@ -1243,7 +1369,7 @@ def unswap_target_file(path: Path, record: dict, index: dict) -> dict:
             mode = stat.S_IMODE(path.stat().st_mode)
         except OSError:
             mode = 0o644
-        err = _write_with_retries(path, bom + b"".join(out), mode)
+        err = _write_with_retries(path, bom + b"".join(out), mode, allow_in_place=True)
         if err:
             result["error"] = err
             result["restored"] = []
@@ -1255,15 +1381,65 @@ def unswap_target_file(path: Path, record: dict, index: dict) -> dict:
     except (OSError, ValueError):
         result["verify_failed"] = list(restored_names)
         return result
-    rendered = {e["name"]: e["rendered_value"] for e in record["lines"].values()}
-    for text in texts_after:
+    by_name = {e["name"]: e for e in record["lines"].values()}
+    result["secret_seen_elsewhere"] = []
+    for lineno, text in enumerate(texts_after, start=1):
         m = ENV_LINE_RE.match(text)
-        if m and m.group("name") in rendered and \
-                m.group("value").strip() == rendered[m.group("name")]:
+        if m and m.group("name") in by_name and \
+                _carries_value(m.group("value"), by_name[m.group("name")], raw_line=text):
             if m.group("name") not in result["verify_failed"]:
                 result["verify_failed"].append(m.group("name"))
+            continue
+        # Name-agnostic: the command could have written the value under a
+        # different name, or into a comment. Report the line number only --
+        # never the line -- and leave it: it is not a line the vault wrote,
+        # so nothing here knows what it should become.
+        for entry in by_name.values():
+            secret = entry["secret"]
+            if (len(secret) >= 8 and secret in text) or \
+                    (m and _unquote(m.group("value")) == secret):
+                result["secret_seen_elsewhere"].append(
+                    {"line": lineno, "name": entry["name"]})
+                break
     result["verify_failed"].sort()
     return result
+
+
+def _dotenv_decode(raw_value: str) -> str:
+    """What a dotenv-family parser delivers for a double-quoted value that a
+    formatter re-escaped: `\\\\` -> `\\`, `\\"` -> `"`, `\\n` -> newline. _unquote
+    deliberately keeps a user's `\\n` as two characters (it mirrors what the
+    vault stored at migration); this is the other reading, used only to
+    recognise a secret in a line something else rewrote."""
+    v = raw_value.strip()
+    if len(v) >= 2 and v[0] == '"' and _find_closing_quote(v, '"') == len(v) - 1:
+        inner = v[1:-1]
+        return re.sub(r"\\(.)", lambda m: {"n": "\n", "t": "\t", "r": "\r"}.get(
+            m.group(1), m.group(1)), inner)
+    return _unquote(raw_value)
+
+
+def _carries_value(raw_value: str, entry: dict, raw_line: Optional[str] = None) -> bool:
+    """Does this line still hold the swapped secret, in ANY spelling?
+
+    Matching the rendered form alone is the blind spot the 1.6.0 review
+    found: a formatter that re-quotes `SECRET="abc"` to `SECRET=abc` during
+    the run made the line look like a user edit (left alone, journal
+    released) while verify, comparing the same rendered form, stayed silent.
+    So compare the VALUE: the rendered form, or what a dotenv parser would
+    deliver (_unquote), or -- for verify only, on values long enough not to
+    false-positive inside an unrelated token -- the raw secret anywhere in
+    the line.
+    """
+    secret = entry["secret"]
+    stripped = raw_value.strip()
+    if stripped == entry["rendered_value"]:
+        return True
+    if _unquote(raw_value) == secret or _dotenv_decode(raw_value) == secret:
+        return True
+    if raw_line is not None and len(secret) >= 8 and secret in raw_line:
+        return True
+    return False
 
 
 def recover_swap_file(path: Path, names, index: dict, started: float) -> dict:
@@ -1278,11 +1454,15 @@ def recover_swap_file(path: Path, names, index: dict, started: float) -> dict:
     report = {"path": str(path), "restored": [], "cleared": [], "temp_files_removed": [],
               "error": None, "missing": False}
     names = set(names)
+    # Every `.<name>.<random>.tmp` beside the target is ours and holds a
+    # full copy of the file as it was being written. There is no legitimate
+    # one to preserve, so age is not a criterion -- the earlier mtime check
+    # broke on FAT/exFAT's 2-second granularity.
     try:
         pattern = f".{path.name}.*.tmp"
         for tmp in path.parent.glob(pattern):
             try:
-                if tmp.is_file() and tmp.stat().st_mtime >= started - 1:
+                if tmp.is_file():
                     tmp.unlink()
                     report["temp_files_removed"].append(str(tmp))
             except OSError:
@@ -1307,13 +1487,13 @@ def recover_swap_file(path: Path, names, index: dict, started: float) -> dict:
             continue
         name = m.group("name")
         prefix = f'{m.group("indent")}{m.group("export") or ""}'
-        if name in index:
-            out[i] = _placeholder_line(prefix, name, index).encode("utf-8") + _terminator(lines[i])
+        out[i] = _placeholder_line(prefix, name, index).encode("utf-8") + _terminator(lines[i])
+        if index and name in index:
             report["restored"].append(name)
         else:
-            out[i] = (f'{m.group("indent")}# [llm-env-vault] {name} was removed from the '
-                      f'vault during a swap run; value cleared').encode("utf-8") + \
-                _terminator(lines[i])
+            # `NAME="value ?"`: the secret is gone from the line and the
+            # next resync numbers it (or comments it out if the name really
+            # left the vault). Either way nothing needs a human's editor.
             report["cleared"].append(name)
         changed = True
     if changed:
@@ -1321,7 +1501,7 @@ def recover_swap_file(path: Path, names, index: dict, started: float) -> dict:
             mode = stat.S_IMODE(path.stat().st_mode)
         except OSError:
             mode = 0o644
-        err = _write_with_retries(path, bom + b"".join(out), mode)
+        err = _write_with_retries(path, bom + b"".join(out), mode, allow_in_place=True)
         if err:
             report["error"] = err
             report["restored"], report["cleared"] = [], []
@@ -1337,12 +1517,19 @@ def _journal_lock():
 
 
 def _load_journal() -> dict:
-    """{path: entry}. Raises ValueError on a malformed journal -- unlike the
-    styles file, a journal that cannot be read means real values may be
-    on disk with no way to find them, and that has to be said out loud."""
+    """{path: entry} -- the validated entries only. See _load_journal_ex."""
+    return _load_journal_ex()[0]
+
+
+def _load_journal_ex() -> tuple:
+    """(entries, rejected). Raises ValueError on a malformed journal --
+    unlike the styles file, a journal that cannot be read means real values
+    may be on disk with no way to find them, and that has to be said out
+    loud. Entries whose path or names fail validate_target_key are returned
+    in `rejected` as {path, reason} and are never acted on."""
     path = _journal_path()
     if not path.exists():
-        return {}
+        return {}, []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
@@ -1368,18 +1555,41 @@ def _load_journal() -> dict:
         if entry.get("state") not in ("active", "restore_failed"):
             raise ValueError("swap.journal.json is malformed: bad state.")
         entries[key] = entry
-    return entries
+    # Path/name validation against the registry, per entry. targets.json
+    # being unreadable is fatal here on purpose: without it nothing can be
+    # confirmed as a registered file, so nothing is safe to touch.
+    targets = load_targets()
+    valid, rejected = {}, []
+    for key, entry in entries.items():
+        try:
+            registry_key = validate_target_key(key, entry["names"], targets)
+        except ValueError as e:
+            rejected.append({"path": key, "reason": str(e), "entry": entry})
+            continue
+        valid[registry_key] = entry
+    return valid, rejected
 
 
-def _save_journal(entries: dict) -> None:
+def _save_journal(entries: dict, rejected: Optional[list] = None) -> None:
+    """Rejected entries are QUARANTINED, not dropped: they stay in the file
+    under their original key so every later call reports them again. The
+    case that matters is a target that was removed from targets.json while
+    it held real values -- forgetting it after one report would be exactly
+    the wrong reflex, and a journal the agent can edit must not offer a
+    one-shot way to make a record disappear. `python mcp_server.py
+    --recover --drop-rejected` is the human's way to clear them."""
     path = _journal_path()
-    if not entries:
+    merged = dict(entries)
+    for item in rejected or ():
+        if item["path"] not in merged:
+            merged[item["path"]] = item["entry"]
+    if not merged:
         try:
             path.unlink()
         except FileNotFoundError:
             pass
         return
-    _atomic_write_text(path, json.dumps({"version": 1, "entries": entries},
+    _atomic_write_text(path, json.dumps({"version": 1, "entries": merged},
                                         indent=2, sort_keys=True) + "\n")
 
 
@@ -1398,7 +1608,8 @@ def journal_add(path_key: str, names) -> None:
     the same file; a stale entry (dead owner) is simply replaced -- its
     recovery already happened, or happens on the next recover call."""
     with _journal_lock():
-        entries = _load_journal()
+        entries, rejected = _load_journal_ex()
+        path_key = validate_target_key(path_key, names, load_targets())
         existing = entries.get(path_key)
         if existing and existing["state"] == "active" and _entry_is_live(existing):
             raise SwapInProgress(
@@ -1413,15 +1624,15 @@ def journal_add(path_key: str, names) -> None:
             "started": time.time(),
             "state": "active",
         }
-        _save_journal(entries)
+        _save_journal(entries, rejected)
 
 
 def journal_remove(path_key: str) -> None:
     with _journal_lock():
-        entries = _load_journal()
+        entries, rejected = _load_journal_ex()
         if path_key in entries:
             del entries[path_key]
-            _save_journal(entries)
+        _save_journal(entries, rejected)
 
 
 def journal_mark_restore_failed(path_key: str) -> None:
@@ -1429,10 +1640,10 @@ def journal_mark_restore_failed(path_key: str) -> None:
     call in any server retries the restore regardless of whether this
     process is still alive."""
     with _journal_lock():
-        entries = _load_journal()
+        entries, rejected = _load_journal_ex()
         if path_key in entries:
             entries[path_key]["state"] = "restore_failed"
-            _save_journal(entries)
+        _save_journal(entries, rejected)
 
 
 def live_swaps() -> dict:
@@ -1446,7 +1657,7 @@ def live_swaps() -> dict:
             if e["state"] == "active" and _entry_is_live(e)}
 
 
-def recover_stale_swaps() -> list:
+def recover_stale_swaps(force: bool = False, drop_rejected: bool = False) -> list:
     """Restore every journaled swap whose owner is gone or whose own restore
     failed. Returns one report per entry handled (empty when there is
     nothing to do -- the common case, answered by a single stat). Live
@@ -1457,31 +1668,71 @@ def recover_stale_swaps() -> list:
     run_with_env, vault_status, resync_targets, install_migrate and server
     start -- so the window between a crash and the restore is one tool
     call, whichever tool that is.
+
+    force: treat every entry as stale (`python mcp_server.py --recover
+    --force`). The human's exit from an entry whose owner pid exists but
+    cannot be inspected: journal_add refuses, resync skips, migrate refuses
+    and a plain recover waits forever. Worst case is clobbering a run that
+    really is live -- never a leak -- and a person at a terminal is the
+    right authority for that call.
+
+    Entries that fail validate_target_key are reported as rejected and
+    dropped: they were never something this vault could act on, and keeping
+    them would only re-report forever. An unreadable vault index is
+    retried for ~2 s (a transient lock from another server or an indexer);
+    if it stays unreadable the lines are rewritten to the pending marker
+    rather than left holding real values -- leaking is the worse error --
+    and reported so the user knows a resync will finish the job.
     """
     if not _journal_path().exists():
         return []
     reports = []
     with _journal_lock():
-        entries = _load_journal()
-        try:
-            index = load_index()
-        except (OSError, UnicodeDecodeError, ValueError) as e:
-            index = {}
-            index_error = str(e)
-        else:
-            index_error = None
+        entries, rejected = _load_journal_ex()
+        for item in rejected:
+            reports.append({"path": item["path"], "rejected": True, "reason": item["reason"],
+                            "names": list(item["entry"].get("names", [])),
+                            "restored": [], "cleared": [], "temp_files_removed": [],
+                            "error": None, "missing": False,
+                            "note": "quarantined: not acted on; check this file by hand, "
+                                    "then clear with `python mcp_server.py --recover "
+                                    "--drop-rejected`"})
+        if drop_rejected:
+            rejected = []
+        index, index_error = None, None
+        for _attempt in range(20):
+            try:
+                index = load_index()
+                index_error = None
+                break
+            except (OSError, UnicodeDecodeError, ValueError) as e:
+                index_error = str(e)
+                time.sleep(0.1)
         for key in sorted(entries):
             entry = entries[key]
-            if entry["state"] == "active" and _entry_is_live(entry):
+            if entry["state"] == "active" and not force and _entry_is_live(entry):
+                if entry["pid"] == os.getpid() and _file_is_all_placeholders(Path(key),
+                                                                              entry["names"]):
+                    # Our own leftover: the restore succeeded but the
+                    # bookkeeping after it did not (lock contention). Drop it
+                    # now, or the other server refuses this file until we
+                    # exit.
+                    del entries[key]
+                    reports.append({"path": key, "leftover_entry_removed": True,
+                                    "restored": [], "cleared": [], "temp_files_removed": [],
+                                    "error": None, "missing": False})
                 continue
             report = recover_swap_file(Path(key), entry["names"], index, entry["started"])
             report["names"] = list(entry["names"])
             report["owner_pid"] = entry["pid"]
-            report["reason"] = ("its restore had failed" if entry["state"] == "restore_failed"
+            report["reason"] = ("forced" if force else
+                                "its restore had failed" if entry["state"] == "restore_failed"
                                 else "the server that wrote it is no longer running")
-            if index_error and not index:
-                report["error"] = (report["error"] or "") + \
-                    f" (vault index unreadable: {index_error})"
+            if index_error:
+                report["pending_index"] = (
+                    f"vault_index.json could not be read ({index_error}); the lines were "
+                    f"written as NAME=\"value ?\" -- call resync_targets once it is readable "
+                    f"to number them")
             if report["error"]:
                 # Keep the entry so the next call tries again; flag it so
                 # liveness of the (possibly reused) pid is never consulted.
@@ -1489,8 +1740,17 @@ def recover_stale_swaps() -> list:
             else:
                 del entries[key]
             reports.append(report)
-        _save_journal(entries)
+        _save_journal(entries, rejected)
     return reports
+
+
+def _file_is_all_placeholders(path: Path, names) -> bool:
+    """True if no line for `names` holds anything but a placeholder."""
+    try:
+        preview = preview_swap(path, names)
+    except (OSError, ValueError):
+        return False
+    return not preview["not_placeholder"]
 
 
 # Coarsens vault.enc's ciphertext length to a multiple of this many bytes

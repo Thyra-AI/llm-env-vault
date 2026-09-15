@@ -119,10 +119,10 @@ def fake_dialog(approve=True, trust_it=False):
     calls = []
 
     def wrapper(command_str, materialize_path=None, only_vars=None, trust_note=None,
-                files=None, swap=None):
+                files=None, swap=None, timeout=None, **kwargs):
         calls.append({"command_str": command_str, "only_vars": only_vars,
                       "trust_note": trust_note, "files": files, "swap": swap,
-                      "materialize_path": materialize_path})
+                      "materialize_path": materialize_path, "timeout": timeout, **kwargs})
         if not approve:
             return {"secrets": None, "trust": False}
         secrets = store.load_secrets(TEST_PASSWORD)
@@ -142,23 +142,19 @@ def stub_run(observer=None, returncode=0, raise_exc=None):
     """Replace subprocess.run inside mcp_server. `observer(env, cwd)` is
     called at the moment the command would run -- i.e. while the swap is
     in effect -- and may return text to use as stdout."""
-    original = mcp_server.subprocess.run
+    original = mcp_server._run_command
 
-    def fake(command, env=None, cwd=None, **kwargs):
-        if command and command[0] == "git":
-            # _git_tracks / _git_ignores probe git for the dialog's warning
-            # line; they are not the command under test.
-            return original(command, env=env, cwd=cwd, **kwargs)
+    def fake(command, env, cwd, timeout, bind=True):
         out = observer(env, cwd) if observer else ""
         if raise_exc is not None:
             raise raise_exc
-        return subprocess.CompletedProcess(command, returncode, stdout=out or "", stderr="")
+        return procs.RunResult(returncode, out or "", "", False, "job")
 
-    mcp_server.subprocess.run = fake
+    mcp_server._run_command = fake
     try:
         yield
     finally:
-        mcp_server.subprocess.run = original
+        mcp_server._run_command = original
 
 
 def _read_journal() -> dict:
@@ -259,7 +255,7 @@ def test_swap_and_unswap_are_byte_exact_with_bom_crlf_indent_and_export() -> Non
         assert record["swapped"] == ["API_TOKEN", "DB_PASSWORD", "PLAIN"]
         res = store.unswap_target_file(env_path, record, INDEX)
         assert res == {"restored": ["API_TOKEN", "DB_PASSWORD", "PLAIN"], "conflicts": [],
-                       "verify_failed": [], "error": None}
+                       "verify_failed": [], "error": None, "secret_seen_elsewhere": []}
         assert env_path.read_bytes() == original
 
 
@@ -284,7 +280,9 @@ def test_unswap_tier_two_handles_reindented_line_and_removed_var() -> None:
         assert res["restored"] == ["API_TOKEN", "PLAIN"] and not res["conflicts"]
         after = env_path.read_bytes()
         assert b'    API_TOKEN="value 1"\r\n' in after
-        assert b"# [llm-env-vault] PLAIN was removed from the vault" in after
+        # A name that left the vault gets the pending marker -- a line, not
+        # a comment, so the next resync finishes the job by itself.
+        assert b'PLAIN="value ?"\r\n' in after
         assert b"justletters123" not in after
 
 
@@ -305,10 +303,10 @@ def test_unswap_verify_catches_write_back_after_restore() -> None:
         record = store.swap_target_file(env_path, ["API_TOKEN"], SECRETS, {})
         original_write = store._write_with_retries
 
-        def sabotaged(path, data, mode):
+        def sabotaged(path, data, mode, **kw):
             # Something (an editor saving a stale buffer) writes the real
             # value back right after our restore.
-            err = original_write(path, data, mode)
+            err = original_write(path, data, mode, **kw)
             path.write_bytes(b"API_TOKEN=tok-abcdefgh-123456\n")
             return err
 
@@ -324,7 +322,7 @@ def test_unswap_reports_error_when_write_keeps_failing() -> None:
     with workspace(env_bytes=b'API_TOKEN="value 1"\n') as (project, env_path):
         record = store.swap_target_file(env_path, ["API_TOKEN"], SECRETS, {})
         original_write = store._write_with_retries
-        store._write_with_retries = lambda path, data, mode: "simulated lock"
+        store._write_with_retries = lambda path, data, mode, **kw: "simulated lock"
         try:
             res = store.unswap_target_file(env_path, record, INDEX)
         finally:
@@ -575,11 +573,11 @@ def test_swap_restore_failure_keeps_journal_entry_and_next_call_recovers() -> No
         original_write = store._write_with_retries
         calls = {"n": 0}
 
-        def failing(path, data, mode):
+        def failing(path, data, mode, **kw):
             calls["n"] += 1
             if calls["n"] == 1:  # the restore write (the swap itself does not retry)
                 return "simulated AV lock"
-            return original_write(path, data, mode)
+            return original_write(path, data, mode, **kw)
 
         store._write_with_retries = failing
         try:
@@ -615,8 +613,8 @@ def test_verify_failed_keeps_journal_entry_so_recovery_retries() -> None:
     with workspace() as (project, env_path):
         original_write = store._write_with_retries
 
-        def write_then_stale_editor_save(path, data, mode):
-            err = original_write(path, data, mode)
+        def write_then_stale_editor_save(path, data, mode, **kw):
+            err = original_write(path, data, mode, **kw)
             if err is None and b"value 3" in data:  # the restore write
                 # Stale buffer with the real value lands after the restore.
                 path.write_bytes(data.replace(b'PLAIN="value 3"', b"PLAIN=justletters123"))

@@ -108,10 +108,10 @@ def fake_dialog(approve=True, trust_it=False):
     calls = []
 
     def wrapper(command_str, materialize_path=None, only_vars=None, trust_note=None,
-                files=None, swap=None):
+                files=None, swap=None, **kwargs):
         calls.append({"command_str": command_str, "materialize_path": materialize_path,
                        "only_vars": only_vars, "trust_note": trust_note, "files": files,
-                       "swap": swap})
+                       "swap": swap, **kwargs})
         if not approve:
             return {"secrets": None, "trust": False}
         secrets = store.load_secrets(TEST_PASSWORD)
@@ -141,24 +141,26 @@ def stub_run(observer=None, returncode=0):
 
     *observer* is called with (command, env, cwd) while the "process" is
     notionally running -- the one moment a restored file must exist on disk."""
-    original = subprocess.run
+    original = mcp_server._run_command
 
     class _Result:
         def __init__(self):
             self.returncode = returncode
             self.stdout = "ran"
             self.stderr = ""
+            self.timed_out = False
+            self.binding = "job"
 
-    def fake(command, **kwargs):
+    def fake(command, env, cwd, timeout, bind=True):
         if observer is not None:
-            observer(command, kwargs.get("env") or {}, kwargs.get("cwd"))
+            observer(command, env or {}, cwd)
         return _Result()
 
-    mcp_server.subprocess.run = fake
+    mcp_server._run_command = fake
     try:
         yield
     finally:
-        mcp_server.subprocess.run = original
+        mcp_server._run_command = original
 
 
 def _levault(project: Path, name="server.pem") -> str:
@@ -522,17 +524,17 @@ def test_the_sigterm_handler_is_installed_for_a_files_only_run() -> None:
 
 def test_an_interrupted_run_still_cleans_up() -> None:
     with workspace() as project:
-        def boom(_command, **_kwargs):
+        def boom(_command, _env, _cwd, _timeout, bind=True):
             raise KeyboardInterrupt()
 
-        original = subprocess.run
-        mcp_server.subprocess.run = boom
+        original = mcp_server._run_command
+        mcp_server._run_command = boom
         try:
             with fake_dialog():
                 result = mcp_server._run_with_env_impl(
                     ["echo", "hi"], None, False, str(project), None, [_levault(project)])
         finally:
-            mcp_server.subprocess.run = original
+            mcp_server._run_command = original
 
         assert result["message"] == "Interrupted."
         assert not (project / "server.pem").exists(), (
@@ -541,17 +543,17 @@ def test_an_interrupted_run_still_cleans_up() -> None:
 
 def test_a_command_that_fails_to_start_still_cleans_up() -> None:
     with workspace() as project:
-        def boom(_command, **_kwargs):
+        def boom(_command, _env, _cwd, _timeout, bind=True):
             raise OSError("no such executable")
 
-        original = subprocess.run
-        mcp_server.subprocess.run = boom
+        original = mcp_server._run_command
+        mcp_server._run_command = boom
         try:
             with fake_dialog():
                 result = mcp_server._run_with_env_impl(
                     ["nonexistent"], None, False, str(project), None, [_levault(project)])
         finally:
-            mcp_server.subprocess.run = original
+            mcp_server._run_command = original
 
         assert result["applied"] is False
         assert not (project / "server.pem").exists()
