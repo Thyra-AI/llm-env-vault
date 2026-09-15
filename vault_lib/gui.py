@@ -2028,7 +2028,7 @@ def _manage_action_result_keys(action: str) -> frozenset:
 
 
 def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None,
-                          trust_note: str = None, files=None, *, swap=None):
+                          trust_note: str = None, files=None, *, swap=None, timeout=None):
     """Used by the run_with_env MCP tool. Returns an outcome dict:
     {"secrets": dict_or_None, "trust": bool}. secrets is None if
     denied/failed, in which case trust is always False. When only_vars is
@@ -2238,6 +2238,25 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
         swap_frame.grid_columnconfigure(0, weight=1)
         swap_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
         row += 1
+        clouded = [(str(e.get("path")), e.get("cloud")) for e in swap if e.get("cloud")]
+        if clouded:
+            # The most probable accidental leak on a default Windows install:
+            # Documents and Desktop are OneDrive roots, and the sync client
+            # can upload the swapped file before the command finishes.
+            _label(root, "Inside a cloud-synced folder -- the sync client may upload the "
+                         "real values before they are restored: " + "; ".join(
+                             f"{_collapse_whitespace(p)} ({prov})" for p, prov in clouded),
+                   fg=WARNING, justify="left", wraplength=480).grid(
+                row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+            row += 1
+        unguarded = [str(e.get("path")) for e in swap
+                     if e.get("git_tracked") is False and e.get("git_ignored") is False]
+        if unguarded:
+            _label(root, "Not tracked and not ignored by git -- `git add -A` would stage the "
+                         "real values: " + ", ".join(_collapse_whitespace(u) for u in unguarded),
+                   fg=WARNING, justify="left", wraplength=480).grid(
+                row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+            row += 1
         tracked = [str(e.get("path")) for e in swap if e.get("git_tracked") is True]
         if tracked:
             _label(root, "Tracked by git -- do not commit, stash or `git add -A` until this "
@@ -2246,7 +2265,13 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
                    fg=WARNING, justify="left", wraplength=480).grid(
                 row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
             row += 1
-        _label(root, "Placeholders are restored when the command exits or is interrupted. "
+        if timeout:
+            _span = f"{timeout // 60} minutes" if timeout >= 60 else f"{timeout} seconds"
+            _bound = (f"Placeholders are restored when the command exits, is interrupted, or "
+                      f"after {_span} (the command is then killed). ")
+        else:
+            _bound = "Placeholders are restored when the command exits or is interrupted. "
+        _label(root, _bound +
                      "While it runs, the real values are readable by the AI assistant and by "
                      "anything watching the file: your editor, hot reloaders, IDE local "
                      "history, cloud-sync folders. Close the file in your editor first.",

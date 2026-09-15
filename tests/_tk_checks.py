@@ -139,13 +139,23 @@ def _button_label(widget):
 
 def _drop_dead_root():
     """tkinter keeps the last root in _default_root and never clears it on
-    destroy, so the next unparented widget attaches to a dead interpreter."""
+    destroy, so the next unparented widget attaches to a dead interpreter.
+
+    A root that is still ALIVE here is worse: a dialog raised during
+    construction, before its mainloop ran, and the harness caught the
+    exception. Left alone, the next dialog sees a live root, opens as a
+    modal Toplevel and blocks in wait_window() -- a real window on the
+    developer's desktop, waiting for a click nobody will make, until the
+    outer test's timeout kills the process. Destroy it, so one broken
+    dialog fails one check instead of hanging the whole sweep."""
     root = getattr(tk, "_default_root", None)
     if root is not None:
         try:
-            root.winfo_exists()
+            if root.winfo_exists():
+                root.destroy()
         except Exception:  # noqa: BLE001 -- already destroyed
-            tk._default_root = None
+            pass
+        tk._default_root = None
 
 
 def all_text(widgets):
@@ -297,6 +307,15 @@ def _():
         "the unlock dialog no longer discloses that the swapped file is agent-readable")
     assert "Checkbutton" in [c for c, _t in widgets], (
         "the trust checkbox vanished from swap runs -- they are the materialize class")
+    # The time bound is stated in the unit a human reads: minutes, or seconds
+    # below one minute. timeout=None (a plain run) must build too.
+    bounded = build_dialog(lambda: gui.unlock_for_run_dialog(
+        "docker compose up", only_vars=["A"], swap=entries, timeout=45))
+    assert "after 45 seconds" in all_text(bounded), (
+        "the unlock dialog no longer states the swap time bound")
+    bounded = build_dialog(lambda: gui.unlock_for_run_dialog(
+        "docker compose up", only_vars=["A"], swap=entries, timeout=3600))
+    assert "after 60 minutes" in all_text(bounded)
 
 
 @check("every_dialog_constructs")

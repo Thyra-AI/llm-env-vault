@@ -117,7 +117,7 @@ def _deobfuscate(data: bytes, key: bytes) -> str:
 
 
 def make_signature(command, cwd, only_vars, materialize, background=False, files=None,
-                   swap=None):
+                   swap=None, timeout=None):
     """A hashable key identifying "this exact run_with_env call shape".
     Any change to any of these is treated as a different, unapproved
     command.
@@ -149,6 +149,10 @@ def make_signature(command, cwd, only_vars, materialize, background=False, files
     later call that swaps 20, after the agent appended 18 names to the
     registry. Binding the names means any such change is a new, unapproved
     signature.
+
+    timeout is in here because it bounds how long real values stay on disk
+    for a swap run: a grant approved for "one hour" must not auto-allow a
+    call asking for twenty-four.
     """
     return (
         tuple(command),
@@ -161,6 +165,7 @@ def make_signature(command, cwd, only_vars, materialize, background=False, files
         tuple(sorted((os.path.normcase(os.path.abspath(p)), tuple(sorted(set(n))))
                      for p, n in swap))
         if swap is not None else None,
+        int(timeout) if timeout is not None else None,
     )
 
 

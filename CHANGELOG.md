@@ -7,6 +7,85 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.6.1] — 2026-09-15
+
+### Security
+
+A hostile review of the 1.6.0 posture document (`docs/security-posture-1.6.0.md`) found two
+things the swap feature had handed an agent that it did not have before, and a set of ways the
+"real values never stay on disk unnoticed" promise could be broken. All are closed here; the
+plan and its reasoning are in `docs/plan-1.6.1-hardening.md`.
+
+- **The git probe can no longer execute repo-controlled code.** `run_with_env(swap=...)`
+  asks git whether the file is tracked *before* the dialog opens. That ran a bare `git` --
+  which Windows resolves through the server's current directory, the open project -- with the
+  project's own `.git/config`, where `core.fsmonitor = <program>` runs on every index read. Git
+  is now located once at import from `PATH` alone (never the current directory or anything
+  under it, `.exe`/`.com` only), invoked by absolute path with its own directory as cwd (no DLL
+  search through the project), with system and global config off, hooks pointed at an empty
+  directory and `core.fsmonitor` forced off -- both as `-c` arguments and as `GIT_CONFIG_*`
+  environment, for git older than 2.31. A `.git` *file* whose `gitdir:` points at a share or a
+  device path makes the probe answer "unknown" instead of connecting.
+- **Recovery and `swap=` act only on registered, local files.** A path from `swap.journal.json`
+  or from a `swap=` argument must be absolute, on a local drive (no UNC, no `\?\`, no mapped
+  network drive, no junction to a share) and a key of `targets.json`, with the names a subset
+  of that file's registered set -- checked as a string **before** anything on disk is touched,
+  because resolving or stat-ing a UNC path opens SMB with the user's credentials. The same
+  string check now guards `cwd` and the command's executable on every run. Journal entries that
+  fail are quarantined and reported on every call, never acted on and never silently dropped;
+  `python mcp_server.py --recover --drop-rejected` clears them from a terminal.
+- **A secret re-quoted during the run is restored, not mistaken for a user edit.** The restore
+  and the post-restore verification compared against the exact quoted form the vault wrote, so
+  a formatter that turned `SECRET="abc"` into `SECRET=abc` made the line look edited (left
+  alone, journal released) while verification, comparing the same form, stayed silent. Both now
+  compare the *value* -- what a dotenv parser would deliver -- and verification also scans every
+  line for the raw value, reporting a copy under another name or in a comment by line number
+  (`swap_secret_seen_elsewhere`), never by content.
+- **Swap runs are bounded in time and their process tree dies with them.** New `timeout`
+  argument (seconds, part of the trust signature, shown in the dialog); swap runs default to
+  3600. On Windows the command runs inside a Job object with kill-on-close, so a server that is
+  `TerminateProcess`-ed -- how every Windows session actually ends -- takes the whole tree with
+  it, a timeout kills descendants too, and a descendant a command leaves behind cannot outlive
+  it. Recovery's inference "the owner is dead, rewrite the file" is now safe because a dead
+  owner implies a dead command. Plain injection runs are deliberately not bound (a script that
+  starts a daemon and exits keeps working). A watchdog ends the tree two seconds after the
+  direct child exits, so an orphan holding the output pipe can no longer hang the tool with
+  real values on disk. Output is decoded as UTF-8 with replacement, so a child printing
+  cp1252-hostile bytes no longer turns a finished run into a `UnicodeDecodeError`.
+- **`vault_status` reports real values without trusting the journal.** Every registered file is
+  scanned for managed lines that are not placeholders (`targets_holding_non_placeholders`,
+  names only) and for `value ?` lines still waiting for a number
+  (`targets_with_pending_placeholders`). A crash whose journal was later deleted becomes visible
+  on the next status call.
+- **`swap` is refused for a git command** (`git add -A` with real values in `.env` is how they
+  get committed), and if a swapped file *became* tracked during the run, the result says so
+  (`swap_target_committed`) and tells you to rotate. The dialog names a cloud-synced folder
+  (OneDrive and every Cloud Filter sync root on Windows, Dropbox/Google Drive/iCloud roots
+  everywhere, macOS CloudStorage) and an untracked-and-unignored file, in amber.
+- **Recovery with an unreadable vault index no longer clears values into a comment.** The index
+  is retried for ~2 s; if it stays unreadable the lines become `NAME="value ?"`, a placeholder
+  whose number `resync_targets` fills in once the index is readable -- no hand editing. The same
+  marker replaces the comment previously written for a name that had left the vault.
+- **The restore can write in place.** On Windows `os.replace` fails while any process holds the
+  file open without `FILE_SHARE_DELETE` (every CPython `open()`); a restore that had exhausted
+  its retries stayed failed for as long as an orphan kept `.env` open. After the atomic
+  attempts, a restore now truncates and rewrites in place -- a torn placeholder line beats an
+  intact real one. The swap write itself stays strictly atomic.
+- **Smaller:** `python mcp_server.py --recover --force` treats every journal entry as stale (the
+  human's exit from an entry whose owner pid exists but cannot be inspected; requires an
+  interactive terminal); a `"`-style value ending in a backslash no longer renders as an
+  unterminated string; leftover temp files are swept by name regardless of age (FAT/exFAT
+  mtime granularity); an own-pid journal entry left by a failed bookkeeping step is cleared on
+  the next call; the placeholder regex no longer accepts asymmetric quotes; `preview_swap`
+  refuses files over 1 MiB.
+
+### Fixed
+
+- A dialog that raised during construction left a live Tk root behind, so the next dialog
+  opened as a modal Toplevel and blocked forever -- a real window on the desktop waiting for a
+  click, until the test's timeout killed the process. The dialog-check harness now destroys a
+  live root after a failed construction; one broken dialog fails one check.
+
 ## [1.6.0] — 2026-09-15
 
 ### Added

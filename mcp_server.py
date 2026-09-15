@@ -35,7 +35,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from vault_lib import gui, store, trust
+from vault_lib import gui, procs, store, trust
 from vault_lib.crypto import (WrongPassword, WrongRecoveryKey, MalformedRecoveryKey,
                               NoRecoverySlot, VaultCorrupted, VaultTampered)
 
@@ -263,6 +263,28 @@ def _vault_status_core() -> dict:
             {"path": k, "names": e["names"], "pid": e["pid"]} for k, e in sorted(live.items())]
     if live_error:
         result["swap_journal_error"] = live_error
+    # Journal-independent: which managed lines currently hold something that
+    # is not a placeholder. Names only. This is how a real value left behind
+    # by any means -- a crash whose journal was later deleted, a swap in a
+    # session whose server can no longer be reached -- becomes visible on
+    # the next status call, without trusting any record the agent can edit.
+    holding = {}
+    for path_str, names in targets.items():
+        path = Path(path_str)
+        if not path.is_file():
+            continue
+        try:
+            preview = store.preview_swap(path, names)
+        except (OSError, ValueError) as e:
+            holding[path_str] = {"error": str(e)}
+            continue
+        if preview["not_placeholder"]:
+            holding[path_str] = preview["not_placeholder"]
+        if preview["pending"]:
+            result.setdefault("targets_with_pending_placeholders", {})[path_str] = \
+                preview["pending"]
+    if holding:
+        result["targets_holding_non_placeholders"] = holding
 
     # Non-secret recovery-slot metadata so the agent can surface "you have no
     # recovery slot set up" without ever touching private key material.
@@ -380,34 +402,236 @@ def remove_secret(var_name: str) -> dict:
     return _remove_secret_impl(var_name)
 
 
+def _find_on_path(name: str) -> Optional[str]:
+    """Locate an executable on PATH -- and ONLY on PATH.
+
+    Not shutil.which: on Windows it consults the current directory first,
+    and so does CreateProcess when handed a bare name. This server's
+    current directory is whatever project the client has open, which an
+    agent can write to, so a bare "git" could resolve to a git.exe planted
+    in the project. Walk PATH ourselves, skip empty entries and the cwd,
+    and hand back an absolute path or nothing.
+    """
+    cwd = os.path.normcase(os.path.abspath(os.getcwd()))
+    # Only real executables. A .cmd/.bat shim runs through cmd.exe with
+    # its own argument mangling, and an agent can write one anywhere on
+    # PATH that is under the project (an activated venv's Scripts dir,
+    # node_modules\.bin).
+    exts = [".exe", ".com"] if os.name == "nt" else [""]
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry.strip() or not os.path.isabs(entry):
+            continue
+        norm = os.path.normcase(os.path.abspath(entry))
+        if norm == cwd or norm.startswith(cwd + os.sep):
+            continue
+        for ext in exts:
+            candidate = os.path.join(entry, name + ext)
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+    return None
+
+
+# Resolved once, at import, before any agent-influenced cwd change could
+# matter. None means "no git": the probes answer "unknown" and never run
+# anything.
+_GIT_EXE = _find_on_path("git")
+
+# Git will run a program named by repo-level config on the most innocent
+# commands -- `core.fsmonitor` fires on every index read, including
+# ls-files and check-ignore. The probe runs BEFORE any dialog, in a
+# directory the agent can write .git/config (or a `.git` file pointing at a
+# repo it controls), so every config source that could name a program is
+# switched off for the duration: no system or global config, hooks pointed
+# at an empty directory, fsmonitor forced off. The environment is built
+# from scratch rather than inherited so nothing else leaks in.
+_GIT_HOOKS_DIR = os.path.join(tempfile.gettempdir(), "llm-env-vault-no-hooks")
+try:
+    os.makedirs(_GIT_HOOKS_DIR, exist_ok=True)
+except OSError:
+    pass
+
+
+def _git_env() -> dict:
+    env = {k: v for k, v in os.environ.items()
+           if k.upper() in ("PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "USERPROFILE",
+                            "LANG", "LC_ALL")}
+    env.update({
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": _GIT_HOOKS_DIR,
+    })
+    return env
+
+
+def _gitdir_is_suspicious(repo_dir: Path) -> bool:
+    """A `.git` FILE (not directory) redirects git with `gitdir: <path>`. An
+    agent can write one pointing at a share or a named pipe, turning the
+    probe into a network touch and a 10 s hang before any dialog. Refuse to
+    probe when the redirect is not a plain local absolute-or-relative path."""
+    probe = repo_dir
+    for _ in range(64):
+        dot_git = probe / ".git"
+        try:
+            if dot_git.is_dir():
+                return False
+            if dot_git.is_file():
+                first = dot_git.read_text(encoding="utf-8", errors="replace").splitlines()[:1]
+                target = first[0].partition("gitdir:")[2].strip() if first else ""
+                return (not target or store._looks_like_unc(target)
+                        or target.startswith(("\\\\?\\", "\\\\.\\", "//?/", "//./")))
+        except OSError:
+            return True
+        if probe.parent == probe:
+            return False
+        probe = probe.parent
+    return False
+
+
+def _git(args: list, cwd: Path) -> Optional[int]:
+    """Run git with the hardened environment; the exit code, or None if git
+    is unavailable, timed out, could not start, or the repo looks hostile.
+
+    The process's own cwd is git's directory, not the project: Windows
+    searches the current directory for DLLs before PATH, and the project
+    is agent-writable. `-C` points git at the project instead. The `-c`
+    overrides duplicate the GIT_CONFIG_* environment for git older than
+    2.31, which ignores the environment form."""
+    if _GIT_EXE is None or _gitdir_is_suspicious(cwd):
+        return None
+    try:
+        proc = subprocess.run(
+            [_GIT_EXE, "-C", str(cwd),
+             "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={_GIT_HOOKS_DIR}",
+             "-c", "core.virtualFilesystem=", *args],
+            cwd=os.path.dirname(_GIT_EXE), env=_git_env(), capture_output=True, timeout=10)
+        return proc.returncode
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _git_tracks(path: Path) -> Optional[bool]:
     """Is *path* tracked by a git repo? None if the question can't be answered.
 
     Best-effort and never fatal: git may not be installed, the directory may
-    not be a repo, or the call may hang on a network filesystem.
+    not be a repo, or the call may hang on a network filesystem. See _git
+    for why the call is hardened.
     """
-    try:
-        proc = subprocess.run(
-            ["git", "ls-files", "--error-unmatch", "--", path.name],
-            cwd=str(path.parent), capture_output=True, timeout=10,
-        )
-        return proc.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return None
+    rc = _git(["ls-files", "--error-unmatch", "--", path.name], path.parent)
+    return None if rc is None else rc == 0
 
 
 def _git_ignores(path: Path) -> Optional[bool]:
-    """Is *path* covered by a .gitignore rule? None if unanswerable."""
+    """Is *path* covered by a .gitignore rule (of this repo -- the global
+    excludes file is deliberately not consulted)? None if unanswerable."""
+    rc = _git(["check-ignore", "-q", "--", path.name], path.parent)
+    if rc in (0, 1):
+        return rc == 0
+    return None
+
+
+# Windows marks a file that lives under a cloud-sync root (OneDrive, and
+# any provider using the Cloud Files API) with recall attributes; the
+# well-known sync roots cover Dropbox/Google Drive/iCloud on every platform.
+_FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x40000
+_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000
+_FILE_ATTRIBUTE_OFFLINE = 0x1000
+_IO_REPARSE_TAG_CLOUD = 0x9000001A  # the family tag; provider bits masked off
+
+
+def _cloud_synced(path: Path) -> Optional[str]:
+    """Name of the sync provider that appears to cover *path*, or None.
+
+    A swapped file inside a synced folder can be uploaded -- with real
+    values -- before the command finishes, and no restore recalls it from
+    the provider. This is the single most probable accidental leak on a
+    default Windows install (Documents and Desktop are OneDrive roots), so
+    the dialog names it. Warn only: refusing would block the feature for
+    everyone whose projects live under Documents.
+    """
     try:
-        proc = subprocess.run(
-            ["git", "check-ignore", "-q", "--", path.name],
-            cwd=str(path.parent), capture_output=True, timeout=10,
-        )
-        if proc.returncode in (0, 1):
-            return proc.returncode == 0
+        resolved = path.resolve()
+    except OSError:
         return None
-    except (OSError, subprocess.SubprocessError):
-        return None
+    roots = []
+    for var, label in (("OneDrive", "OneDrive"), ("OneDriveConsumer", "OneDrive"),
+                       ("OneDriveCommercial", "OneDrive")):
+        value = os.environ.get(var)
+        if value:
+            roots.append((Path(value), label))
+    home = Path.home()
+    for sub, label in (("Dropbox", "Dropbox"), ("Google Drive", "Google Drive"),
+                       ("My Drive", "Google Drive"), ("iCloud Drive", "iCloud"),
+                       ("Library/Mobile Documents", "iCloud")):
+        roots.append((home / sub, label))
+    for root, label in roots:
+        try:
+            if resolved.is_relative_to(root.resolve()):
+                return label
+        except (OSError, ValueError):
+            continue
+    for sub in ("Library/CloudStorage",):
+        try:
+            if resolved.is_relative_to((home / sub).resolve()):
+                return "a cloud-sync provider (macOS CloudStorage)"
+        except (OSError, ValueError):
+            pass
+    if os.name == "nt":
+        for root, label in _windows_sync_roots():
+            try:
+                if resolved.is_relative_to(root):
+                    return label
+            except ValueError:
+                continue
+        probe = resolved
+        for _ in range(64):
+            try:
+                st = os.lstat(probe)  # lstat: never follow a junction to a share
+                attrs = st.st_file_attributes
+                tag = getattr(st, "st_reparse_tag", 0)
+            except (OSError, AttributeError):
+                break
+            if attrs & (_FILE_ATTRIBUTE_RECALL_ON_OPEN | _FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+                        | _FILE_ATTRIBUTE_OFFLINE):
+                return "a cloud-sync provider (file has cloud recall attributes)"
+            if tag and (tag & 0xFFFF0FFF) == _IO_REPARSE_TAG_CLOUD:
+                return "a cloud-sync provider (Cloud Files reparse point)"
+            if probe.parent == probe:
+                break
+            probe = probe.parent
+    return None
+
+
+def _windows_sync_roots() -> list:
+    """Every Cloud Filter sync root registered on this machine -- OneDrive,
+    Dropbox, iCloud, Box, Google Drive in mirror mode -- as (Path, label)."""
+    roots = []
+    try:
+        import winreg
+        base = r"Software\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, base) as key:
+            i = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(key, i)
+                except OSError:
+                    break
+                i += 1
+                try:
+                    with winreg.OpenKey(key, sub) as k:
+                        path, _ = winreg.QueryValueEx(k, "UserSyncRootPath")
+                        if path:
+                            roots.append((Path(path).resolve(), sub.split("!")[0]))
+                except OSError:
+                    continue
+    except (OSError, ImportError):
+        pass
+    return roots
 
 
 def _encrypt_file_impl(path: str) -> dict:
@@ -1249,7 +1473,47 @@ def _resolve_restore_paths(files: list, cwd: Optional[str]) -> list:
     return pairs
 
 
-def _resolve_swap_plan(swap: list, cwd: Optional[str], only_vars: Optional[list],
+def _drive_is_remote(path_str: str) -> bool:
+    """Windows: is this path on a mapped network drive? Resolving one goes
+    over the wire. Never called with a UNC string (rejected earlier)."""
+    if os.name != "nt":
+        return False
+    drive = os.path.splitdrive(path_str)[0]
+    if not drive:
+        return False
+    try:
+        import ctypes
+        DRIVE_REMOTE = 4
+        return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == DRIVE_REMOTE
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _reparse_points_to_share(path_str: str) -> bool:
+    """Walk the UNRESOLVED path with lstat; a junction or symlink whose
+    target is UNC would make Path.resolve() open the share before the
+    post-resolve check could refuse it."""
+    if os.name != "nt":
+        return False
+    parts = Path(path_str).parts
+    probe = Path(parts[0]) if parts else None
+    for part in parts[1:]:
+        probe = probe / part
+        try:
+            st = os.lstat(probe)
+        except OSError:
+            return False
+        if getattr(st, "st_reparse_tag", 0):
+            try:
+                target = os.readlink(probe)
+            except OSError:
+                return True
+            if store._looks_like_unc(target) or "UNC" in target.upper()[:8]:
+                return True
+    return False
+
+
+def _resolve_swap_plan(command: list, swap: list, cwd: Optional[str], only_vars: Optional[list],
                        files_restore_paths: list) -> list:
     """Turn the caller's swap list into [{key, path, names, skipped,
     git_tracked, git_ignored}] or raise ValueError -- all before the dialog
@@ -1269,31 +1533,56 @@ def _resolve_swap_plan(swap: list, cwd: Optional[str], only_vars: Optional[list]
     """
     if not isinstance(swap, list) or not all(isinstance(x, str) and x.strip() for x in swap):
         raise ValueError("swap must be a list of non-empty path strings.")
+    if command and os.path.splitext(os.path.basename(command[0]))[0].lower() == "git":
+        # A git command needs no secrets, and `git add -A` / `commit` /
+        # `stash` with real values in .env is the one-dialog path to
+        # committing them. Wrapped invocations (`sh -c "git ..."`) are the
+        # dialog's amber line's job; the bare case is refused outright.
+        raise ValueError("swap is refused for a git command: git needs no secrets, and "
+                         "running it while .env holds real values is how they get committed.")
     targets = store.load_targets()
     index = store.load_index()
-    by_norm = {os.path.normcase(k): k for k in targets}
+    if cwd is not None and store._looks_like_unc(str(cwd)):
+        raise ValueError(f"cwd {cwd!r} is a UNC path -- refusing before touching it.")
     base = (Path(cwd) if cwd else Path.cwd()).resolve()
     plan, seen = [], set()
     for raw in swap:
-        candidate = Path(raw) if os.path.isabs(raw) else base / raw
+        joined = raw if os.path.isabs(raw) else os.path.join(str(base), raw)
+        # String checks BEFORE resolve(): resolving a UNC path opens a
+        # network connection, which is exactly what an agent-chosen string
+        # must not be able to cause. The registry check needs the resolved
+        # form, so it comes after -- and repeats the UNC test on the result,
+        # since a junction can point at a share.
+        if store._looks_like_unc(joined) or joined.startswith(("\\\\?\\", "\\\\.\\")):
+            raise ValueError(f"swap path {raw!r} is a UNC or device path -- refused.")
+        if _drive_is_remote(joined) or _reparse_points_to_share(joined):
+            raise ValueError(f"swap path {raw!r} is on a network drive or behind a link to "
+                             f"one -- refused.")
         try:
-            resolved = candidate.resolve()
+            resolved = Path(joined).resolve()
         except OSError as e:
             raise ValueError(f"swap path {raw!r} could not be resolved: {e}") from None
-        key = by_norm.get(os.path.normcase(str(resolved)))
-        if key is None:
+        try:
+            key = store.validate_target_key(str(resolved), [], targets)
+        except ValueError as e:
             raise ValueError(
-                f"{resolved} is not a registered install_migrate target, so it cannot be "
-                f"swapped (registered: {', '.join(sorted(targets)) or 'none'}). Migrate it "
-                f"first, or use materialize= for a file the vault does not manage.")
+                f"{e} -- only registered install_migrate targets can be swapped "
+                f"(registered: {', '.join(sorted(targets)) or 'none'}). Migrate it first, or "
+                f"use materialize= for a file the vault does not manage.") from None
         if key in seen:
             continue
         seen.add(key)
         path = Path(key)
         if not path.is_file():
             raise ValueError(f"{key} is registered but is not a file on disk.")
-        if path.is_symlink():
-            raise ValueError(f"{key} is a symlink -- refusing to rewrite it in place.")
+        if store._is_link(path):
+            # The registry key was a regular file when it was migrated. A link
+            # there now means something replaced it; the swap's os.replace
+            # would turn the link into a real-values file and the restore's
+            # in-place fallback would write through it. Refused, before the
+            # dialog, whatever it points at.
+            raise ValueError(f"{key} is a symlink or junction -- refusing to swap through a "
+                             f"link.")
         if not os.access(path, os.W_OK):
             raise ValueError(f"{key} is not writable -- the placeholders could not be "
                              f"restored after the run, so it is refused before it.")
@@ -1329,6 +1618,7 @@ def _resolve_swap_plan(swap: list, cwd: Optional[str], only_vars: Optional[list]
             "key": key, "path": path, "names": names, "skipped": skipped,
             "duplicates": preview["duplicates"],
             "git_tracked": _git_tracks(path), "git_ignored": _git_ignores(path),
+            "cloud": _cloud_synced(path),
         })
     return plan
 
@@ -1371,6 +1661,8 @@ def _restore_swaps(swapped: list, index: dict) -> dict:
             outcome["conflicts"][key] = res["conflicts"]
         if res["verify_failed"]:
             outcome["verify_failed"][key] = res["verify_failed"]
+        for item in res.get("secret_seen_elsewhere", ()):
+            outcome.setdefault("secret_seen_elsewhere", []).append(dict(item, path=key))
         if res["error"]:
             outcome["failed"][key] = res["error"]
         try:
@@ -1383,21 +1675,64 @@ def _restore_swaps(swapped: list, index: dict) -> dict:
     return outcome
 
 
+# The window a swap run is allowed to keep real values in the project's own
+# .env before the command is killed and the placeholders restored. A
+# foreground `npm run dev` never exits on its own; without a bound, "for the
+# lifetime of one command" would mean "until you notice". Overridable per
+# call, disclosed in the dialog, part of the trust signature.
+SWAP_DEFAULT_TIMEOUT_SECONDS = 3600
+MAX_TIMEOUT_SECONDS = 24 * 3600
+
+
+def _run_command(command: list, env: dict, cwd: Optional[str],
+                 timeout: Optional[float], bind: bool = True) -> procs.RunResult:
+    """The one place a foreground command is executed. A seam for tests, and
+    the point where the child is bound to this server's lifetime.
+
+    bind=False keeps 1.6.0 behaviour for a plain injection run: its
+    descendants may outlive it (a script that starts a daemon and exits).
+    Binding is for runs that put real values on disk, where "the command
+    exited" must mean nothing of it is still reading them."""
+    if not bind:
+        proc = subprocess.run(command, env=env, cwd=cwd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
+                              timeout=timeout)
+        return procs.RunResult(proc.returncode, proc.stdout, proc.stderr, False, "none")
+    return procs.run_bound(command, env, cwd, timeout)
+
+
 def _run_with_env_impl(command: list, materialize: Optional[str], background: bool,
                         cwd: Optional[str], only_vars: Optional[list] = None,
-                        files: Optional[list] = None, swap: Optional[list] = None) -> dict:
+                        files: Optional[list] = None, swap: Optional[list] = None,
+                        timeout: Optional[int] = None) -> dict:
     return _with_swap_recovery(
         lambda: _run_with_env_core(command, materialize, background, cwd, only_vars, files,
-                                   swap))
+                                   swap, timeout))
 
 
 def _run_with_env_core(command: list, materialize: Optional[str], background: bool,
                         cwd: Optional[str], only_vars: Optional[list] = None,
-                        files: Optional[list] = None, swap: Optional[list] = None) -> dict:
+                        files: Optional[list] = None, swap: Optional[list] = None,
+                        timeout: Optional[int] = None) -> dict:
     if not command or not all(isinstance(c, str) for c in command):
         return {"error": "command must be a non-empty list of strings."}
+    # Before anything resolves, stats or which()es these: a UNC string in
+    # either would make this process open a network connection -- with the
+    # user's credentials -- on an agent's say-so, before any dialog.
+    if store._looks_like_unc(command[0]) or (cwd is not None and store._looks_like_unc(str(cwd))):
+        return {"error": "UNC paths are refused for the command and cwd."}
     if swap == []:
         swap = None
+    if timeout is not None:
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or \
+                not 1 <= timeout <= MAX_TIMEOUT_SECONDS:
+            return {"error": f"timeout must be an integer number of seconds between 1 and "
+                             f"{MAX_TIMEOUT_SECONDS}."}
+        if background:
+            return {"error": "timeout is not supported together with background=True (the "
+                             "process is detached; nothing is left to enforce it)."}
+    if swap and timeout is None:
+        timeout = SWAP_DEFAULT_TIMEOUT_SECONDS
     if background and swap:
         return {"error": "swap is not supported together with background=True (a detached "
                          "process has no exit moment at which the placeholders could be "
@@ -1447,7 +1782,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         # never puts a modal window in front of a human. Re-checked again
         # right before writing, because the dialog can sit open for minutes.
         file_pairs = _resolve_restore_paths(files, cwd) if files else []
-        swap_plan = _resolve_swap_plan(swap, cwd, only_vars,
+        swap_plan = _resolve_swap_plan(command, swap, cwd, only_vars,
                                        [rp for _vp, rp in file_pairs]) if swap else []
     except (OSError, ValueError, VaultCorrupted, VaultTampered, UnicodeDecodeError) as e:
         return {"error": str(e)}
@@ -1461,7 +1796,8 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
     signature = trust.make_signature(command, cwd, only_vars, materialize, background,
                                       files,
                                       swap=[(e["key"], e["names"]) for e in swap_plan]
-                                      if swap_plan else None)
+                                      if swap_plan else None,
+                                      timeout=timeout)
     if file_pairs:
         # A run that writes decrypted files to disk is NEVER auto-allowed and
         # never grants trust: a human sees the paths and approves every single
@@ -1538,8 +1874,10 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                                              swap=[{"path": e["key"], "names": e["names"],
                                                     "skipped": e["skipped"],
                                                     "git_tracked": e["git_tracked"],
-                                                    "git_ignored": e["git_ignored"]}
-                                                   for e in swap_plan] or None)
+                                                    "git_ignored": e["git_ignored"],
+                                                    "cloud": e["cloud"]}
+                                                   for e in swap_plan] or None,
+                                             timeout=timeout)
         raw_secrets = outcome["secrets"]
         if raw_secrets is None:
             result = {"applied": False, "message": "Denied by user."}
@@ -1804,8 +2142,13 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
             # consume protocol bytes and/or block forever with the whole
             # server frozen behind it -- DEVNULL makes it fail fast on EOF
             # instead.
-            proc = subprocess.run(command, env=env, cwd=cwd, capture_output=True, text=True,
-                                   stdin=subprocess.DEVNULL)
+            proc = _run_command(command, env, cwd, timeout,
+                                bind=bool(swapped or materialized_path is not None
+                                          or restored_paths))
+        except subprocess.TimeoutExpired as e:
+            # Unbound plain run hit its timeout: subprocess.run already killed
+            # the direct child. Report it the same way a bound run does.
+            proc = procs.RunResult(None, e.stdout or "", e.stderr or "", True, "none")
         except OSError as e:
             # Not returned from inside the try: the result must be built
             # AFTER the finally block below has restored the swapped files,
@@ -1855,6 +2198,17 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         "stdout": _stdout_redacted[-4000:],
         "stderr": _stderr_redacted[-4000:],
     }
+    if getattr(proc, "timed_out", False):
+        result["timed_out"] = True
+        result["timeout_note"] = (
+            f"The command was killed after {timeout} seconds (its whole process tree) and "
+            f"every real value was restored/removed. Pass a larger timeout= if it "
+            f"legitimately needs longer.")
+    _binding = getattr(proc, "binding", None)
+    if _binding and _binding != "job" and os.name == "nt":
+        result["process_binding"] = (
+            "Windows refused to place the command in a Job object, so a descendant it "
+            "left running would not be terminated with it.")
     if _all_skipped:
         result["redaction_skipped"] = (
             f"These vault variables were NOT redacted from output because their "
@@ -1873,6 +2227,17 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
             + ", ".join(str(p) for p in survivors))
     if restored_paths and not survivors:
         result["files_restored"] = len(restored_paths)
+    if swapped:
+        newly_tracked = [key for key, path, _r in swapped
+                         if not any(e["git_tracked"] for e in swap_plan if e["key"] == key)
+                         and _git_tracks(path) is True]
+        if newly_tracked:
+            result["swap_target_committed"] = newly_tracked
+            result["swap_warning"] = (result.get("swap_warning", "") + " " if "swap_warning"
+                                      in result else "") + (
+                "These files became tracked by git DURING the run -- a commit or `git add` "
+                "captured the real values into the repository: " + ", ".join(newly_tracked)
+                + ". Rotate those credentials and rewrite history.")
     return _finish(result)
 
 
@@ -1913,6 +2278,15 @@ def _attach_swap_outcome(result: dict, swapped: list, swap_outcome: Optional[dic
             "updated afterwards -- a later tool call will re-run recovery on these files, "
             "which is harmless on a restored file: "
             + "; ".join(f"{k}: {v}" for k, v in swap_outcome["journal_errors"].items()))
+    if swap_outcome.get("secret_seen_elsewhere"):
+        result["swap_secret_seen_elsewhere"] = swap_outcome["secret_seen_elsewhere"]
+        result["swap_warning"] = (result.get("swap_warning", "") + " " if "swap_warning"
+                                  in result else "") + (
+            "A swapped value was found on a line the vault did not write (by line number; "
+            "the command or an editor copied it there): "
+            + "; ".join(f"line {i['line']} ({i['name']})"
+                        for i in swap_outcome["secret_seen_elsewhere"])
+            + " -- remove it by hand.")
     if swap_outcome["verify_failed"]:
         result["swap_verify_failed"] = swap_outcome["verify_failed"]
         result["swap_warning"] = (result.get("swap_warning", "") + " " if "swap_warning"
@@ -1930,7 +2304,8 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
                   background: bool = False, cwd: Optional[str] = None,
                   only_vars: Optional[list[str]] = None,
                   files: Optional[list[str]] = None,
-                  swap: Optional[list[str]] = None) -> dict:
+                  swap: Optional[list[str]] = None,
+                  timeout: Optional[int] = None) -> dict:
     """Run a real command with the vault's real secret values injected as
     environment variables. Prompts once for the master password via a GUI
     (which also lists which variable names -- never values -- will be
@@ -2009,9 +2384,20 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     the user. See docs/env-consumption-research.md for which consumer needs
     which mode.
 
+    timeout: seconds after which a foreground command is killed -- its whole
+    process tree, via a Windows Job object / POSIX process group -- and every
+    real value is restored or removed. Plain runs have no limit unless you
+    pass one. swap runs default to 3600: a foreground dev server never exits
+    on its own, and "for the lifetime of one command" must not mean "until
+    someone notices". Part of the trust signature and shown in the dialog.
+    A run that hits it returns timed_out=true. Not compatible with
+    background=True. A swap run is also refused outright when the command
+    is git: git needs no secrets, and a `git add -A` with real values in
+    .env is how they get committed.
+
     Trusted commands: the dialog offers a "Trust this exact command for
     the rest of this session" checkbox. If checked, this exact
-    (command, cwd, only_vars, materialize, background, files, swap) combination
+    (command, cwd, only_vars, materialize, background, files, swap, timeout) combination
     auto-runs on every later call with no dialog at all, as long as every
     file named directly on the command line (e.g. a compose file named
     after -f) hasn't changed, and the vault itself hasn't changed (a
@@ -2025,7 +2411,8 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     README.md's "Trusted commands" section, which also covers what this
     can't catch -- e.g. a Dockerfile only referenced indirectly via a
     compose file's `context:`)."""
-    return _run_with_env_impl(command, materialize, background, cwd, only_vars, files, swap)
+    return _run_with_env_impl(command, materialize, background, cwd, only_vars, files, swap,
+                              timeout)
 
 
 if __name__ == "__main__":
@@ -2033,8 +2420,15 @@ if __name__ == "__main__":
     # first tool call can even arrive, and the report is stashed for the
     # first result that can carry it. `--recover` does only that and exits,
     # so a user can clean up from a terminal without opening a chat.
+    _force = "--force" in sys.argv[1:]
+    _drop = "--drop-rejected" in sys.argv[1:]
+    if (_force or _drop) and not sys.stdin.isatty():
+        # A human at a terminal is the authority for a forced recovery; an
+        # agent with a shell is not, and this is the difference.
+        print("--force / --drop-rejected require an interactive terminal.", file=sys.stderr)
+        sys.exit(2)
     try:
-        _startup_recovery.extend(store.recover_stale_swaps())
+        _startup_recovery.extend(store.recover_stale_swaps(force=_force, drop_rejected=_drop))
     except (OSError, ValueError, RuntimeError) as _e:
         _startup_recovery.append({"error": f"could not process swap.journal.json: {_e}"})
     if "--recover" in sys.argv[1:]:

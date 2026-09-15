@@ -239,7 +239,7 @@ Conservative by construction: a line is only rewritten if it's a managed variabl
 
 Two known quirks (see [Known limitations](#known-limitations)): this ongoing path is not multi-line-aware, and a resync normalizes the file's line endings even when nothing else changed.
 
-### `run_with_env(command, materialize=None, background=False, cwd=None, only_vars=None, files=None, swap=None)`
+### `run_with_env(command, materialize=None, background=False, cwd=None, only_vars=None, files=None, swap=None, timeout=None)`
 
 The consumption side: runs a real command with the vault's real values injected as environment variables. Since `llm.env` never contains real values, this is how your app actually gets its secrets.
 
@@ -356,12 +356,53 @@ the environment win by default, so plain injection is the first thing to try.
   and `resync_targets` refuse to touch any target (they cannot tell which file is mid-swap in
   another session), `vault_status` reports `swap_journal_error`, and every tool result carries
   the parse error under `swap_recovered` until it is fixed or deleted.
+- **A journal entry that is not a registered local file is quarantined.** It is reported on
+  every call as `rejected`, never acted on, and never silently dropped — the case that matters
+  is a target removed from the registry while it held real values. `python mcp_server.py
+  --recover --drop-rejected` clears them from a terminal, and `--recover --force` treats every
+  entry as stale (for an owner pid that exists but cannot be inspected); both require an
+  interactive terminal, so an agent with a shell cannot run them.
+- **Recovery with an unreadable index writes `NAME="value ?"`,** not a comment: a placeholder
+  whose number `resync_targets` fills in once `vault_index.json` is readable again. The same
+  marker is used for a name that left the vault during a run. `vault_status` lists such lines
+  under `targets_with_pending_placeholders`.
+- **`vault_status` also scans every registered file** for managed lines holding something that
+  is not a placeholder (`targets_holding_non_placeholders`, names only) — a real value left
+  behind by any means, including a crash whose journal was later deleted, is visible without
+  trusting any record an agent can edit.
+- **The restore compares values, not quoting.** A formatter that re-quotes a line during the run
+  (`SECRET="abc"` → `SECRET=abc`) no longer makes it look like your edit; verification also
+  scans every line for the raw value and reports a copy under another name or in a comment by
+  line number (`swap_secret_seen_elsewhere`). When `os.replace` is blocked by a process holding
+  the file open, the restore falls back to rewriting in place — the swap write never does.
 - **The dialog says exactly what happens:** every file, how many values, which names are
   skipped and why, and — in amber — when the file is tracked by git, because a commit, stash
   or `git add -A` made while the command runs would capture the real values.
 - **Not compatible with `background=True`.** A detached process has no exit moment at which to
   restore, and a `.env` full of real values left behind indefinitely is exactly what this tool
   exists to prevent. Dev servers load `.env` at startup — run them through plain injection.
+- **Bounded in time, and the process tree dies with the run.** A swap run defaults to
+  `timeout=3600` seconds (override per call; part of the trust signature; stated in the dialog):
+  when it expires the command and everything it spawned are killed and the placeholders go
+  back, and the result carries `timed_out: true`. On Windows the command runs inside a Job
+  object with kill-on-close, so if this server is terminated mid-run the kernel ends the whole
+  tree — nothing is left reading the file the next recovery will rewrite — and a descendant a
+  command leaves behind cannot outlive it. Plain injection runs are not bound and have no
+  default timeout, so nothing changes for them.
+- **Refused for a git command.** `git add -A`, `commit`, `stash` need no secrets and are the
+  one-dialog path to committing real values. If a swapped file *becomes* tracked during a run
+  anyway (the command or you ran git), the result says `swap_target_committed` — rotate those
+  credentials and rewrite history.
+- **Only registered, local files — checked before anything is touched.** A `swap=` path (and a
+  journal entry, see below) must be absolute, on a local drive (no UNC, no `\\?\`, no mapped
+  network drive, no junction pointing at a share) and a registered target; the check runs on
+  the string *before* it is resolved, because resolving a UNC path opens SMB with your
+  credentials. `cwd` and the command's executable get the same string check on every run.
+- **Cloud-synced folders are named in the dialog.** OneDrive (and every Cloud Filter sync root
+  registered on the machine), Dropbox, Google Drive, iCloud and macOS CloudStorage are
+  detected; a file inside one gets an amber line, because the sync client can upload the real
+  values before they are restored. Untracked-and-unignored files get one too (`git add -A`
+  would stage them).
 - **Trust works** (same exposure class as `materialize`), and the signature binds the *names*
   that would be swapped, not just the paths — `targets.json` is agent-writable, so a grant for
   "swap two values" can never auto-allow "swap twenty" after the registry grew. The swapped
@@ -743,8 +784,19 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
 - **`swap` liveness is best-effort on platforms without process start times.** Windows (via
   `GetProcessTimes`) and Linux (`/proc`) report them; elsewhere a journal entry whose pid has
   been recycled by an unrelated process is treated as live until that process exits or
-  `python mcp_server.py --recover` is run by hand. The per-process server id still catches the
-  case where a restarted server is handed its predecessor's pid.
+  `python mcp_server.py --recover --force` is run by hand. The per-process server id still
+  catches the case where a restarted server is handed its predecessor's pid. A process this
+  machine cannot inspect at all (another user's) is treated as alive; `--force` is the exit.
+- **The git probe consults this repo's rules only.** With global and system git config
+  deliberately disabled for the probe, a file covered only by your global excludes file is
+  reported as "not ignored". The Job-object assignment happens right after the process starts,
+  not on a suspended one; a child that spawns a grandchild in that first millisecond escapes the
+  job (the result's `process_binding` says when Windows refused binding altogether). On POSIX a
+  descendant that calls `setsid()` escapes the process group, and a dead server cannot kill the
+  group — there is no kill-on-parent-death primitive in the stdlib.
+- **A swapped file is a new inode after every cycle.** Restore is byte-exact, but the file's
+  mtime changes and any hardlink to it is severed on the first swap (the other name keeps
+  placeholders). Editors and reloaders react to the mtime.
 - **Hot reloaders see two changes.** A dev server that watches `.env` reloads when the swap
   writes and again when it restores — the second reload runs with placeholders. `swap` is for
   foreground commands; keep dev servers on plain injection.
@@ -824,6 +876,16 @@ plus additional pytest-only files:
   `tests/fixtures/file_envelope/golden.levault` is a byte-frozen format tripwire: every other test
   round-trips through the current code and would stay green if the on-disk format changed, which
   would silently make real users' committed files unopenable.
+- `tests/test_hardening_161.py` — 1.6.1: one test per finding of the post-1.6.0 review. The git
+  probe cannot run a repo's `core.fsmonitor`, resolves git from `PATH` only, refuses a `gitdir:`
+  file pointing at a share; journal entries off the registry are quarantined and a UNC path is
+  never stat-ed; a re-quoted secret is restored, a copied one reported by line number; the
+  restore writes in place against a process holding the file; an unreadable index yields the
+  `value ?` marker that resync numbers; a swap run times out and its grandchildren die; **a
+  real `TerminateProcess` of a swapping server is recovered by the next call in another
+  process** (and a live one is left alone); `--force`; `vault_status` sees real values without
+  a journal; a git command is refused; a cloud root is disclosed; a file that became tracked
+  during the run is reported.
 - `tests/test_swap.py`, `tests/test_consumption_matrix.py` — 1.6.0 in-place swap: style capture
   and faithful re-rendering, byte-exact swap/restore across BOM/CRLF/indent/`export`/duplicates,
   the two-tier restore and its conflict and verification paths, the journal's liveness rules
