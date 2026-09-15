@@ -133,12 +133,17 @@ def _recover_swaps() -> list:
     return reports
 
 
-def _live_swap_paths() -> dict:
-    """{normcased path: entry} for files some live server has real values in."""
+def _live_swap_paths() -> tuple:
+    """({normcased path: entry}, error) for files some live server has real
+    values in. On an unreadable journal the error is set and the dict is
+    empty -- callers that would rewrite a target must treat that as "cannot
+    tell" and refuse, not as "nothing is swapped". A corrupted journal is
+    exactly the state in which a file is most likely to be mid-swap with
+    nobody watching it."""
     try:
-        return {os.path.normcase(k): v for k, v in store.live_swaps().items()}
-    except (OSError, ValueError, RuntimeError):
-        return {}
+        return {os.path.normcase(k): v for k, v in store.live_swaps().items()}, None
+    except (OSError, ValueError, RuntimeError) as e:
+        return {}, f"swap.journal.json could not be read: {e}"
 
 
 def _with_swap_recovery(result_fn) -> dict:
@@ -252,10 +257,12 @@ def _vault_status_core() -> dict:
     # Files another live server currently has real values written into.
     # Disclosed so an agent can see why a resync skipped them and so a
     # human asking "is anything unlocked right now" gets a true answer.
-    live = _live_swap_paths()
+    live, live_error = _live_swap_paths()
     if live:
         result["swaps_in_progress"] = [
             {"path": k, "names": e["names"], "pid": e["pid"]} for k, e in sorted(live.items())]
+    if live_error:
+        result["swap_journal_error"] = live_error
 
     # Non-secret recovery-slot metadata so the agent can surface "you have no
     # recovery slot set up" without ever touching private key material.
@@ -548,7 +555,16 @@ def _install_migrate_impl(target_path: str) -> dict:
             return {"applied": False, "error": f"{target} does not exist."}
         if not target.is_file():
             return {"applied": False, "error": f"{target} is not a file."}
-        live = _live_swap_paths().get(os.path.normcase(str(target)))
+        live_all, live_error = _live_swap_paths()
+        if live_error:
+            # Fail closed: if the journal cannot say whether this file is
+            # mid-swap in another session, migrating it could capture real
+            # values as new secrets. Refuse until the journal is readable.
+            return {"applied": False,
+                    "error": f"cannot tell whether {target} is currently swapped by another "
+                             f"llm-env-vault session ({live_error}) -- refusing to migrate "
+                             f"it until swap.journal.json is readable."}
+        live = live_all.get(os.path.normcase(str(target)))
         if live:
             # The file holds REAL values right now, written by a run_with_env
             # swap in another session. Migrating it would re-capture them as
@@ -690,7 +706,13 @@ def _resync_targets_core() -> dict:
     if not targets:
         return {"message": "No target files registered. Call install_migrate first."}
 
-    live = _live_swap_paths()
+    live, live_error = _live_swap_paths()
+    if live_error:
+        # Same fail-closed rule as install_migrate: a resync rewrites managed
+        # lines, and an unreadable journal means it cannot know which files
+        # currently hold real values.
+        return {"error": f"refusing to resync: cannot tell which targets are mid-swap "
+                         f"({live_error})."}
     results = {}
     for path_str, names in targets.items():
         path = Path(path_str)
@@ -1300,7 +1322,8 @@ def _resolve_swap_plan(swap: list, cwd: Optional[str], only_vars: Optional[list]
                     f"swapped there: "
                     + "; ".join(f"{n}: {skipped.get(n, 'unknown')}" for n in contradicted))
         if not names:
-            why = "; ".join(f"{n}: {r}" for n, r in sorted(skipped.items())) or                 "it has no registered variables in the vault"
+            why = ("; ".join(f"{n}: {r}" for n, r in sorted(skipped.items()))
+                   or "it has no registered variables in the vault")
             raise ValueError(f"nothing in {key} would be swapped ({why}).")
         plan.append({
             "key": key, "path": path, "names": names, "skipped": skipped,
@@ -1313,8 +1336,29 @@ def _resolve_swap_plan(swap: list, cwd: Optional[str], only_vars: Optional[list]
 def _restore_swaps(swapped: list, index: dict) -> dict:
     """Undo every swap in `swapped` ([(key, path, record)]) in reverse order,
     each independently, then release or flag its journal entry. Returns the
-    per-file outcome the result reports. Never raises."""
-    outcome = {"restored": {}, "conflicts": {}, "verify_failed": {}, "failed": {}}
+    per-file outcome the result reports. Never raises.
+
+    Journal bookkeeping after the restore, per file:
+      - write failed            -> keep the entry, flagged restore_failed, so
+                                   every later tool call retries.
+      - verify_failed non-empty -> same. The write succeeded but a swapped
+                                   value was found in the file afterwards
+                                   (an editor re-saved a stale buffer); that
+                                   is a confirmed secret on disk and recovery
+                                   must keep going after it.
+      - conflicts only          -> remove the entry. A conflict is a line
+                                   someone changed during the run; recovery
+                                   rewrites journaled lines unconditionally
+                                   and would destroy that edit, which is the
+                                   one thing the restore refuses to do. The
+                                   result names the variable instead.
+      - clean                   -> remove the entry.
+    A failure of the bookkeeping itself is reported separately from a
+    failure of the restore: the placeholders are back on disk in that case,
+    and saying otherwise would send the user hunting for a leak that is not
+    there."""
+    outcome = {"restored": {}, "conflicts": {}, "verify_failed": {}, "failed": {},
+               "journal_errors": {}}
     for key, path, record in reversed(swapped):
         try:
             res = store.unswap_target_file(path, record, index)
@@ -1327,14 +1371,15 @@ def _restore_swaps(swapped: list, index: dict) -> dict:
             outcome["conflicts"][key] = res["conflicts"]
         if res["verify_failed"]:
             outcome["verify_failed"][key] = res["verify_failed"]
+        if res["error"]:
+            outcome["failed"][key] = res["error"]
         try:
-            if res["error"]:
-                outcome["failed"][key] = res["error"]
+            if res["error"] or res["verify_failed"]:
                 store.journal_mark_restore_failed(key)
             else:
                 store.journal_remove(key)
         except (OSError, ValueError, RuntimeError) as e:
-            outcome["failed"][key] = (outcome["failed"].get(key) or "") +                 f" (journal update failed: {e})"
+            outcome["journal_errors"][key] = str(e)
     return outcome
 
 
@@ -1862,6 +1907,12 @@ def _attach_swap_outcome(result: dict, swapped: list, swap_outcome: Optional[dic
             "(any tool, any session) retries the restore; you can also call vault_status "
             "to trigger it now: "
             + "; ".join(f"{k}: {v}" for k, v in swap_outcome["failed"].items()))
+    if swap_outcome.get("journal_errors"):
+        result["swap_journal_warning"] = (
+            "The placeholders were written back, but swap.journal.json could not be "
+            "updated afterwards -- a later tool call will re-run recovery on these files, "
+            "which is harmless on a restored file: "
+            + "; ".join(f"{k}: {v}" for k, v in swap_outcome["journal_errors"].items()))
     if swap_outcome["verify_failed"]:
         result["swap_verify_failed"] = swap_outcome["verify_failed"]
         result["swap_warning"] = (result.get("swap_warning", "") + " " if "swap_warning"
