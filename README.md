@@ -348,7 +348,14 @@ the environment win by default, so plain injection is the first thing to try.
   swap wrote; if an editor re-indented or re-terminated a line it still recognises the value and
   restores the canonical placeholder; a line that no longer carries the swapped value was edited
   by someone and is reported in `swap_restore_conflicts` rather than destroyed. After writing,
-  the file is re-read; any swapped value still present is reported in `swap_verify_failed`.
+  the file is re-read; any swapped value still present is reported in `swap_verify_failed` **and
+  the journal entry is kept**, so every later tool call retries the restore — a confirmed secret
+  on disk is treated exactly like a failed write. A conflict alone releases the entry: recovery
+  rewrites journaled lines unconditionally and would destroy the edit the restore just refused to.
+- **An unreadable journal fails closed.** If `swap.journal.json` is corrupted, `install_migrate`
+  and `resync_targets` refuse to touch any target (they cannot tell which file is mid-swap in
+  another session), `vault_status` reports `swap_journal_error`, and every tool result carries
+  the parse error under `swap_recovered` until it is fixed or deleted.
 - **The dialog says exactly what happens:** every file, how many values, which names are
   skipped and why, and — in amber — when the file is tracked by git, because a commit, stash
   or `git add -A` made while the command runs would capture the real values.

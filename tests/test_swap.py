@@ -607,6 +607,83 @@ def test_swap_restore_failure_keeps_journal_entry_and_next_call_recovers() -> No
         assert not store._journal_path().exists()
 
 
+def test_verify_failed_keeps_journal_entry_so_recovery_retries() -> None:
+    """The restore write succeeded but a swapped value is still in the file
+    afterwards (an editor re-saved a stale buffer). That is a confirmed
+    secret on disk: the journal entry must survive so the next tool call
+    rewrites it -- unlike a conflict, which is a user edit and is not."""
+    with workspace() as (project, env_path):
+        original_write = store._write_with_retries
+
+        def write_then_stale_editor_save(path, data, mode):
+            err = original_write(path, data, mode)
+            if err is None and b"value 3" in data:  # the restore write
+                # Stale buffer with the real value lands after the restore.
+                path.write_bytes(data.replace(b'PLAIN="value 3"', b"PLAIN=justletters123"))
+            return err
+
+        store._write_with_retries = write_then_stale_editor_save
+        try:
+            with fake_dialog(), stub_run():
+                r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None,
+                                                  None, swap=[".env"])
+        finally:
+            store._write_with_retries = original_write
+        assert r["swap_verify_failed"] == {str(env_path): ["PLAIN"]}
+        assert "swap_restore_failed" not in r
+        assert _read_journal()[str(env_path)]["state"] == "restore_failed"
+        status = mcp_server._vault_status_impl()
+        assert status["swap_recovered"][0]["restored"] == ["PLAIN"]
+        assert b"justletters123" not in env_path.read_bytes()
+        assert not store._journal_path().exists()
+
+
+def test_conflict_only_releases_journal_and_preserves_user_edit() -> None:
+    with workspace() as (project, env_path):
+        def observe(env, cwd):
+            env_path.write_bytes(env_path.read_bytes().replace(
+                b"PLAIN=justletters123", b"PLAIN=user-edit"))
+            return ""
+
+        with fake_dialog(), stub_run(observer=observe):
+            r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None, None,
+                                              swap=[".env"])
+        assert r["swap_restore_conflicts"] == {str(env_path): ["PLAIN"]}
+        assert not store._journal_path().exists()
+        # A later recovery must NOT rewrite the user's edit.
+        assert mcp_server._vault_status_impl().get("swap_recovered") is None
+        assert b"PLAIN=user-edit" in env_path.read_bytes()
+
+
+def test_journal_bookkeeping_failure_is_reported_separately_from_a_leak() -> None:
+    with workspace() as (project, env_path):
+        original_remove = store.journal_remove
+        store.journal_remove = lambda key: (_ for _ in ()).throw(RuntimeError("lock stuck"))
+        try:
+            with fake_dialog(), stub_run():
+                r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None,
+                                                  None, swap=[".env"])
+        finally:
+            store.journal_remove = original_remove
+        assert env_path.read_bytes() == PLACEHOLDER_ENV
+        assert "swap_restore_failed" not in r and "swap_warning" not in r
+        assert "lock stuck" in r["swap_journal_warning"]
+        store.journal_remove(str(env_path))
+
+
+def test_unreadable_journal_fails_closed_for_migrate_and_resync() -> None:
+    with workspace() as (project, env_path):
+        store._journal_path().write_text("{not json", encoding="utf-8")
+        r = mcp_server._install_migrate_impl(str(env_path))
+        assert "cannot tell whether" in r["error"]
+        r = mcp_server._resync_targets_core()
+        assert "cannot tell which targets" in r["error"]
+        status = mcp_server._vault_status_impl()
+        assert "swap.journal.json" in status["swap_journal_error"]
+        assert env_path.read_bytes() == PLACEHOLDER_ENV
+        store._journal_path().unlink()
+
+
 def test_startup_recovery_report_is_delivered_in_first_result() -> None:
     with workspace() as (project, env_path):
         mcp_server._startup_recovery.append({"path": "x", "restored": ["Y"]})

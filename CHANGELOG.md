@@ -65,6 +65,18 @@ pinning what a user installs.
 - A launch failure (`could not run …`) now reports a materialize file or restored whole file
   that could not be cleaned up, as a normal exit already did.
 
+### Fixed (pre-release, from the push-time review)
+
+- A swap whose post-restore verification still found a real value on disk released its journal
+  entry, so nothing ever retried; it is now flagged `restore_failed` like a failed write. A
+  conflict alone (a line the user edited during the run) still releases the entry, because
+  recovery would overwrite that edit.
+- `install_migrate` and `resync_targets` failed *open* on a corrupted `swap.journal.json` —
+  they treated "cannot read the journal" as "nothing is swapped". Both now refuse until it is
+  readable, and `vault_status` reports the error.
+- A failure to update the journal *after* a successful restore was reported as if real values
+  were still on disk. It is now a separate `swap_journal_warning`.
+
 ## [1.5.1] — 2026-09-13
 
 ### Fixed
