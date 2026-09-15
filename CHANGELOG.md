@@ -7,6 +7,64 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.6.0] — 2026-09-15
+
+### Added
+
+- **`run_with_env(swap=[...])` — real values in the project's own `.env` for one command.**
+  Every mainstream loader lets the process environment win over the file by default, so plain
+  injection was already enough for most consumers. Four classes it never reached: loaders with
+  override/overload semantics (`load_dotenv(override=True)`, `godotenv.Overload`, tox
+  `set_env = file|.env`, `direnv`), shell sourcing (`source .env`, `make include .env`), tools
+  hard-wired to the filename (Compose `env_file: .env`, `docker run --env-file .env`,
+  `kubectl --from-env-file`, an IDE's `envFile`), and test harnesses that scrub the child
+  environment before a loader runs — the case that started this: a suite that builds its
+  subprocess environment from an allowlist and parses `.env` from disk could only ever see
+  `"value 17"`. `swap` rewrites the placeholder lines of a registered target with the real values,
+  runs the foreground command, and restores the file byte-for-byte. Opt-in per call, scoped by
+  `only_vars`, refused with `background=True`, disclosed in the dialog (every file, the count of
+  values, what is skipped, and an amber line when git tracks the file).
+
+- **The original quoting of every migrated line is recorded** (`target_styles.json`) and
+  replayed by `swap`, because there is no quoting every parser agrees on: `docker run
+  --env-file`, `kubectl` and `make` keep quote characters literally, every dotenv-family loader
+  strips them, and `$` is interpolated by most of them. The form the user's tools were already
+  parsing is the only one known to be right. Files migrated earlier fall back to a conservative
+  policy and the result says so.
+
+- **A swap journal with process-liveness recovery.** `swap.journal.json` is written before the
+  first real byte lands and removed after the restore is verified from disk. If the server dies
+  mid-run, or the restore fails after retries, the next tool call in any session — or server
+  start, or `python mcp_server.py --recover` — restores the file and reports `swap_recovered`.
+  Liveness is pid **plus** process creation time (`GetProcessTimes` on Windows, `/proc` on
+  Linux) plus a per-process server id, so a recycled pid never masquerades as a live server; a
+  second server is refused a swap on a file another live one has open, and `resync_targets` /
+  `install_migrate` skip such files instead of rewriting them.
+
+- **Trust binds the swapped names, and the swapped file is drift-monitored.** `targets.json` is
+  agent-writable, so a signature keyed on paths alone would let an 8-hour grant for "swap two
+  values" auto-allow "swap twenty" once the registry grew. The names that would actually be
+  swapped — computed from the registry, the index and the file's current placeholder lines —
+  are part of the signature, and any edit to the file revokes the grant.
+
+- **`docs/env-consumption-research.md`** — the survey behind all of this: six consumption
+  mechanisms, per-tool precedence and parsing rules with primary-source citations, and the
+  quoting divergence. **`tests/test_consumption_matrix.py`** is its executable form: one real
+  child process per mechanism, using the `python-dotenv` and `pydantic-settings` that ship with
+  `mcp[cli]`, Node's `--env-file`, and bash. It already earned its keep — it caught the draft
+  document's claim that single quotes stop python-dotenv interpolating, which the installed
+  1.2.2 source disproves.
+
+### Changed
+
+- The unlock dialog gained a swap section; `unlock_for_run_dialog` takes a keyword-only `swap`
+  argument, defaulting to `None`, so existing callers and test wrappers are unaffected.
+- `run_with_env` output redaction also masks each value in its as-written form (quoted or
+  escaped), so a command that prints the swapped file cannot hand the value back through the
+  rendering.
+- A launch failure (`could not run …`) now reports a materialize file or restored whole file
+  that could not be cleaned up, as a normal exit already did.
+
 ## [1.5.1] — 2026-09-13
 
 ### Fixed

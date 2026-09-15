@@ -276,6 +276,29 @@ def _():
         "above would then pass for the wrong reason")
 
 
+@check("unlock_dialog_discloses_every_file_it_will_swap")
+def _():
+    """A swap= run writes real values INTO the project's own .env. The human
+    must see each file, how many values, what is skipped and why, the git
+    warning when the file is tracked, and that the trust checkbox is still
+    offered (same exposure class as materialize, not files=)."""
+    entries = [{"path": _FAKE_PLAINTEXT, "names": ["A", "B"], "skipped": {"C": "no line"},
+                "git_tracked": True, "git_ignored": False}]
+    widgets = build_dialog(lambda: gui.unlock_for_run_dialog(
+        "docker compose up", only_vars=["A", "B", "C"], swap=entries))
+    blob = all_text(widgets)
+    assert "real values into" in blob, (
+        "the unlock dialog no longer says it will write real values into project files")
+    # The per-file list (path, value count, skips) is a Text widget, which
+    # the snapshot cannot read -- the labels around it are what is checked.
+    assert "tracked by git" in blob, (
+        "the unlock dialog no longer warns that a swapped file is tracked by git")
+    assert "readable by the ai assistant" in blob, (
+        "the unlock dialog no longer discloses that the swapped file is agent-readable")
+    assert "Checkbutton" in [c for c, _t in widgets], (
+        "the trust checkbox vanished from swap runs -- they are the materialize class")
+
+
 @check("every_dialog_constructs")
 def _():
     orig_info, orig_ver = store.vault_info, store.vault_format_version

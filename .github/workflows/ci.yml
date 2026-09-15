@@ -44,6 +44,8 @@ jobs:
           python tests/test_manage_vault.py
           python tests/test_integration_v2.py
           python tests/test_security_invariants.py
+          python tests/test_swap.py
+          python tests/test_consumption_matrix.py
 
       - name: Run under pytest
         run: python -m pytest -q

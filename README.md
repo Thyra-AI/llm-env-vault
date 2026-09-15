@@ -41,6 +41,8 @@ The vault lives as a small set of files, in one of two places depending on how y
 | `vault.salt` | 16-byte KDF salt (kept after a v2 upgrade — deleting it bricks v1 backups) | No (gitignored) | **No** |
 | `targets.json` | Paths of migrated `.env` files | No (gitignored — machine-local paths, not secret) | No |
 | `files.json` | Paths, names and sizes of whole files you've encrypted (no contents) | No (gitignored — machine-local paths, not secret) | Yes |
+| `target_styles.json` | How each migrated line was quoted (`"`, `'` or unquoted) so `swap` can put the real value back the same way (no secrets) | No (gitignored) | Yes |
+| `swap.journal.json` | Which files currently have real values swapped in, by which server process (names only, no values); exists only during a `swap` run or after a crash | No (gitignored) | Yes |
 | `*.levault` | A whole encrypted file, living in **your project**, not here | **Yes — that's the point** | Yes (it's ciphertext) |
 
 `llm.env` and `vault_index.json` contain no secrets, and a migrated project's own placeholder-only
@@ -237,7 +239,7 @@ Conservative by construction: a line is only rewritten if it's a managed variabl
 
 Two known quirks (see [Known limitations](#known-limitations)): this ongoing path is not multi-line-aware, and a resync normalizes the file's line endings even when nothing else changed.
 
-### `run_with_env(command, materialize=None, background=False, cwd=None, only_vars=None, files=None)`
+### `run_with_env(command, materialize=None, background=False, cwd=None, only_vars=None, files=None, swap=None)`
 
 The consumption side: runs a real command with the vault's real values injected as environment variables. Since `llm.env` never contains real values, this is how your app actually gets its secrets.
 
@@ -297,11 +299,105 @@ run_with_env(
 - Not compatible with `background=True` (no reliable moment to clean the file up).
 - If your `docker-compose.yml` only uses `${VAR}` interpolation and no explicit env file, you don't need `materialize` at all — Compose reads variables from the parent process environment.
 
+**`swap`** — for consumers that read the project's own `.env` and nothing else reaches. Lists
+registered `install_migrate` targets (paths relative to `cwd`) whose placeholder lines are
+rewritten with the **real** values for the lifetime of the command, then put back:
+
+```python
+run_with_env(command=["docker", "compose", "up"], cwd="/path/to/project",
+             swap=[".env"], only_vars=["DATABASE_URL", "REDIS_URL"])
+```
+
+This is `materialize` at the canonical path, and it exists because four kinds of consumer cannot
+be served any other way (see [Which consumers need which mode](#which-consumers-need-which-mode)
+and the full survey in [docs/env-consumption-research.md](docs/env-consumption-research.md)):
+loaders that override the environment from the file (`load_dotenv(override=True)`,
+`godotenv.Overload`, `dotenv-override`, tox `set_env = file|.env`, `direnv`), shell sourcing
+(`source .env`, `make include .env`), tools hard-wired to the filename (Compose `env_file: .env`,
+`docker run --env-file .env`, `kubectl --from-env-file .env`, an IDE's `envFile`), and test
+harnesses that scrub the child environment before a loader runs. Every mainstream loader lets
+the environment win by default, so plain injection is the first thing to try.
+
+- **Only registered targets, only their own names, only placeholder lines.** A line whose value
+  is not currently one of this tool's placeholders is skipped and reported, never overwritten;
+  a registered name with no line is skipped, never appended. Comments, other variables,
+  indentation, `export` prefixes, a BOM and every line's own terminator pass through untouched,
+  so the restored file is byte-identical to the one the command started with.
+- **Each value goes back in the quoting its original line used.** `install_migrate` now records
+  whether a line was unquoted, single- or double-quoted, and `swap` re-emits the real value in
+  that exact form — because no quoting works for every parser: `docker run --env-file`,
+  `kubectl` and `make` keep quote characters literally, every dotenv-family loader strips
+  them, and `$` is interpolated by most of them. The form your tools were already parsing is
+  the only one known to be right. Files migrated before 1.6.0 have no recorded style and get a
+  conservative fallback (raw when every character is universally safe, otherwise single-quoted,
+  otherwise double-quoted with escapes); the result's `swap_note` says when that happened.
+- **`only_vars` scopes the swap** exactly as it scopes injection. Nothing swappable in a listed
+  file, or an `only_vars` name that cannot be swapped where you asked, is refused before the
+  dialog opens.
+- **Restored in a `finally`, retried, verified from disk, and journaled.** The placeholders go
+  back on normal exit, non-zero exit, launch failure, Ctrl+C and SIGTERM. Before the first real
+  byte lands, `swap.journal.json` in the vault directory records the file, the names and the
+  server process; the entry is removed only after the restore is verified. If this server dies
+  mid-run — or the restore itself fails after retries — the next tool call in **any** session
+  (`run_with_env`, `vault_status`, `resync_targets`, `install_migrate`, or server start, or
+  `python mcp_server.py --recover` from a terminal) restores the file from the journal and
+  reports it as `swap_recovered`. Liveness is decided by pid **and** process start time, so a
+  recycled pid is never mistaken for the original server, and a second server is refused a swap
+  on a file another live server has open.
+- **A line changed during the run is left alone.** The restore puts back exactly the bytes the
+  swap wrote; if an editor re-indented or re-terminated a line it still recognises the value and
+  restores the canonical placeholder; a line that no longer carries the swapped value was edited
+  by someone and is reported in `swap_restore_conflicts` rather than destroyed. After writing,
+  the file is re-read; any swapped value still present is reported in `swap_verify_failed`.
+- **The dialog says exactly what happens:** every file, how many values, which names are
+  skipped and why, and — in amber — when the file is tracked by git, because a commit, stash
+  or `git add -A` made while the command runs would capture the real values.
+- **Not compatible with `background=True`.** A detached process has no exit moment at which to
+  restore, and a `.env` full of real values left behind indefinitely is exactly what this tool
+  exists to prevent. Dev servers load `.env` at startup — run them through plain injection.
+- **Trust works** (same exposure class as `materialize`), and the signature binds the *names*
+  that would be swapped, not just the paths — `targets.json` is agent-writable, so a grant for
+  "swap two values" can never auto-allow "swap twenty" after the registry grew. The swapped
+  file itself is drift-monitored, so any edit to it revokes trust.
+- **While the command runs, the real values are readable by anything that can read the file** —
+  the AI assistant included, exactly as with a `materialize` target. The agent instructions
+  forbid reading it; that is policy, not a boundary. Close the file in your editor first: an
+  editor that reloads the swapped content and later saves its buffer *after* the restore writes
+  the secrets back with no journal to catch it (the post-restore verification catches only the
+  cases that happen before the tool returns). IDE local history, VS Code's timeline, and a
+  cloud-sync folder can all keep a copy of the swapped content; see Known limitations.
+
 **`background=True`** — starts the process detached (stdin closed, stdout/stderr redirected to a temp log file — never the MCP server's own stdio, which is the JSON-RPC channel) and returns immediately with the `pid` and `log_file` path. For long-running things like dev servers. The tool does not track or stop the process afterward — use your own process manager. Foreground calls block and return stdout/stderr (truncated to the last 4000 chars each) plus the exit code.
 
 Every result includes an `auto_allowed` flag, plus a `trust_note` whenever trust was used, granted, or revoked — an auto-allowed run is never silent even though no dialog appeared.
 
 ---
+
+### Which consumers need which mode
+
+Every program gets a value out of a `.env` in one of six ways. The full per-tool survey, with
+sources, is [docs/env-consumption-research.md](docs/env-consumption-research.md); the executable
+version is `tests/test_consumption_matrix.py`, which runs each mechanism through the vault with
+the real `python-dotenv` and `pydantic-settings` (both ship with `mcp[cli]`), Node's built-in
+`--env-file`, and bash.
+
+| Mechanism | Examples | Mode |
+|---|---|---|
+| Reads its process environment | `os.environ`, `process.env`, `${VAR}` in a compose file, `docker run -e`, `TF_VAR_x`, AWS/gcloud CLIs | plain `run_with_env` |
+| Loads `.env`, environment wins (the default everywhere) | python-dotenv, pydantic-settings, Flask, django-environ, Node ≥ 20.6 `--env-file`, dotenv npm, Vite, Next, Bun, Deno, godotenv, dotenvy, phpdotenv/Laravel, Ruby dotenv, `just`, Taskfile, `uv run --env-file`, pytest-dotenv | plain `run_with_env` — **unless** the process that loads the file was started with a scrubbed environment (a hermetic test harness, `env -i`), in which case the file is the only source: `swap` |
+| Loads `.env`, file wins | `load_dotenv(override=True)`, `dotenv.config({override:true})`, `godotenv.Overload`, `dotenv_override()`, `Dotenv.overload`, `dotenvx --overload`, `just` `dotenv-override`, tox `set_env = file\|.env`, `direnv`'s `dotenv` | `swap` |
+| Shell-sources the file | `source .env`, `set -a; . .env`, `export $(grep -v '^#' .env \| xargs)`, `make` `include .env` | `swap` |
+| Reads a file as the only source | `docker run --env-file`, Compose `env_file:`, `kubectl create secret --from-env-file`, VS Code `envFile`, JetBrains EnvFile | `materialize` when you choose the path; `swap` when the tool is hard-wired to `.env` |
+| Validates types at load | pydantic-settings `port: int`, django-environ `env.int()`, Spring `.properties` | `swap` at run time. A placeholder-only file still fails their validation when the vault is not involved at all — a shape-preserving placeholder is a deferred follow-up, not part of 1.6.0 |
+
+For an IDE debug session that reads `envFile`, launch the IDE itself through the vault so every
+terminal and debug session it opens inherits the real environment:
+`run_with_env(command=["code", "."], background=True, only_vars=[...])`.
+
+Two things no mode can fix, because they are properties of the consumer: `docker run
+--env-file`, `kubectl` and `make` deliver quote characters literally (if your original line
+was quoted, they always got the quotes), and python-dotenv expands `${NAME}` inside values in
+every quoting style unless it is called with `interpolate=False`.
 
 ### `encrypt_file(path)`
 
@@ -594,6 +690,21 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
   An agent that chooses the command line can also transform output (gzip, chunk, re-encode) in
   ways that defeat string matching. `only_vars` remains the first line of defence — scope
   injection to what the command actually needs.
+- **`swap` puts real values into the project's own `.env` for the duration of one command.**
+  Same exposure class as `materialize`, at a path far more likely to be committed, synced, or
+  open in an editor. The dialog names every file and warns when git tracks it; the journal and
+  restore layers close the crash, interrupt and failed-write cases; the post-restore
+  verification catches a write-back that happens before the tool returns. What they cannot
+  close: a commit, stash or `git add -A` made *during* the run (including by the command itself);
+  an editor buffer saved *after* the restore; IDE local history and VS Code's timeline, which
+  snapshot external changes into their own storage; a cloud-sync client uploading the swapped
+  file before it is restored. If any of those happened, rotate the credential.
+- **`target_styles.json` and `swap.journal.json` are plaintext and agent-writable**, like
+  `targets.json`. Both are validated on read. A forged style only changes the quoting of a line
+  the agent could already rewrite wholesale. A forged journal entry can at most trigger a
+  restore of placeholders into a registered file's managed lines — the same lines
+  `resync_targets` may already rewrite without a password — and a deleted journal hides nothing
+  the agent could not have hidden by editing `.env` directly.
 - This is not an "intercept every file access" system — that would require a kernel-level filter driver or virtual filesystem (elevated install, fragile). Instead: files are placeholder-only by default, and real values only exist at moments a human deliberately triggered, each gated by the password prompt.
 - `vault_index.json` is validated on every read, not just write — a hand-edited or tampered entry can't inject unexpected content into a synced target file.
 - **Crypto details:** v2 vaults use scrypt (`n=2**16, r=8, p=1`, 64 MiB) for key derivation,
@@ -616,6 +727,25 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
   no way to wipe them from memory.** They may be interned, referenced from tracebacks, or held
   alive by the garbage collector beyond the immediate operation. "The password only lives for the
   duration of one prompt" should not be read as a stronger guarantee than CPython can deliver.
+- **`swap` crash recovery restores the canonical placeholder, not the original line.** The
+  in-process restore is byte-exact; a restore performed from the journal after a server crash
+  has no record of the original bytes, so it writes `NAME="value N"` with the line's current
+  indent and terminator — trailing whitespace on that line, or a non-standard placeholder
+  quoting, is not preserved. It also rewrites unconditionally: a value you typed into a
+  journaled line during the crashed run is replaced, and the report says so.
+- **`swap` liveness is best-effort on platforms without process start times.** Windows (via
+  `GetProcessTimes`) and Linux (`/proc`) report them; elsewhere a journal entry whose pid has
+  been recycled by an unrelated process is treated as live until that process exits or
+  `python mcp_server.py --recover` is run by hand. The per-process server id still catches the
+  case where a restarted server is handed its predecessor's pid.
+- **Hot reloaders see two changes.** A dev server that watches `.env` reloads when the swap
+  writes and again when it restores — the second reload runs with placeholders. `swap` is for
+  foreground commands; keep dev servers on plain injection.
+- **`swap` with a quoted original and a literal reader delivers the quotes.** `docker run
+  --env-file .env`, `kubectl --from-env-file` and `make include` never strip quotes. If your
+  line was `KEY="value"` before migration, those tools always received `"value"` with the
+  quotes; `swap` faithfully gives them the same. That is the consumer's behaviour, not the
+  vault's.
 - **Do not store the vault in a synced folder (OneDrive, Dropbox, Syncthing, etc.).** A
   `materialize` target written by `run_with_env` is a real-values file on disk for the duration
   of the command. A sync client can upload that file within the command's lifetime, and deleting
@@ -687,6 +817,14 @@ plus additional pytest-only files:
   `tests/fixtures/file_envelope/golden.levault` is a byte-frozen format tripwire: every other test
   round-trips through the current code and would stay green if the on-disk format changed, which
   would silently make real users' committed files unopenable.
+- `tests/test_swap.py`, `tests/test_consumption_matrix.py` — 1.6.0 in-place swap: style capture
+  and faithful re-rendering, byte-exact swap/restore across BOM/CRLF/indent/`export`/duplicates,
+  the two-tier restore and its conflict and verification paths, the journal's liveness rules
+  (dead pid, recycled pid, another live server, own pid with a foreign server id), crash
+  recovery including the temp-file sweep, every pre-dialog refusal, trust binding the swapped
+  names, drift revocation on the swapped file, and end-to-end runs where a child with a scrubbed
+  environment reads the real value from disk. The matrix file is the executable form of
+  `docs/env-consumption-research.md`: one real child process per consumption mechanism.
 
 All tests fully isolate the real vault — running the suite never touches your actual vault. Run
 from the project venv:
@@ -711,3 +849,7 @@ If you are an AI assistant with this MCP server available:
 - Only `llm.env` and `vault_index.json` are meant for you to read directly.
 - **Never ask the human to paste a secret value or the master password into chat.** Route secrets through `add_secret` / `install_migrate` and let the human type values into the GUI themselves.
 - Prefer `only_vars` on `run_with_env` whenever you know which variables the command needs.
+- Use `swap` only when the consumer is known to read the `.env` file and nothing else reaches
+  it; never read the swapped file while the command runs; and if a result carries
+  `swap_restore_conflicts`, `swap_restore_failed`, `swap_verify_failed` or `swap_recovered`,
+  show it to the human verbatim and wait.

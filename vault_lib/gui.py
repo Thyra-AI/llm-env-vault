@@ -1252,8 +1252,8 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                 # comprehension unpacks the for-target before applying the
                 # if-filter, so `for kind, n, v in ...` would raise on the
                 # very first comment or blank line in the file.
-                fresh = {item[1]: item[2] for item in store.parse_env_file(target)
-                         if item[0] == "var"}
+                fresh_parsed, fresh_styles = store.parse_env_file_with_styles(target)
+                fresh = {item[1]: item[2] for item in fresh_parsed if item[0] == "var"}
 
                 index = store.load_index()
                 names = [name for name, _ in to_migrate]
@@ -1274,6 +1274,14 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                 vault_saved = True
                 all_names = names + [n for n in also_register if n not in names]
                 store.add_target(str(target), all_names)
+                # Remember how each migrated line was quoted, so a later
+                # run_with_env(swap=...) can put the real value back in the
+                # exact form this file's consumers were already parsing.
+                # Recorded only for the names captured right now -- a name
+                # that was already a placeholder tells us nothing about
+                # its original quoting.
+                store.record_target_styles(
+                    str(target), {n: fresh_styles[n] for n in names if n in fresh_styles})
                 conflicts = store.sync_target_file(
                     target, index, set(all_names), force_names=set(names))
                 outcome["conflicts"] = conflicts
@@ -2020,7 +2028,7 @@ def _manage_action_result_keys(action: str) -> frozenset:
 
 
 def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None,
-                          trust_note: str = None, files=None):
+                          trust_note: str = None, files=None, *, swap=None):
     """Used by the run_with_env MCP tool. Returns an outcome dict:
     {"secrets": dict_or_None, "trust": bool}. secrets is None if
     denied/failed, in which case trust is always False. When only_vars is
@@ -2042,6 +2050,17 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     different risk from injecting a token into an environment, and this
     feature was designed for the latter. Every files= run is approved by a
     human, every time.
+
+    swap: optional list of {"path", "names", "skipped", "git_tracked",
+    "git_ignored"} dicts -- registered .env files whose placeholder lines
+    will be overwritten with real values for the lifetime of the command
+    and restored when it exits. Keyword-only with a None default so every
+    existing caller and test wrapper is unaffected. Disclosed here in full:
+    which files, how many values, what is skipped and why, and -- in amber
+    -- when the file is tracked by git, since a commit made while the
+    command runs would capture the real values. The trust checkbox stays
+    available: this is the same exposure class as materialize (real values
+    on disk for one run), not the files= class.
 
     trust_note: optional text shown above the command box, e.g. an
     explanation that a *previous* trust grant for this same command was
@@ -2190,6 +2209,48 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
         path_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
         row += 1
         _label(root, "(file deleted the moment the command exits)", fg=FG_MUTED).grid(
+            row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+
+    if swap:
+        _label(root, "Writes REAL values INTO these project file(s) while the command runs:",
+               fg=WARNING, justify="left").grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(6, 0))
+        row += 1
+        swap_frame = tk.Frame(root, bg=WINDOW_BG)
+        swap_txt = _textbox(swap_frame, fg=FG, font=FONT_BODY,
+                            height=min(6, max(2, len(swap))), width=52)
+        for entry in swap:
+            names = entry.get("names") or []
+            skipped = entry.get("skipped") or {}
+            line = (f"{_collapse_whitespace(str(entry.get('path')))}  "
+                    f"({len(names)} value{'s' if len(names) != 1 else ''}")
+            if skipped:
+                line += f"; skips {', '.join(sorted(skipped))}"
+            line += ")"
+            swap_txt.insert("end", line + "\n")
+        swap_txt.config(state="disabled")
+        swap_yscroll = _scrollbar(swap_frame, orient="vertical", command=swap_txt.yview)
+        swap_txt.config(yscrollcommand=swap_yscroll.set)
+        swap_txt.grid(row=0, column=0, sticky="nsew")
+        swap_yscroll.grid(row=0, column=1, sticky="ns")
+        swap_frame.grid_rowconfigure(0, weight=1)
+        swap_frame.grid_columnconfigure(0, weight=1)
+        swap_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
+        row += 1
+        tracked = [str(e.get("path")) for e in swap if e.get("git_tracked") is True]
+        if tracked:
+            _label(root, "Tracked by git -- do not commit, stash or `git add -A` until this "
+                         "command finishes: " + ", ".join(
+                             _collapse_whitespace(t) for t in tracked),
+                   fg=WARNING, justify="left", wraplength=480).grid(
+                row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+            row += 1
+        _label(root, "Placeholders are restored when the command exits or is interrupted. "
+                     "While it runs, the real values are readable by the AI assistant and by "
+                     "anything watching the file: your editor, hot reloaders, IDE local "
+                     "history, cloud-sync folders. Close the file in your editor first.",
+               fg=FG_MUTED, justify="left", wraplength=480).grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
 

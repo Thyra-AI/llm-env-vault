@@ -7,6 +7,9 @@ targets.json.lock
 files.json
 vault.enc.lock
 files.json.lock
+target_styles.json
+swap.journal.json
+swap.journal.lock
 vault_index.json
 # Generated from whatever vault happens to be local. Plugin installs are git
 # clones and ignore this file, so anything tracked here ships to every user --
