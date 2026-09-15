@@ -259,22 +259,50 @@ def run_bound(argv, env, cwd, timeout: Optional[float]) -> RunResult:
         proc = subprocess.Popen(argv, start_new_session=True, **kwargs)
         binding = "session"
 
-    def _kill_tree() -> None:
-        if terminate is not None:
-            terminate()
-        elif sys.platform != "win32":
+    import threading
+
+    # The job handle is touched from two threads: the main thread closes it
+    # in its finally, the watchdog may terminate through it seconds later.
+    # One lock and one flag make "terminate after close" impossible -- a
+    # closed handle value can be reused by the OS for an unrelated object,
+    # and TerminateJobObject on that would be exactly the kind of bug that
+    # only shows up on someone else's machine.
+    job_lock = threading.Lock()
+    job_state = {"closed": False}
+
+    def _terminate_job() -> None:
+        with job_lock:
+            if terminate is not None and not job_state["closed"]:
+                terminate()
+
+    def _close_job() -> None:
+        with job_lock:
+            if close is not None and not job_state["closed"]:
+                job_state["closed"] = True
+                close()
+
+    def _kill_tree(leader_reaped: bool = False) -> None:
+        if sys.platform == "win32":
+            _terminate_job()
+        else:
             import signal
-            # poll() first: once the leader is reaped its pgid could be
-            # reused, and killpg would then hit an unrelated group.
-            if proc.poll() is None:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-        try:
-            proc.kill()
-        except OSError:
-            pass
+            # The leader was started with its own session, so its pid is the
+            # pgid. Once the leader has been reaped that pgid could in theory
+            # be handed to a new session leader -- within the two-second
+            # grace window that would need a pid wrap-around to land exactly
+            # there, which is accepted over the alternative: never killing
+            # the descendants at all, which is what a poll() guard here did
+            # (after wait() the cached returncode makes poll() non-None, so
+            # the guard was always false on the watchdog path).
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        if not leader_reaped:
+            try:
+                proc.kill()
+            except OSError:
+                pass
 
     # communicate() returns only when the LAST holder of the output pipes
     # closes them. A descendant the command left behind (a dev server
@@ -283,16 +311,16 @@ def run_bound(argv, env, cwd, timeout: Optional[float]) -> RunResult:
     # time. The watchdog waits for the direct child, gives its descendants
     # a short grace to finish flushing, then ends the tree. It must not
     # drain the pipes itself: only communicate() may, or a chatty child
-    # deadlocks on a full buffer.
-    import threading
-
+    # deadlocks on a full buffer. On Windows the main thread's job close
+    # already ends the tree once communicate() returns; the watchdog is what
+    # unblocks communicate() when a descendant is holding the pipes open.
     def _watchdog() -> None:
         try:
             proc.wait()
         except Exception:  # noqa: BLE001
             return
         time.sleep(_DESCENDANT_GRACE_SECONDS)
-        _kill_tree()
+        _kill_tree(leader_reaped=True)
 
     threading.Thread(target=_watchdog, daemon=True).start()
     timed_out = False
@@ -307,8 +335,7 @@ def run_bound(argv, env, cwd, timeout: Optional[float]) -> RunResult:
             _kill_tree()
             raise
     finally:
-        if close is not None:
-            close()
+        _close_job()
     return RunResult(None if timed_out else proc.returncode, stdout, stderr, timed_out, binding)
 
 
