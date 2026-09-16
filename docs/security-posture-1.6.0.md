@@ -7,6 +7,16 @@ added is marked **NEW**; everything else is the standing model, restated so the 
 be judged against it. Paragraphs marked **1.6.1** record what the hostile review of the 1.6.0
 version of this document changed.
 
+**1.7.0 — `max_reads`.** The window is now bounded by *reads*, not time: with an oplock held on
+an exclusive handle, every open of the file is observed the instant it happens, and after N the
+placeholders go back while the command still runs. Attribution uses the Restart Manager and the
+run's Job object; an open too fast to be named is counted while the command is running and
+labelled `unattributed` — an early revert the command notices is a reported correctness
+failure, never a leak. What it does *not* change: a concurrent same-user reader is held, reads,
+and is counted; the file is a new set of bytes but the same inode (restored in place, so no
+hardlink is severed and no `os.replace` race exists); and the exposure in the paragraph below
+is unchanged in kind, only shorter. Windows only; refused pre-dialog elsewhere.
+
 **The ceiling of the threat model, stated first.** An agent with filesystem read access can
 read a swapped or materialized file while the command runs — from a batched tool call, or from
 a second session — and no software running under the same OS account prevents it. Trusting a
@@ -31,7 +41,7 @@ dialog:**
 | `materialize` target (a fresh path that must not exist) | 1.0 | one command | `finally`: unlink | none — the file stays; result would have warned only if the tool returned |
 | `files=` restored plaintext (a decrypted `.levault`) | 1.5.0 | one command | `finally`: secure_delete, survivors named | none — same |
 | background run log (`llm-env-vault-run-*.log`) | 1.0 | until process exit | redacted in place by a watcher thread | none — log stays unredacted if the server dies first |
-| **NEW `swap` target — the project's own registered `.env`** | 1.6.0 | one command | `finally`: two-tier restore, retried, verified from disk | **journal-driven restore by the next tool call in any session, server start, or `--recover`** |
+| **NEW `swap` target — the project's own registered `.env`** | 1.6.0 | one command — or, with **`max_reads` (1.7.0)**, until the command has read the file N times: typically milliseconds | `finally`: two-tier restore, retried, verified from disk; with `max_reads`, restored mid-run through the exclusive handle the server holds | **journal-driven restore by the next tool call in any session, server start, or `--recover`** |
 
 The swap is the same exposure class as `materialize`, at a path far more likely to be
 committed, synced or open in an editor. That is why it got the journal and the verification the

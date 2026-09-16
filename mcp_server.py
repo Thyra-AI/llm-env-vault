@@ -35,7 +35,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from vault_lib import gui, procs, store, trust
+from vault_lib import gui, procs, singleview, store, trust
 from vault_lib.crypto import (WrongPassword, WrongRecoveryKey, MalformedRecoveryKey,
                               NoRecoverySlot, VaultCorrupted, VaultTampered)
 
@@ -93,7 +93,8 @@ compose `env_file:`, `docker run --env-file .env`, kubectl --from-env-file, \
 or a test harness that scrubs the child environment. Prefer plain injection \
 when the tool reads its environment (almost all do by default), and \
 materialize= when it accepts an env-file path of your choosing. Always pair \
-swap with only_vars.
+swap with only_vars, and with max_reads=1 (2 for docker compose) so the file \
+reverts the moment the command has read it instead of when it exits.
 - While a swap run is active, never read, cat, copy, hash, diff, commit or \
 stash the swapped file, and never run a git write command in that project. \
 Never edit targets.json, target_styles.json or swap.journal.json.
@@ -1651,7 +1652,14 @@ def _restore_swaps(swapped: list, index: dict) -> dict:
                "journal_errors": {}}
     for key, path, record in reversed(swapped):
         try:
-            res = store.unswap_target_file(path, record, index)
+            if record.get("early_result") is not None:
+                # The single-view watcher already put the placeholders back
+                # through its own handle, mid-run. Running the file-based
+                # restore again would find placeholders where it expects
+                # rendered values and report every line as a conflict.
+                res = record["early_result"]
+            else:
+                res = store.unswap_target_file(path, record, index)
         except Exception as e:  # noqa: BLE001 -- must reach the journal step regardless
             res = {"restored": [], "conflicts": [], "verify_failed": [],
                    "error": f"{type(e).__name__}: {e}"}
@@ -1684,8 +1692,55 @@ SWAP_DEFAULT_TIMEOUT_SECONDS = 3600
 MAX_TIMEOUT_SECONDS = 24 * 3600
 
 
+def _swap_through_watcher(key: str, path: Path, names, secrets: dict, styles: dict,
+                          max_reads: int, index: dict, restore_lock, watchers: dict,
+                          deadline) -> dict:
+    """The max_reads variant of store.swap_target_file: the real values go in
+    THROUGH the watcher's exclusive handle, so the file is armed from the
+    first byte. Returns the swap record; the watcher is registered in
+    `watchers`. Any failure closes the handle with nothing written."""
+    record_box = {}
+
+    def on_restore(w):
+        raw = w.read_all()
+        new_bytes, res, _changed = store.compute_unswap_bytes(raw, record_box["record"], index,
+                                                              label=key)
+        w.write_all(new_bytes)
+        # The write succeeded: from here the placeholders ARE on disk and the
+        # end-of-run path must not run the file-based restore again (it
+        # would see placeholders where it expects rendered values). A
+        # failing verification read is reported as unverified, not as a
+        # failed restore.
+        try:
+            return store.verify_unswap_bytes(w.read_all(), record_box["record"], res, label=key)
+        except Exception as e:  # noqa: BLE001
+            res["verify_failed"] = []
+            res["verify_error"] = f"{type(e).__name__}: {e}"
+            return res
+
+    w = singleview.Watcher(path, max_reads, on_restore, restore_lock, deadline=deadline)
+    w.open()
+    try:
+        raw = w.read_all()
+        new_bytes, record = store.compute_swap_bytes(raw, names, secrets, styles, label=key)
+        record_box["record"] = record
+        if record["lines"]:
+            w.write_all(new_bytes)
+            w.arm()
+            w.settle()
+    except Exception:
+        w.close()
+        raise
+    if not record["lines"]:
+        w.close()
+        return record
+    watchers[key] = w
+    return record
+
+
 def _run_command(command: list, env: dict, cwd: Optional[str],
-                 timeout: Optional[float], bind: bool = True) -> procs.RunResult:
+                 timeout: Optional[float], bind: bool = True,
+                 on_start=None) -> procs.RunResult:
     """The one place a foreground command is executed. A seam for tests, and
     the point where the child is bound to this server's lifetime.
 
@@ -1698,22 +1753,27 @@ def _run_command(command: list, env: dict, cwd: Optional[str],
                               encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
                               timeout=timeout)
         return procs.RunResult(proc.returncode, proc.stdout, proc.stderr, False, "none")
-    return procs.run_bound(command, env, cwd, timeout)
+    return procs.run_bound(command, env, cwd, timeout, on_start=on_start)
+
+
+MAX_READS_LIMIT = 1000
 
 
 def _run_with_env_impl(command: list, materialize: Optional[str], background: bool,
                         cwd: Optional[str], only_vars: Optional[list] = None,
                         files: Optional[list] = None, swap: Optional[list] = None,
-                        timeout: Optional[int] = None) -> dict:
+                        timeout: Optional[int] = None,
+                        max_reads: Optional[int] = None) -> dict:
     return _with_swap_recovery(
         lambda: _run_with_env_core(command, materialize, background, cwd, only_vars, files,
-                                   swap, timeout))
+                                   swap, timeout, max_reads))
 
 
 def _run_with_env_core(command: list, materialize: Optional[str], background: bool,
                         cwd: Optional[str], only_vars: Optional[list] = None,
                         files: Optional[list] = None, swap: Optional[list] = None,
-                        timeout: Optional[int] = None) -> dict:
+                        timeout: Optional[int] = None,
+                        max_reads: Optional[int] = None) -> dict:
     if not command or not all(isinstance(c, str) for c in command):
         return {"error": "command must be a non-empty list of strings."}
     # Before anything resolves, stats or which()es these: a UNC string in
@@ -1733,6 +1793,19 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                              "process is detached; nothing is left to enforce it)."}
     if swap and timeout is None:
         timeout = SWAP_DEFAULT_TIMEOUT_SECONDS
+    if max_reads is not None:
+        if isinstance(max_reads, bool) or not isinstance(max_reads, int) or \
+                not 1 <= max_reads <= MAX_READS_LIMIT:
+            return {"error": f"max_reads must be an integer between 1 and {MAX_READS_LIMIT}."}
+        if not swap and not materialize:
+            return {"error": "max_reads only means something with swap= or materialize= -- "
+                             "there is no file to revert otherwise."}
+        if background:
+            return {"error": "max_reads is not supported together with background=True in "
+                             "this release."}
+        reason = singleview.unsupported_reason()
+        if reason:
+            return {"error": reason}
     if background and swap:
         return {"error": "swap is not supported together with background=True (a detached "
                          "process has no exit moment at which the placeholders could be "
@@ -1787,6 +1860,15 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
     except (OSError, ValueError, VaultCorrupted, VaultTampered, UnicodeDecodeError) as e:
         return {"error": str(e)}
     swap_keys = [e["key"] for e in swap_plan]
+    if max_reads is not None:
+        # Prove on each target -- before the dialog, on placeholder content
+        # -- that this filesystem grants an oplock with handle caching and
+        # holds a foreign open until we release. The dialog then promises
+        # only what will hold.
+        for entry in swap_plan:
+            reason = singleview.self_test(entry["key"])
+            if reason:
+                return {"error": f"max_reads cannot be honoured for {entry['key']}: {reason}"}
 
     # Trust is scoped to this exact (command, cwd, only_vars, materialize,
     # background) shape AND the content of every file named directly on
@@ -1797,7 +1879,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                                       files,
                                       swap=[(e["key"], e["names"]) for e in swap_plan]
                                       if swap_plan else None,
-                                      timeout=timeout)
+                                      timeout=timeout, max_reads=max_reads)
     if file_pairs:
         # A run that writes decrypted files to disk is NEVER auto-allowed and
         # never grants trust: a human sees the paths and approves every single
@@ -1877,7 +1959,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                                                     "git_ignored": e["git_ignored"],
                                                     "cloud": e["cloud"]}
                                                    for e in swap_plan] or None,
-                                             timeout=timeout)
+                                             timeout=timeout, max_reads=max_reads)
         raw_secrets = outcome["secrets"]
         if raw_secrets is None:
             result = {"applied": False, "message": "Denied by user."}
@@ -1951,6 +2033,16 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
             trust_info["trust_note"] = invalidated_reason
 
     _swap_state = {"swapped": [], "outcome": None, "notes": []}
+    # Single-view watchers, keyed by path. Created after the unlock, torn down
+    # in the finally; their early restores are folded into the outcome.
+    watchers = {}
+    _restore_lock = threading.Lock()
+
+    def _materialize_early_restore(w):
+        # The materialize file has no placeholders to go back to: empty it
+        # through the handle now; the finally unlinks it.
+        w.write_all(b"")
+        return {"restored": [], "conflicts": [], "verify_failed": [], "error": None}
 
     def _finish(result: dict) -> dict:
         result.update(trust_info)
@@ -1988,8 +2080,26 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                     "error": f"{materialized_path} came into existence while the password "
                               f"prompt was open -- refusing to overwrite it. Try again."})
         try:
-            store.write_materialized_env(materialized_path, secrets)
+            if max_reads is not None:
+                text = store.render_env_text(secrets).encode("utf-8")
+                w = singleview.Watcher(materialized_path, max_reads, _materialize_early_restore,
+                                       _restore_lock,
+                                       deadline=time.time() + timeout if timeout else None)
+                w.open(create=True)
+                try:
+                    w.write_all(text)
+                    w.arm()
+                    w.settle()
+                except Exception:
+                    w.close()
+                    raise
+                watchers[str(materialized_path)] = w
+            else:
+                store.write_materialized_env(materialized_path, secrets)
         except (OSError, ValueError) as e:
+            if str(materialized_path) in watchers:
+                watchers.pop(str(materialized_path)).close()
+                materialized_path.unlink(missing_ok=True)
             return _finish({"applied": False, "error": str(e)})
 
     # Only paths this run actually created go in here, and cleanup touches
@@ -2047,8 +2157,14 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
             key, path = entry["key"], entry["path"]
             try:
                 store.journal_add(key, entry["names"])
-                record = store.swap_target_file(path, entry["names"], secrets,
-                                                styles_all.get(key, {}))
+                if max_reads is not None:
+                    record = _swap_through_watcher(key, path, entry["names"], secrets,
+                                                   styles_all.get(key, {}), max_reads,
+                                                   index_now, _restore_lock, watchers,
+                                                   time.time() + timeout if timeout else None)
+                else:
+                    record = store.swap_target_file(path, entry["names"], secrets,
+                                                    styles_all.get(key, {}))
             except (OSError, ValueError, RuntimeError) as e:
                 # Includes SwapInProgress and a value with a newline. Undo
                 # whatever was already swapped, then everything else.
@@ -2057,6 +2173,12 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                         store.journal_remove(key)
                     except (OSError, ValueError, RuntimeError):
                         pass
+                # Earlier targets' watchers still hold their exclusive
+                # handles (no thread has started yet, so this thread owns
+                # them); the file-based rollback below cannot open the files
+                # until they are released.
+                for w in watchers.values():
+                    w.close()
                 undo = _restore_swaps(swapped, index_now)
                 _swap_state["swapped"], _swap_state["outcome"] = swapped, undo
                 _cleanup_restored(restored_paths)
@@ -2142,9 +2264,18 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
             # consume protocol bytes and/or block forever with the whole
             # server frozen behind it -- DEVNULL makes it fail fast on EOF
             # instead.
+            if watchers:
+                for w in watchers.values():
+                    w.start()
+
+            def _on_start(job_handle, _pid):
+                for w in watchers.values():
+                    w.set_job(job_handle)
+
             proc = _run_command(command, env, cwd, timeout,
                                 bind=bool(swapped or materialized_path is not None
-                                          or restored_paths))
+                                          or restored_paths),
+                                on_start=_on_start if watchers else None)
         except subprocess.TimeoutExpired as e:
             # Unbound plain run hit its timeout: subprocess.run already killed
             # the direct child. Report it the same way a bound run does.
@@ -2159,6 +2290,26 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
     finally:
         if old_sigterm is not None:
             signal.signal(signal.SIGTERM, old_sigterm)
+        # Watchers first: stop, join OUTSIDE the restore lock (a watcher
+        # mid-restore needs it), then fold whatever they already restored
+        # into the records so the file-based restore below is skipped for
+        # those files. A watcher that did not restore has released its
+        # handle in its own finally, so the path-based restore can proceed.
+        for w in watchers.values():
+            w.stop()
+        for w in watchers.values():
+            if not w.join(5.0):
+                # The thread still owns the handle; touching it from here
+                # would race it. Leave it -- its own finally closes it -- and
+                # let the restore below report the file it could not open;
+                # the journal keeps the entry for the next recovery.
+                w.error = (w.error or "") + " watcher thread did not stop within 5 s"
+        with _restore_lock:
+            for key, path, record in swapped:
+                w = watchers.get(key)
+                if w is not None and w.restore_result is not None and \
+                        w.restore_result.get("error") is None:
+                    record["early_result"] = w.restore_result
         # Swapped files first: they are the project's own .env, the one
         # place a leftover is most likely to be committed or synced. Each
         # step here is independent -- a failure in one never skips the next.
@@ -2198,6 +2349,22 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         "stdout": _stdout_redacted[-4000:],
         "stderr": _stderr_redacted[-4000:],
     }
+    if watchers:
+        result["single_read"] = {k: w.report() for k, w in watchers.items()}
+        early = [k for k, w in watchers.items() if w.restored_early]
+        if early:
+            result["single_read_note"] = (
+                f"Real values were reverted before the command exited for: {', '.join(early)}. "
+                f"A read labelled 'unattributed' was too fast for the Restart Manager to name "
+                f"the reader; it was counted because the command was running at that moment.")
+        after = {k: w.reads_after_restore for k, w in watchers.items() if w.reads_after_restore}
+        if after:
+            result["single_read_restored_early"] = after
+            result["single_read_note"] = result.get("single_read_note", "") + (
+                " Something opened the file AFTER it had reverted -- a consumer that reads more "
+                "than max_reads times saw placeholders: " +
+                ", ".join(f"{k} ({n} later read(s))" for k, n in after.items()) +
+                ". Raise max_reads if that was the command.")
     if getattr(proc, "timed_out", False):
         result["timed_out"] = True
         result["timeout_note"] = (
@@ -2305,7 +2472,8 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
                   only_vars: Optional[list[str]] = None,
                   files: Optional[list[str]] = None,
                   swap: Optional[list[str]] = None,
-                  timeout: Optional[int] = None) -> dict:
+                  timeout: Optional[int] = None,
+                  max_reads: Optional[int] = None) -> dict:
     """Run a real command with the vault's real secret values injected as
     environment variables. Prompts once for the master password via a GUI
     (which also lists which variable names -- never values -- will be
@@ -2395,9 +2563,26 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     is git: git needs no secrets, and a `git add -A` with real values in
     .env is how they get committed.
 
+    max_reads: single-view mode (Windows). With swap= or materialize=, the
+    real values are reverted as soon as the command's process tree has
+    opened and closed the file this many times -- a dotenv loader reads
+    once at startup -- instead of when the command exits, so the window
+    with real values on disk is milliseconds, not the command's lifetime.
+    Use 1 for docker run --env-file, kubectl, source, python-dotenv,
+    pydantic-settings, Node --env-file; 2 for docker compose (it reads .env
+    twice); more for a harness that spawns several loaders. Opens by other
+    programs are reported (foreign_apps) and, when the Restart Manager can
+    name them, not counted; an open too fast to name is counted as the
+    command's and labelled 'unattributed'. A read that arrives after the
+    file reverted is reported as single_read_restored_early -- raise
+    max_reads if it was the command. Checked before the dialog: refused
+    where opens cannot be observed (macOS, Linux for now) or the filesystem
+    grants no oplock. Part of the trust signature.
+
     Trusted commands: the dialog offers a "Trust this exact command for
     the rest of this session" checkbox. If checked, this exact
-    (command, cwd, only_vars, materialize, background, files, swap, timeout) combination
+    (command, cwd, only_vars, materialize, background, files, swap, timeout,
+    max_reads) combination
     auto-runs on every later call with no dialog at all, as long as every
     file named directly on the command line (e.g. a compose file named
     after -f) hasn't changed, and the vault itself hasn't changed (a
@@ -2412,7 +2597,7 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     can't catch -- e.g. a Dockerfile only referenced indirectly via a
     compose file's `context:`)."""
     return _run_with_env_impl(command, materialize, background, cwd, only_vars, files, swap,
-                              timeout)
+                              timeout, max_reads)
 
 
 if __name__ == "__main__":

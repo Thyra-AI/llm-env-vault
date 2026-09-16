@@ -316,6 +316,11 @@ def _():
     bounded = build_dialog(lambda: gui.unlock_for_run_dialog(
         "docker compose up", only_vars=["A"], swap=entries, timeout=3600))
     assert "after 60 minutes" in all_text(bounded)
+    single = build_dialog(lambda: gui.unlock_for_run_dialog(
+        "docker compose up", only_vars=["A"], swap=entries, timeout=3600, max_reads=2))
+    blob = all_text(single)
+    assert "after the first 2 open(s)" in blob and "any program" in blob, (
+        "the unlock dialog no longer states the single-view rule honestly")
 
 
 @check("every_dialog_constructs")

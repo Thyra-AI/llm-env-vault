@@ -2028,7 +2028,8 @@ def _manage_action_result_keys(action: str) -> frozenset:
 
 
 def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None,
-                          trust_note: str = None, files=None, *, swap=None, timeout=None):
+                          trust_note: str = None, files=None, *, swap=None, timeout=None,
+                          max_reads=None):
     """Used by the run_with_env MCP tool. Returns an outcome dict:
     {"secrets": dict_or_None, "trust": bool}. secrets is None if
     denied/failed, in which case trust is always False. When only_vars is
@@ -2271,6 +2272,11 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
                       f"after {_span} (the command is then killed). ")
         else:
             _bound = "Placeholders are restored when the command exits or is interrupted. "
+        if max_reads:
+            _bound = (f"Real values are reverted after the first {max_reads} open(s) of the "
+                      f"file -- by the command or, when the reader cannot be told apart, by "
+                      f"any program -- or when the command exits, whichever is first; "
+                      f"detected opens by other programs are listed in the result. ")
         _label(root, _bound +
                      "While it runs, the real values are readable by the AI assistant and by "
                      "anything watching the file: your editor, hot reloaders, IDE local "

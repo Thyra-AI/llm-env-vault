@@ -188,13 +188,13 @@ def _windows_job():
 
     job = kernel32.CreateJobObjectW(None, None)
     if not job:
-        return None, None, None
+        return None, None, None, None
     info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
     info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
     if not kernel32.SetInformationJobObject(job, JobObjectExtendedLimitInformation,
                                             ctypes.byref(info), ctypes.sizeof(info)):
         kernel32.CloseHandle(job)
-        return None, None, None
+        return None, None, None, None
 
     def assign(process_handle) -> bool:
         return bool(kernel32.AssignProcessToJobObject(job, process_handle))
@@ -205,10 +205,10 @@ def _windows_job():
     def close() -> None:
         kernel32.CloseHandle(job)
 
-    return assign, terminate, close
+    return assign, terminate, close, job
 
 
-def run_bound(argv, env, cwd, timeout: Optional[float]) -> RunResult:
+def run_bound(argv, env, cwd, timeout: Optional[float], on_start=None) -> RunResult:
     """subprocess.run(capture_output=True, text=True, stdin=DEVNULL) with the
     child bound to this server's lifetime.
 
@@ -242,9 +242,10 @@ def run_bound(argv, env, cwd, timeout: Optional[float]) -> RunResult:
                   stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
     terminate = close = None
     binding = "none"
+    job_handle = None
     if sys.platform == "win32":
         try:
-            assign, terminate, close = _windows_job()
+            assign, terminate, close, job_handle = _windows_job()
         except Exception:  # noqa: BLE001 -- never let ctypes trouble block a run
             assign = None
         proc = subprocess.Popen(argv, **kwargs)
@@ -258,6 +259,15 @@ def run_bound(argv, env, cwd, timeout: Optional[float]) -> RunResult:
     else:
         proc = subprocess.Popen(argv, start_new_session=True, **kwargs)
         binding = "session"
+    if on_start is not None:
+        # The single-view watcher needs the Job to attribute file opens to
+        # the command's process tree. Handed over right after assignment,
+        # while the handle is guaranteed open; the watcher only ever
+        # queries it (IsProcessInJob, accounting), never closes it.
+        try:
+            on_start(job_handle if binding == "job" else None, proc.pid)
+        except Exception:  # noqa: BLE001 -- observer failure must not affect the run
+            pass
 
     import threading
 
@@ -280,6 +290,12 @@ def run_bound(argv, env, cwd, timeout: Optional[float]) -> RunResult:
             if close is not None and not job_state["closed"]:
                 job_state["closed"] = True
                 close()
+                if on_start is not None:
+                    # Tell the observer the handle is gone before it is.
+                    try:
+                        on_start(None, proc.pid)
+                    except Exception:  # noqa: BLE001
+                        pass
 
     def _kill_tree(leader_reaped: bool = False) -> None:
         if sys.platform == "win32":

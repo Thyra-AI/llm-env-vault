@@ -419,7 +419,7 @@ def test_plain_runs_are_not_bound_but_swap_runs_are() -> None:
         seen = []
         original = mcp_server._run_command
 
-        def spy(command, env, cwd, timeout, bind=True):
+        def spy(command, env, cwd, timeout, bind=True, on_start=None):
             seen.append(bind)
             return procs.RunResult(0, "", "", False, "job" if bind else "none")
 

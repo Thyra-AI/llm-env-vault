@@ -239,7 +239,7 @@ Conservative by construction: a line is only rewritten if it's a managed variabl
 
 Two known quirks (see [Known limitations](#known-limitations)): this ongoing path is not multi-line-aware, and a resync normalizes the file's line endings even when nothing else changed.
 
-### `run_with_env(command, materialize=None, background=False, cwd=None, only_vars=None, files=None, swap=None, timeout=None)`
+### `run_with_env(command, materialize=None, background=False, cwd=None, only_vars=None, files=None, swap=None, timeout=None, max_reads=None)`
 
 The consumption side: runs a real command with the vault's real values injected as environment variables. Since `llm.env` never contains real values, this is how your app actually gets its secrets.
 
@@ -415,6 +415,42 @@ the environment win by default, so plain injection is the first thing to try.
   cases that happen before the tool returns). IDE local history, VS Code's timeline, and a
   cloud-sync folder can all keep a copy of the swapped content; see Known limitations.
 
+**`max_reads`** — single-view mode (Windows). With `swap` or `materialize`, the real values are
+reverted as soon as the command's process tree has opened and closed the file this many times,
+instead of when the command exits:
+
+```python
+run_with_env(command=["docker", "compose", "up"], cwd="/path/to/project",
+             swap=[".env"], only_vars=["DATABASE_URL"], max_reads=2)
+```
+
+A dotenv loader reads once at startup, so with `max_reads=1` the window with real values on disk
+is milliseconds — the command keeps running with the values it already loaded while the file
+already holds placeholders again. How it works, in one paragraph: the server holds a single
+exclusive handle with a Read+Write+Handle **oplock** and writes the real values through it; any
+other process's open breaks the oplock (and is held until the server releases), so every open is
+seen the instant it happens; the server releases, re-opens exclusively the moment the reader
+closes (that is the re-arm), asks the **Restart Manager** who held the file, and counts the read
+if the holder was inside the command's Job object — or, when the reader was too fast to be named
+(every dotenv loader), if the command is running at that moment, labelled `unattributed`. Named
+holders outside the command (an editor, an indexer, an antivirus scan) are reported under
+`foreign_apps` and not counted. At N the placeholders go back through the held handle and the
+journal entry is released; a read that arrives *after* the revert is reported as
+`single_read_restored_early` — raise `max_reads` if that was the command.
+
+- Use `1` for `docker run --env-file`, kubectl, `source .env`, python-dotenv, pydantic-settings
+  and Node `--env-file`; `2` for docker compose (it reads `.env` for interpolation and again for
+  `env_file:`); more for a harness that starts several loaders.
+- Refused before the dialog on Linux and macOS, and per file when the filesystem grants no
+  oplock or another process already holds the file — a self-test on the placeholder file proves
+  that a foreign open is held until release, which is the property everything rests on.
+- Not compatible with `background=True` in this release. Part of the trust signature. The
+  dialog states the rule exactly: "reverted after the first N opens — by the command or, when
+  the reader cannot be told apart, by any program".
+- An honest limit: a **concurrent** same-user reader (an agent's own `Read` in a batched turn)
+  is held, reads, and is counted as an unattributed read of the command's. The result says so.
+  `max_reads` shortens the accidental window; it is not a boundary against the agent.
+
 **`background=True`** — starts the process detached (stdin closed, stdout/stderr redirected to a temp log file — never the MCP server's own stdio, which is the JSON-RPC channel) and returns immediately with the `pid` and `log_file` path. For long-running things like dev servers. The tool does not track or stop the process afterward — use your own process manager. Foreground calls block and return stdout/stderr (truncated to the last 4000 chars each) plus the exit code.
 
 Every result includes an `auto_allowed` flag, plus a `trust_note` whenever trust was used, granted, or revoked — an auto-allowed run is never silent even though no dialog appeared.
@@ -435,7 +471,7 @@ the real `python-dotenv` and `pydantic-settings` (both ship with `mcp[cli]`), No
 | Loads `.env`, environment wins (the default everywhere) | python-dotenv, pydantic-settings, Flask, django-environ, Node ≥ 20.6 `--env-file`, dotenv npm, Vite, Next, Bun, Deno, godotenv, dotenvy, phpdotenv/Laravel, Ruby dotenv, `just`, Taskfile, `uv run --env-file`, pytest-dotenv | plain `run_with_env` — **unless** the process that loads the file was started with a scrubbed environment (a hermetic test harness, `env -i`), in which case the file is the only source: `swap` |
 | Loads `.env`, file wins | `load_dotenv(override=True)`, `dotenv.config({override:true})`, `godotenv.Overload`, `dotenv_override()`, `Dotenv.overload`, `dotenvx --overload`, `just` `dotenv-override`, tox `set_env = file\|.env`, `direnv`'s `dotenv` | `swap` |
 | Shell-sources the file | `source .env`, `set -a; . .env`, `export $(grep -v '^#' .env \| xargs)`, `make` `include .env` | `swap` |
-| Reads a file as the only source | `docker run --env-file`, Compose `env_file:`, `kubectl create secret --from-env-file`, VS Code `envFile`, JetBrains EnvFile | `materialize` when you choose the path; `swap` when the tool is hard-wired to `.env` |
+| Reads a file as the only source | `docker run --env-file`, Compose `env_file:`, `kubectl create secret --from-env-file`, VS Code `envFile`, JetBrains EnvFile | `materialize` when you choose the path; `swap` when the tool is hard-wired to `.env`; add `max_reads=1` (2 for compose) so the file reverts the moment it has been read |
 | Validates types at load | pydantic-settings `port: int`, django-environ `env.int()`, Spring `.properties` | `swap` at run time. A placeholder-only file still fails their validation when the vault is not involved at all — a shape-preserving placeholder is a deferred follow-up, not part of 1.6.0 |
 
 For an IDE debug session that reads `envFile`, launch the IDE itself through the vault so every
@@ -876,6 +912,13 @@ plus additional pytest-only files:
   `tests/fixtures/file_envelope/golden.levault` is a byte-frozen format tripwire: every other test
   round-trips through the current code and would stay green if the on-disk format changed, which
   would silently make real users' committed files unopenable.
+- `tests/test_single_view.py` — 1.7.0 `max_reads`: every test runs a real child in a real Job
+  against a real oplock. The headline: the child reads the real value, sleeps, reads again while
+  still running and gets the placeholder. Also: `max_reads=2` serves both reads; `stat` alone is
+  not a read; a holder outside the Job is reported as foreign and not counted while the
+  command's own read still counts; a materialize file is emptied after its first read; every
+  pre-dialog refusal; the self-test refuses when another process holds the file; no thread or
+  handle survives the run.
 - `tests/test_hardening_161.py` — 1.6.1: one test per finding of the post-1.6.0 review. The git
   probe cannot run a repo's `core.fsmonitor`, resolves git from `PATH` only, refuses a `gitdir:`
   file pointing at a share; journal entries off the registry are quarantined and a UNC path is

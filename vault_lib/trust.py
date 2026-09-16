@@ -117,7 +117,7 @@ def _deobfuscate(data: bytes, key: bytes) -> str:
 
 
 def make_signature(command, cwd, only_vars, materialize, background=False, files=None,
-                   swap=None, timeout=None):
+                   swap=None, timeout=None, max_reads=None):
     """A hashable key identifying "this exact run_with_env call shape".
     Any change to any of these is treated as a different, unapproved
     command.
@@ -166,6 +166,7 @@ def make_signature(command, cwd, only_vars, materialize, background=False, files
                      for p, n in swap))
         if swap is not None else None,
         int(timeout) if timeout is not None else None,
+        int(max_reads) if max_reads is not None else None,
     )
 
 

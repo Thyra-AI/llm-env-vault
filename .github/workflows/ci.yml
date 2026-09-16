@@ -47,6 +47,7 @@ jobs:
           python tests/test_swap.py
           python tests/test_consumption_matrix.py
           python tests/test_hardening_161.py
+          python tests/test_single_view.py
 
       - name: Run under pytest
         run: python -m pytest -q

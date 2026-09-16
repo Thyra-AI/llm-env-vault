@@ -151,7 +151,7 @@ def stub_run(observer=None, returncode=0):
             self.timed_out = False
             self.binding = "job"
 
-    def fake(command, env, cwd, timeout, bind=True):
+    def fake(command, env, cwd, timeout, bind=True, on_start=None):
         if observer is not None:
             observer(command, env or {}, cwd)
         return _Result()
@@ -524,7 +524,7 @@ def test_the_sigterm_handler_is_installed_for_a_files_only_run() -> None:
 
 def test_an_interrupted_run_still_cleans_up() -> None:
     with workspace() as project:
-        def boom(_command, _env, _cwd, _timeout, bind=True):
+        def boom(_command, _env, _cwd, _timeout, bind=True, on_start=None):
             raise KeyboardInterrupt()
 
         original = mcp_server._run_command
@@ -543,7 +543,7 @@ def test_an_interrupted_run_still_cleans_up() -> None:
 
 def test_a_command_that_fails_to_start_still_cleans_up() -> None:
     with workspace() as project:
-        def boom(_command, _env, _cwd, _timeout, bind=True):
+        def boom(_command, _env, _cwd, _timeout, bind=True, on_start=None):
             raise OSError("no such executable")
 
         original = mcp_server._run_command

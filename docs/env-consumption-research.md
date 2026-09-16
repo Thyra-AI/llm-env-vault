@@ -268,8 +268,8 @@ is written — exactly as `materialize` refuses them.
 |---|---|
 | `python app.py` reading `os.environ`; `docker compose up` with `${VAR}` interpolation; anything under mechanism A or B | `run_with_env(command=[...], only_vars=[...])` — no swap needed |
 | pytest where a test builds a scrubbed child env, or `load_dotenv(override=True)`, or `source .env` inside a script | `run_with_env(command=[...], cwd=project, swap=[".env"], only_vars=[...])` |
-| `docker compose up` with `env_file: .env` | `run_with_env(command=["docker","compose","up"], cwd=project, swap=[".env"])` |
-| `docker run --env-file .env.runtime` (a fresh path) | `run_with_env(..., materialize=".env.runtime")` — unchanged |
+| `docker compose up` with `env_file: .env` | `run_with_env(command=["docker","compose","up"], cwd=project, swap=[".env"], max_reads=2)` — compose reads `.env` twice; the file reverts after the second read |
+| `docker run --env-file .env.runtime` (a fresh path) | `run_with_env(..., materialize=".env.runtime", max_reads=1)` — the file is emptied the moment docker has read it |
 | `docker run --env-file .env` (the canonical, quoted-placeholder file) | `swap=[".env"]` works if the recorded style is unquoted; if the original file was quoted, Docker will deliver the quotes — that was already true before the vault |
 | An IDE debug session that reads `envFile` | launch the IDE itself through the vault so every terminal and debug session inherits the real env: `run_with_env(command=["code", "."], background=True, only_vars=[...])` |
 | `kubectl create secret --from-env-file .env` | `swap=[".env"]`; note kubectl keeps quotes literally |

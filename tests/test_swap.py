@@ -144,7 +144,7 @@ def stub_run(observer=None, returncode=0, raise_exc=None):
     in effect -- and may return text to use as stdout."""
     original = mcp_server._run_command
 
-    def fake(command, env, cwd, timeout, bind=True):
+    def fake(command, env, cwd, timeout, bind=True, on_start=None):
         out = observer(env, cwd) if observer else ""
         if raise_exc is not None:
             raise raise_exc

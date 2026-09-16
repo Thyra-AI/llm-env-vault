@@ -7,6 +7,59 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.7.0] — 2026-09-16
+
+### Added
+
+- **Single-view real values: `run_with_env(..., max_reads=N)`.** With `swap=` or
+  `materialize=`, the real values are reverted as soon as the command's process tree has opened
+  and closed the file N times -- a dotenv loader reads once at startup -- instead of when the
+  command exits. The window with real values on disk shrinks from the command's lifetime to
+  milliseconds. This is Doppler's `--mount-max-reads 1`, built from what a user-mode process on
+  Windows has:
+
+  - One exclusive handle (share mode 0) held for the whole run, with a **Read+Write+Handle
+    oplock**. The real values are written *through* that handle, so "armed" and "on disk" are
+    never two separate moments. Any other process's open breaks the oplock -- and is held until
+    we release -- so an open is observed the instant it happens; attribute-only opens
+    (`os.stat`, `exists`) do not break it and are not reads.
+  - On a break the handle is released (the reader proceeds), then re-opened exclusively in a
+    tight loop: the reopen succeeds the moment the reader closes, and that success is the
+    re-arm. The **Restart Manager** names any holder that persists; a holder inside the run's
+    Job object is the command's read, a named holder outside it (editor, indexer, antivirus)
+    is foreign -- reported in the result, not counted. A reader too fast to be named (every
+    dotenv loader) is counted while the command is running and labelled `unattributed`; that
+    default is deliberate, because refusing to count fast readers would make the feature dead
+    for exactly the loaders it exists for, and the failure it risks -- an early revert the
+    command notices -- is reported, never a leak.
+  - At N the placeholders go back **through the held handle** (value-based restore, verified),
+    the journal entry is released, and the watch stays armed so a read that arrives *after* the
+    revert is reported as `single_read_restored_early` rather than silently seeing placeholders.
+  - Checked before the dialog: `max_reads` is refused where opens cannot be observed (Linux for
+    now; macOS has no such facility without an Endpoint Security entitlement) and refused per
+    file when the filesystem grants no oplock or another process already holds the file -- a
+    self-test on the placeholder file proves that a foreign open is *held* until release, the
+    property everything rests on. Part of the trust signature; stated in the dialog.
+  - Use `1` for `docker run --env-file`, kubectl, `source`, python-dotenv, pydantic-settings,
+    Node `--env-file`; `2` for docker compose (interpolation plus `env_file:`); more for a
+    harness that starts several loaders. Every mechanism is exercised by
+    `tests/test_single_view.py` with real child processes in a real Job against real oplocks --
+    the headline test reads the real value, sleeps, reads again while still running, and gets
+    the placeholder.
+
+  Not in this release, deferred with reasons in `docs/plan-1.6.1-hardening.md` §WP8: Linux
+  (fanotify `FAN_OPEN`, which names the opener natively), a named-pipe `materialize` mode
+  (a dotenv loader's `isfile()` check would consume a single-instance pipe), and
+  `background=True` + `swap` + `max_reads` (needs a non-killing Job and a status query).
+
+### Changed
+
+- `store.swap_target_file` / `unswap_target_file` are now thin wrappers over pure
+  `compute_swap_bytes` / `compute_unswap_bytes` / `verify_unswap_bytes`, so the watcher can
+  restore through its own handle with exactly the logic the file-based path uses.
+- `procs.run_bound` takes an `on_start(job_handle, pid)` observer so the watcher can attribute
+  opens to the command's tree; the handle is only ever queried.
+
 ## [1.6.1] — 2026-09-15
 
 ### Security

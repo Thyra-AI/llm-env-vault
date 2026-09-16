@@ -1140,7 +1140,17 @@ def _scan_env_bytes(path: Path) -> tuple:
     if path.stat().st_size > _MAX_ENV_BYTES:
         raise ValueError(f"{path} is {path.stat().st_size} bytes -- larger than any .env "
                          f"this tool will parse ({_MAX_ENV_BYTES} bytes).")
-    raw = path.read_bytes()
+    return _split_env_bytes(path.read_bytes(), label=str(path))
+
+
+def _split_env_bytes(raw: bytes, label: str = "<bytes>") -> tuple:
+    """The pure half of _scan_env_bytes: (bom, lines, texts) from raw bytes,
+    so a caller that already holds the file open (the single-view watcher
+    reads and writes through its own exclusive handle) gets the same
+    parsing as one that reads by path."""
+    if len(raw) > _MAX_ENV_BYTES:
+        raise ValueError(f"{label} is {len(raw)} bytes -- larger than any .env this tool "
+                         f"will parse ({_MAX_ENV_BYTES} bytes).")
     bom = b""
     if raw.startswith(b"\xef\xbb\xbf"):
         bom, raw = raw[:3], raw[3:]
@@ -1151,7 +1161,7 @@ def _scan_env_bytes(path: Path) -> tuple:
         try:
             texts.append(body.decode("utf-8"))
         except UnicodeDecodeError:
-            raise ValueError(f"{path}: line {i + 1} is not valid UTF-8 -- refusing to "
+            raise ValueError(f"{label}: line {i + 1} is not valid UTF-8 -- refusing to "
                              f"rewrite the file.") from None
     return bom, lines, texts
 
@@ -1219,8 +1229,24 @@ def swap_target_file(path: Path, names, secrets: dict, styles: dict) -> dict:
     skipped -- never appended, because there would be nothing to restore
     them to. Untouched lines are re-emitted from their original bytes.
     """
+    if _is_link(path):
+        raise ValueError(f"{path} is a symlink or junction -- refusing to read or rewrite "
+                         f"a managed file through a link.")
+    new_bytes, record = compute_swap_bytes(path.read_bytes(), names, secrets, styles,
+                                           label=str(path))
+    if not record["lines"]:
+        return record
+    _atomic_write_bytes(path, new_bytes, mode=stat.S_IMODE(path.stat().st_mode))
+    return record
+
+
+def compute_swap_bytes(raw: bytes, names, secrets: dict, styles: dict,
+                       label: str = "<bytes>") -> tuple:
+    """(new_bytes, record) for swap_target_file -- pure, no I/O. The
+    single-view watcher calls this with bytes it read through the exclusive
+    handle it is about to write through."""
     names = set(names)
-    bom, lines, texts = _scan_env_bytes(path)
+    bom, lines, texts = _split_env_bytes(raw, label)
     record = {"lines": {}, "swapped": [], "skipped": {}, "notes": []}
     seen = {}
     out = []
@@ -1257,10 +1283,7 @@ def swap_target_file(path: Path, names, secrets: dict, styles: dict) -> dict:
     for name in sorted(names - set(seen)):
         record["skipped"][name] = "no line for this name in the file"
     record["notes"] = sorted(set(record["notes"]))
-    if not record["lines"]:
-        return record
-    _atomic_write_bytes(path, bom + b"".join(out), mode=stat.S_IMODE(path.stat().st_mode))
-    return record
+    return bom + b"".join(out), record
 
 
 def _write_with_retries(path: Path, data: bytes, mode: int,
@@ -1329,10 +1352,41 @@ def unswap_target_file(path: Path, record: dict, index: dict) -> dict:
         result["error"] = "file disappeared during the run"
         return result
     try:
-        bom, lines, texts = _scan_env_bytes(path)
+        if _is_link(path):
+            raise ValueError(f"{path} is a symlink or junction -- refusing to rewrite a "
+                             f"managed file through a link.")
+        new_bytes, result, changed = compute_unswap_bytes(path.read_bytes(), record, index,
+                                                          label=str(path))
     except (OSError, ValueError) as e:
         result["error"] = str(e)
         return result
+    if changed:
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError:
+            mode = 0o644
+        err = _write_with_retries(path, new_bytes, mode, allow_in_place=True)
+        if err:
+            result["error"] = err
+            result["restored"] = []
+            return result
+    # Verify from disk, not from memory: the only thing that matters is
+    # what is actually in the file now.
+    try:
+        after = path.read_bytes()
+    except OSError:
+        result["verify_failed"] = list(result["restored"])
+        return result
+    return verify_unswap_bytes(after, record, result, label=str(path))
+
+
+def compute_unswap_bytes(raw: bytes, record: dict, index: dict,
+                         label: str = "<bytes>") -> tuple:
+    """(new_bytes, result, changed) -- the pure half of unswap_target_file.
+    `result` has restored/conflicts filled in; verify_unswap_bytes fills
+    the rest once the bytes are on disk."""
+    result = {"restored": [], "conflicts": [], "verify_failed": [], "error": None}
+    bom, lines, texts = _split_env_bytes(raw, label)
     out = list(lines)
     done = set()
     unmatched = []
@@ -1364,22 +1418,17 @@ def unswap_target_file(path: Path, record: dict, index: dict) -> dict:
                              if record["lines"][i]["name"] not in result["conflicts"]})
     result["restored"] = restored_names
     result["conflicts"] = sorted(set(result["conflicts"]))
-    if done:
-        try:
-            mode = stat.S_IMODE(path.stat().st_mode)
-        except OSError:
-            mode = 0o644
-        err = _write_with_retries(path, bom + b"".join(out), mode, allow_in_place=True)
-        if err:
-            result["error"] = err
-            result["restored"] = []
-            return result
-    # Verify from disk, not from memory: the only thing that matters is
-    # what is actually in the file now.
+    return bom + b"".join(out), result, bool(done)
+
+
+def verify_unswap_bytes(after: bytes, record: dict, result: dict,
+                        label: str = "<bytes>") -> dict:
+    """Fill verify_failed / secret_seen_elsewhere from the bytes actually on
+    disk after a restore. Pure."""
     try:
-        _b, _l, texts_after = _scan_env_bytes(path)
-    except (OSError, ValueError):
-        result["verify_failed"] = list(restored_names)
+        _b, _l, texts_after = _split_env_bytes(after, label)
+    except ValueError:
+        result["verify_failed"] = list(result["restored"])
         return result
     by_name = {e["name"]: e for e in record["lines"].values()}
     result["secret_seen_elsewhere"] = []
