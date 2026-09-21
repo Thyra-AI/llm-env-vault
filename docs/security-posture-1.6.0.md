@@ -1,4 +1,4 @@
-# Security posture after 1.6.0 / 1.6.1 — what changed, what is new, what to watch
+# Security posture after 1.6.0 / 1.6.1 / 1.7.0 — what changed, what is new, what to watch
 
 This is a maintainer-facing map of the system as it stands after the in-place swap landed
 (1.6.0, `3dabd7e`) and its hardening (1.6.1). It is organised around one question: **where can
@@ -15,7 +15,8 @@ labelled `unattributed` — an early revert the command notices is a reported co
 failure, never a leak. What it does *not* change: a concurrent same-user reader is held, reads,
 and is counted; the file is a new set of bytes but the same inode (restored in place, so no
 hardlink is severed and no `os.replace` race exists); and the exposure in the paragraph below
-is unchanged in kind, only shorter. Windows only; refused pre-dialog elsewhere.
+is unchanged in kind, only shorter. Windows only; refused pre-dialog elsewhere. §9 is the
+1.7.0 addendum: the new surface, the failure modes its reviews found, and what remains.
 
 **The ceiling of the threat model, stated first.** An agent with filesystem read access can
 read a swapped or materialized file while the command runs — from a batched tool call, or from
@@ -270,3 +271,177 @@ that path *is* tested by simulating a dead owner).
   runs that put values on disk — are all in the shipped code). `tests/test_hardening_161.py` has
   one test per accepted finding, including a real `TerminateProcess` of a swapping server.
 - Suite: 595 tests, pytest and every standalone runner, plus the Tk check in a fresh interpreter.
+- **1.7.0:** see §9.8.
+
+---
+
+## 9. 1.7.0 addendum — single-view (`max_reads`)
+
+Shipped in `ed7de9c`, hardened in `6029601` and `73f83eb` (the push-time reviews of each).
+Plan and mechanics: `docs/plan-1.6.1-hardening.md` WP8, D7/D8. This section is written to the
+same question as the rest of the document: where can a real value be, who reaches it, what puts
+it back — and now also *when*.
+
+### 9.1 What changed about "when"
+
+Before 1.7.0 a real value was on disk for the command's lifetime (bounded by `timeout`). With
+`max_reads=N` it is on disk from the moment the run starts until the command's process tree has
+**opened the file N times** — for every dotenv-style loader, once, at startup, so the window is
+the loader's read plus ~10 ms. The mechanism is not polling: the server holds the file on one
+exclusive handle (share mode 0) with a Read-Write-Handle oplock, so the kernel reports every
+open the instant it happens and *holds the opener* until the server has re-armed. The real
+values are written in and the placeholders written back **through that handle**, so "armed" and
+"on disk" are the same instant and the restore is in place — same inode, no `os.replace`, no
+temp file, no hardlink severed.
+
+Nothing about the ceiling of the threat model moves: an approved command still receives the
+values and can do anything with them. What moves is the *accidental* class — a commit, a sync
+upload, an IDE snapshot, a crash — which now has milliseconds to happen instead of the run.
+
+### 9.2 New surface
+
+| Item | What it is | Agent-reachable? | What confines it |
+|---|---|---|---|
+| **`run_with_env(max_reads=N)`** | a new parameter, not a new tool | yes, like every parameter | requires `swap=` or `materialize=`; refused with `background=True`; 1 ≤ N ≤ 1000; Windows only (`singleview.unsupported_reason`); refused before the dialog if the file's `self_test` fails; the dialog states "reverted after the first N open(s)". Part of the trust signature (9-tuple), so a trusted run with a different N is a new grant |
+| **`vault_lib/singleview.py`** | the kernel primitives: `CreateFileW` share=0, `FSCTL_REQUEST_OPLOCK`, Restart Manager (`RmGetList`), `IsProcessInJob`, `QueryInformationJobObject` | no direct path; used only inside the run | every call is a query except three writes, all to the swapped file: real values in, placeholders back, and `trim_padded_tail` (path-based, after the handle is released, only if the file still matches the padded write byte-for-byte) |
+| **`self_test(path)`** | before the dialog, on the placeholder file: proves an oplock is granted and a foreign open is held | runs on every `max_reads` call | touches placeholders only; a holder already on the file (an editor, an AV scanner) is a refusal, not a warning — the feature cannot promise anything on a file it cannot hold |
+| **`procs.run_bound(on_start)`** | hands the run's Job handle to the watcher so opens can be attributed to the command's tree | no | the handle is only ever queried; the observer is told the handle is going away *before* it is closed (`6029601`) |
+| **new result fields** | `single_read` (per file: `reads`, `attribution`, `restored_early`, `reads_after_restore`, `foreign_opens`/`foreign_apps`, `watch_gap_seconds`, `restore_attempts`/`restore_error`, `mapped_view_tail_*`), `single_read_note`, `single_read_restored_early` | yes — this is the point | counts and app names only; never bytes |
+| **new on-disk state** | none | — | no new file in the vault directory; the journal entry is the 1.6.x one, and a watcher restore folds into it |
+
+### 9.3 Attribution — who is counted
+
+A break says *something opened the file*, not who. The Restart Manager names holders that are
+still there ~300 ms later; a dotenv loader is long gone. The rule shipped is:
+
+- a named holder inside the run's Job → counted (`job`);
+- a named holder outside it (an editor, the agent's own `Read`, a sync client) → **not counted**,
+  reported as `foreign_opens` with the app names;
+- nobody nameable while the command is still running → counted (`unattributed`);
+- the open that was in flight when the command exited (a read as its last act) → counted
+  (`unattributed-at-exit`).
+
+The failure direction is what matters. Counting too early (an AV scanner racing the loader)
+reverts too soon: the command reads placeholders, fails, and the result says
+`reads_after_restore` — a **correctness failure the user sees, never a leak**. Counting too late
+(a foreign holder that was in fact the command's, mis-named) leaves the values until the next
+open or until exit — the 1.6.x window, never worse than before. There is no rule that turns a
+mistake into a longer exposure than the feature replaced.
+
+### 9.4 What the reviews found, and what each meant for the posture
+
+Push gate on the first 1.7.0 commit (`747a104`; blocked, six findings, fixed and amended into
+`ed7de9c` before anything reached the remote):
+
+1. **Multi-target failure left earlier targets armed** — the rollback's file-based restore could
+   not open a file the watcher still held; the values stayed with a journal entry (recovery-class,
+   not silent). Watchers are closed before the rollback.
+2. **Short write accepted** — a restore that wrote fewer bytes than asked would have left the
+   tail of a real value between the prefix and the truncation point and reported success. The
+   only finding in the set that was a leak class; `write_all` refuses a short write.
+3. **Verification read failure counted as a failed restore** — the placeholders *were* on disk,
+   but the end-of-run restore would have run again, seen placeholders where it expected values,
+   and reported every line as a conflict. False alarm, not a leak; now reported as unverified.
+4. **Main thread closing a handle a live watcher owned** after a failed join — a race, not an
+   exposure; the thread owns the handle until it is gone.
+5. **Oplock IRP not drained on close** — the kernel could complete into a freed `OVERLAPPED`.
+   Memory safety; `close()` waits on the event after `CloseHandle`.
+6. A stray CR in the agent instructions.
+
+Push gate on the pushed `ed7de9c` (warn, three findings, fixed in `6029601`):
+
+7. **A failed early restore was never retried** (high). One transient I/O error on the revert
+   left the real values on disk for the rest of the run, silently until the final report — the
+   exact window `max_reads` exists to close, reopened by a disk hiccup. Every later counted open
+   now retries until one succeeds; `restore_attempts`/`restore_error` are reported; the end-of-run
+   restore still covers a run in which none succeeded. The regression test fails on the pre-fix
+   watcher.
+8. **Mapped-view padding never trimmed** (medium). When a reader holds a memory-mapped view the
+   truncate is refused (`ERROR_USER_MAPPED_FILE`); `write_all` pads the tail with newlines so no
+   byte of a real value survives — that property held — but the promised exact-length retry did
+   not exist, so the file stayed longer than it should. `trim_padded_tail()` runs once the handle
+   is released, only if the file still matches the padded write; otherwise the result says
+   `mapped_view_tail_error` and the note says what to do. The pad write is now checked like the
+   main one. Tested with a real `mmap` view.
+9. **Job handle closed before the watcher was told** (medium). A break processed in that gap
+   queried a closed — possibly recycled — handle: a mis-attribution (delayed revert, §9.3), not a
+   leak. Order is now notify, then close.
+
+Push gate on `6029601` (warn, two small findings, fixed in `73f83eb`; final gate: pass): the
+padded-tail note wrongly covered the materialize watcher, whose file is unlinked regardless; the
+trim did not fsync.
+
+### 9.5 Exposure windows (§5) revisited
+
+1. **Agent read during the run.** A `Read(.env)` batched after the command's own read now gets
+   placeholders. Batched *before* it — a race the agent can win — it gets real values, is held
+   for ~10 ms, and is **visible in the result** either way: named (`foreign_opens`,
+   `foreign_apps`) if it was still holding the file when the Restart Manager looked, since the
+   host process is outside the Job; or, too fast to name, counted as `unattributed` — which
+   reverts the file under the command and shows up as `reads_after_restore`. Still policy, not
+   a boundary; but no longer silent.
+2. **Git during the run.** Unchanged in kind; the window a `git add` can fall into is now
+   milliseconds.
+3. **Editor write-back.** Unchanged. An editor that is already holding the file is a `self_test`
+   refusal, so the common case (file open in VS Code) never starts a `max_reads` run.
+4. **IDE history / cloud sync.** Unchanged in kind; the upload has to land inside the loader's
+   read. A sync client that opens the file is a foreign holder and is named.
+5. **Hot reloaders.** Now reload twice within the same second; a watcher-driven reload *is* a
+   consumer that reads more than once — `max_reads` is the wrong tool for it and the result says
+   so (`reads_after_restore`).
+6. **Recovery is triggered, not timed.** Unchanged — but a server killed after the first read
+   has already restored; the crash window is now the same milliseconds.
+7. **Forged journal entries.** Unchanged.
+8. **WSL2 / host.** Unchanged; the oplock is a Windows-side fact and says nothing about a Linux
+   reader on the same files.
+
+New residuals, disclosed in the README:
+
+- **Windows only.** Linux `fanotify` (permission events) is the equivalent and is deferred.
+- **`background=True` + `max_reads`** is refused: no process to hold the handle after return.
+- **Pipe-mode materialize** (a FIFO instead of a file) is deferred.
+- **A consumer that reads more than N times** sees placeholders after the revert. Fail-closed,
+  reported, and the fix is a larger N — never a smaller window that leaks.
+
+### 9.6 Gaps (§6) — what 1.7.0 changes
+
+- **`materialize` crash recovery**: a `max_reads` materialize file is emptied through the handle
+  at the first read and unlinked at exit; a crash after the first read leaves an empty file, not
+  a real-values one. Before the first read, the 1.6.1 status stands.
+- Everything else in §6 is unchanged.
+
+### 9.7 What the tests prove (14 in `tests/test_single_view.py`)
+
+Every test runs a real child in a real Job against a real oplock — there is no fake for the
+kernel's answer to "did someone open this file":
+
+- the headline: the child reads the real value, sleeps, reads again while still running, gets
+  the placeholder; `max_reads=2` serves both reads
+- `stat()`/`isfile`/`getsize` are not reads; a foreign holder is reported and not counted; a
+  run that never reads restores at exit with zero reads
+- the materialize file is emptied after the first read
+- every pre-dialog refusal, and `self_test` refusing when a holder exists
+- the watcher thread is gone and the handle released after the run (an exclusive open succeeds)
+- a failure on a later target rolls back an armed earlier one; a short write is refused
+- **`6029601`:** a failed restore is retried on the next read (fails on the pre-fix watcher); a
+  real `mmap` view forces the padding path and the tail is trimmed after release, and a file
+  changed meanwhile is left alone; the Job handle is still valid when the observer is told
+
+Not proven: attribution against a *hostile* reader that times its open to be nameable and in
+the Job's pid range (it would need to be in the Job, which only the command's tree is); the
+Linux path (none exists); behaviour of the Restart Manager under load beyond the ~300 ms
+settle window (a slower answer is a `foreign-unattributed`/`unattributed` label, not a wrong
+count).
+
+### 9.8 Reviews 1.7.0 went through
+
+- Design: super-thinker pass on the concrete mechanics (oplock kind, share mode, attribution
+  rule, settle window, in-handle restore, mapped-view padding, Job-handle hand-off) before
+  implementation; every accepted item is in the shipped code or in the deferred list above.
+- Spikes: oplock break on a foreign open, no break on `stat`, no break on an own write through
+  the RWH handle, reopen-as-rearm timing, in-handle restore, `IsProcessInJob` with limited
+  rights, `RmGetList` naming latency.
+- Push gate: 6 findings on the first commit (blocked; fixed pre-push), 3 on the pushed one
+  (1 high: the retry), 2 on the follow-up (1 medium, 1 low), then pass — §9.4 has each one.
+- Suite: 640 tests, pytest and all 17 standalone runners, plus the Tk check; the single-view
+  suite run three times back-to-back with no flake.
