@@ -310,6 +310,117 @@ def test_short_write_is_refused() -> None:
             w.close()
 
 
+# Reads three times with pauses long enough for a restore between each.
+READ_THRICE = ("import time\n"
+               "def get():\n"
+               "    for line in open('.env', encoding='utf-8'):\n"
+               "        if line.startswith('export API_TOKEN='): return line.split('=',1)[1].strip()\n"
+               "for i in range(3):\n"
+               "    print(get(), flush=True)\n"
+               "    time.sleep(0.9)\n")
+
+
+def test_a_failed_early_restore_is_retried_on_the_next_read() -> None:
+    """A transient failure while reverting must not leave the real values
+    on disk for the rest of the run: the next counted open retries."""
+    if _need_windows():
+        return
+    real = store.compute_unswap_bytes
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(0, "simulated transient failure")
+        return real(*args, **kwargs)
+
+    store.compute_unswap_bytes = flaky
+    try:
+        with workspace(styles={"API_TOKEN": '"'}) as (project, env_path):
+            with fake_dialog():
+                r = mcp_server._run_with_env_impl([PYTHON, "-c", READ_THRICE], None, False,
+                                                  str(project), ["API_TOKEN"], None,
+                                                  swap=[".env"], max_reads=1)
+            assert r["applied"] and r["exit_code"] == 0, r
+            first, second, third = r["stdout"].splitlines()
+            assert first == "[REDACTED:API_TOKEN (as written to .env)]", first
+            # The second read still saw the real value (the failed attempt);
+            # the third proves the retry happened.
+            assert second == "[REDACTED:API_TOKEN (as written to .env)]", second
+            assert third == '"value 1"', third
+            rep = r["single_read"][str(env_path)]
+            assert rep["restored_early"] is True, rep
+            assert rep["restore_attempts"] == 2 and "restore_error" not in rep, rep
+            assert rep["reads"] == 2 and rep["reads_after_restore"] == 1, rep
+            assert env_path.read_bytes() == PLACEHOLDER_ENV
+            assert "swap_restore_conflicts" not in r and not store._journal_path().exists()
+    finally:
+        store.compute_unswap_bytes = real
+
+
+def test_padded_tail_from_a_mapped_view_is_trimmed_after_release() -> None:
+    """While a reader holds a memory-mapped view the truncate is refused
+    (ERROR_USER_MAPPED_FILE); write_all pads with newlines so nothing of the
+    old content survives, and once the handle is released the padding is
+    cut so the file matches the write exactly."""
+    if _need_windows():
+        return
+    import mmap
+    import msvcrt
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / ".env"
+        p.write_bytes(b"A=1\nB=22\n")
+        w = singleview.Watcher(str(p), 1, lambda _w: {}, threading.Lock())
+        w.open()
+        # A view on our own handle: the only way to map a file nobody else
+        # may open. Its CRT fd must not be closed -- it shares the handle.
+        fd = msvcrt.open_osfhandle(w.handle, os.O_RDWR)
+        view = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
+        try:
+            w.write_all(b"A=1\n")
+            assert w.mapped_tail_pending is True
+            assert bytes(view[:]) == b"A=1\n" + b"\n" * 5  # no byte of B=22 survives
+            assert w.trim_padded_tail() == "handle still held"
+        finally:
+            view.close()
+            w.close()
+        assert w.trim_padded_tail() is None
+        assert p.read_bytes() == b"A=1\n"
+        assert w.report().get("mapped_view_tail_trimmed") is True
+        # A file someone changed after the padded write is left alone.
+        w2 = singleview.Watcher(str(p), 1, lambda _w: {}, threading.Lock())
+        w2.mapped_tail_pending, w2._last_written = True, b"A=1\n"
+        p.write_bytes(b"A=1\n\nX=9\n")
+        assert w2.trim_padded_tail() == "file changed since the padded write"
+        assert p.read_bytes() == b"A=1\n\nX=9\n"
+        assert w2.report().get("mapped_view_tail_error") == "file changed since the padded write"
+
+
+def test_job_observer_is_told_before_the_job_handle_closes() -> None:
+    """run_bound's on_start(None, pid) must arrive while the handle it hands
+    out earlier is still valid, or a break processed meanwhile queries a
+    closed (possibly recycled) handle."""
+    if _need_windows():
+        return
+    import ctypes
+    from ctypes import wintypes as wt
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    seen = {}
+
+    def on_start(job, pid):
+        if job is not None:
+            seen["job"] = job
+        else:
+            flags = wt.DWORD()
+            seen["valid_at_close"] = bool(k32.GetHandleInformation(seen["job"],
+                                                                   ctypes.byref(flags)))
+
+    res = procs.run_bound([PYTHON, "-c", "print(1)"], dict(os.environ), None, 30,
+                          on_start=on_start)
+    assert res.returncode == 0
+    assert seen.get("valid_at_close") is True, seen
+
+
 def test_watcher_thread_is_gone_and_handle_released_after_the_run() -> None:
     if _need_windows():
         return

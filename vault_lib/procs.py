@@ -289,13 +289,15 @@ def run_bound(argv, env, cwd, timeout: Optional[float], on_start=None) -> RunRes
         with job_lock:
             if close is not None and not job_state["closed"]:
                 job_state["closed"] = True
-                close()
                 if on_start is not None:
-                    # Tell the observer the handle is gone before it is.
+                    # Tell the observer the handle is going away BEFORE it
+                    # does, so no break it processes meanwhile queries a
+                    # closed (or recycled) handle value.
                     try:
                         on_start(None, proc.pid)
                     except Exception:  # noqa: BLE001
                         pass
+                close()
 
     def _kill_tree(leader_reaped: bool = False) -> None:
         if sys.platform == "win32":

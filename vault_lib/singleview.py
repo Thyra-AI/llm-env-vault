@@ -289,10 +289,14 @@ class Watcher:
         self.reads_after_restore = 0
         self.restored_early = False
         self.restore_result = None
+        self.restore_attempts = 0
         self.watch_gaps = []     # [(start, end)] seconds with no oplock armed
         self.missing = False
         self.error = None
         self.mapped_tail_pending = False
+        self._last_written = None
+        self.tail_trimmed = False
+        self.tail_trim_error = None
 
     # ----------------------------------------------------------- handle I/O
     def open(self, create: bool = False) -> None:
@@ -380,13 +384,46 @@ class Watcher:
                 try:
                     ok = _k32.WriteFile(self.handle, pad, len(pad), ctypes.byref(got),
                                         ctypes.byref(ov2))
-                    if not ok and ctypes.get_last_error() == ERROR_IO_PENDING:
-                        _k32.GetOverlappedResult(self.handle, ctypes.byref(ov2),
-                                                 ctypes.byref(got), True)
+                    if not ok:
+                        if ctypes.get_last_error() != ERROR_IO_PENDING:
+                            raise OSError(ctypes.get_last_error(), "WriteFile (pad)")
+                        if not _k32.GetOverlappedResult(self.handle, ctypes.byref(ov2),
+                                                        ctypes.byref(got), True):
+                            raise OSError(ctypes.get_last_error(), "WriteFile (pad, overlapped)")
+                    if got.value != len(pad):
+                        raise OSError(0, f"short pad write: {got.value} of {len(pad)} bytes")
                 finally:
                     _k32.CloseHandle(ov2.hEvent)
             self.mapped_tail_pending = True
+            self._last_written = bytes(data)
         _k32.FlushFileBuffers(self.handle)
+
+    def trim_padded_tail(self) -> Optional[str]:
+        """The second half of the ERROR_USER_MAPPED_FILE path: once the
+        handle is released (and the reader's mapping is gone with the
+        command), cut the newline padding so the file matches the last
+        write exactly. Path-based, so only after close(). Returns None when
+        the file now matches, else the reason it was left alone."""
+        if not self.mapped_tail_pending or self._last_written is None:
+            return None
+        if self.handle is not None or self.running():
+            self.tail_trim_error = "handle still held"
+            return self.tail_trim_error
+        exp = self._last_written
+        try:
+            with open(self.path, "r+b") as f:
+                raw = f.read()
+                if raw[:len(exp)] != exp or raw[len(exp):].strip(b"\n"):
+                    self.tail_trim_error = "file changed since the padded write"
+                    return self.tail_trim_error
+                f.seek(len(exp))
+                f.truncate()
+        except OSError as e:
+            self.tail_trim_error = f"{type(e).__name__}: {e}"
+            return self.tail_trim_error
+        self.mapped_tail_pending = False
+        self.tail_trimmed = True
+        return None
 
     def close(self) -> None:
         """Release the handle -- and, if an oplock request is pending,
@@ -547,9 +584,16 @@ class Watcher:
                                            "holders": apps})
                 else:
                     self.foreign_opens.append({"at": broke_at, "apps": apps, "phase": "run"})
-                if remaining == 0 and not self.restored_early:
+                if remaining <= 0 and not self.restored_early:
                     with self.lock:
-                        if self.restore_result is None:
+                        # A failed attempt (a transient I/O error, a short
+                        # write refused by write_all) leaves the real values
+                        # on disk, so it must not be the last word: every
+                        # later break retries until one succeeds. The
+                        # end-of-run path still covers the case where none
+                        # does, and the report carries the count.
+                        if not self.restored_early:
+                            self.restore_attempts += 1
                             try:
                                 self.restore_result = self.on_restore(self)
                             except Exception as e:  # noqa: BLE001 -- must keep watching
@@ -598,8 +642,16 @@ class Watcher:
             out["file_disappeared"] = True
         if self.error:
             out["error"] = self.error
-        if self.mapped_tail_pending:
+        if self.restore_attempts > 1 or (self.restore_result or {}).get("error"):
+            out["restore_attempts"] = self.restore_attempts
+            if (self.restore_result or {}).get("error"):
+                out["restore_error"] = self.restore_result["error"]
+        if self.tail_trimmed:
+            out["mapped_view_tail_trimmed"] = True
+        elif self.mapped_tail_pending:
             out["mapped_view_tail_padded"] = True
+            if self.tail_trim_error:
+                out["mapped_view_tail_error"] = self.tail_trim_error
         return out
 
 

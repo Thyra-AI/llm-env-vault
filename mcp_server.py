@@ -2309,6 +2309,9 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                 w = watchers.get(key)
                 if w is not None and w.restore_result is not None and \
                         w.restore_result.get("error") is None:
+                    # A mapped view may have blocked the in-handle truncate;
+                    # the handle is released now, so finish the job by path.
+                    w.trim_padded_tail()
                     record["early_result"] = w.restore_result
         # Swapped files first: they are the project's own .env, the one
         # place a leftover is most likely to be committed or synced. Each
@@ -2357,6 +2360,14 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                 f"Real values were reverted before the command exited for: {', '.join(early)}. "
                 f"A read labelled 'unattributed' was too fast for the Restart Manager to name "
                 f"the reader; it was counted because the command was running at that moment.")
+        padded = [k for k, w in watchers.items() if w.mapped_tail_pending]
+        if padded:
+            result["single_read_note"] = result.get("single_read_note", "") + (
+                " A memory-mapped view blocked the exact-length truncate on: "
+                + ", ".join(padded) +
+                ". Every byte of the real values was overwritten, but the file ends in "
+                "newline padding that could not be trimmed (see mapped_view_tail_error); "
+                "trim it by hand or run resync_targets.")
         after = {k: w.reads_after_restore for k, w in watchers.items() if w.reads_after_restore}
         if after:
             result["single_read_restored_early"] = after

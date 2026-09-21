@@ -60,6 +60,20 @@ pinning what a user installs.
 - `procs.run_bound` takes an `on_start(job_handle, pid)` observer so the watcher can attribute
   opens to the command's tree; the handle is only ever queried.
 
+### Fixed (post-push review of 1.7.0)
+
+- A failed early restore (a transient I/O error, a short write) was never retried: the watcher
+  kept counting opens but the real values stayed on disk until the command exited. Every later
+  counted open now retries until one succeeds; the report carries `restore_attempts` and, if
+  none succeeded, `restore_error`, and the end-of-run restore still covers that case.
+- When a reader's memory-mapped view blocked the in-handle truncate (`ERROR_USER_MAPPED_FILE`),
+  the newline padding `write_all` leaves was never cut. `Watcher.trim_padded_tail()` now runs
+  once the handle is released; the report says `mapped_view_tail_trimmed` or, if the file was
+  changed meanwhile, `mapped_view_tail_error` with a note in `single_read_note`. The padding
+  write itself is now checked like the main one.
+- `run_bound` told the watcher the Job handle was gone *after* closing it; the order is now
+  notify, then close, so no break processed in between queries a closed handle.
+
 ## [1.6.1] — 2026-09-15
 
 ### Security
