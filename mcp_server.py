@@ -2360,7 +2360,11 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                 f"Real values were reverted before the command exited for: {', '.join(early)}. "
                 f"A read labelled 'unattributed' was too fast for the Restart Manager to name "
                 f"the reader; it was counted because the command was running at that moment.")
-        padded = [k for k, w in watchers.items() if w.mapped_tail_pending]
+        # The materialize file is unlinked in the finally above whatever its
+        # tail looks like; only a swapped .env can be left padded.
+        padded = [k for k, w in watchers.items()
+                  if w.mapped_tail_pending and (materialized_path is None
+                                                or k != str(materialized_path))]
         if padded:
             result["single_read_note"] = result.get("single_read_note", "") + (
                 " A memory-mapped view blocked the exact-length truncate on: "

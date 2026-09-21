@@ -418,6 +418,8 @@ class Watcher:
                     return self.tail_trim_error
                 f.seek(len(exp))
                 f.truncate()
+                f.flush()
+                os.fsync(f.fileno())
         except OSError as e:
             self.tail_trim_error = f"{type(e).__name__}: {e}"
             return self.tail_trim_error
