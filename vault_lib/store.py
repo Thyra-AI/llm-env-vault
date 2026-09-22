@@ -110,6 +110,251 @@ PLACEHOLDER_VALUE_RE = re.compile(r'^(?:"value (?:\d+|\?)"|value (?:\d+|\?))$')
 PENDING_VALUE_RE = re.compile(r'^(?:"value \?"|value \?)$')
 PENDING_PLACEHOLDER = '"value ?"'
 
+# ---------------------------------------------------------------------------
+# Typed ("shape-preserving") placeholders
+# ---------------------------------------------------------------------------
+# `SMTP_PORT="value 17"` is not an int, and `SMTP_USE_SSL="value 38"` is not a
+# bool. A placeholder-only .env therefore fails to LOAD in pydantic-settings,
+# django-environ or Spring -- with the vault not involved in the run at all --
+# so a test that only needs the file to parse cannot run against a protected
+# project. That is mechanism F in docs/env-consumption-research.md, and the
+# case that kept reappearing: a git pre-push hook whose tests spawn children
+# with a scrubbed environment, where the file is the only source.
+#
+# A typed placeholder preserves the SHAPE of the value and nothing else:
+# `0` for an int, `false` for a bool, `https://placeholder-17.invalid` for a
+# URL. It discloses the type -- and, for a URL, the scheme -- never a single
+# byte of content.
+#
+# Why the regex is NOT widened. A pattern loose enough to match `17` or
+# `false` cannot tell a placeholder from a real value, which is exactly why
+# §6 of the research deferred this: resync_targets' conflict detection rests
+# on "is this line still our own placeholder", and a permissive answer there
+# would let it overwrite real values. Detection is instead INDEX-AWARE and
+# EXACT -- a line is a placeholder if it matches the legacy regex, or if it
+# equals the one string this name's number and shape render to, byte for
+# byte. That is stricter than today for a typed name and identical for an
+# untyped one.
+
+SHAPE_STR = "str"
+SHAPE_INT = "int"
+SHAPE_BIT = "bit"
+SHAPE_BOOL = "bool"
+SHAPE_FLOAT = "float"
+SHAPE_EMAIL = "email"
+
+# Parameterised shapes carry the one structural detail a validator checks
+# beyond the type: a URL's scheme (pydantic's PostgresDsn rejects
+# `https://`), and whether a JSON value is a list or an object.
+_SHAPE_URL_RE = re.compile(r"^url:([a-z][a-z0-9+.\-]*)$")
+_SHAPE_JSON_RE = re.compile(r"^json:(list|object)$")
+_PLAIN_SHAPES = frozenset({SHAPE_STR, SHAPE_INT, SHAPE_BIT, SHAPE_BOOL,
+                           SHAPE_FLOAT, SHAPE_EMAIL})
+
+# Inference patterns, applied to the REAL value at vault time.
+_INT_RE = re.compile(r"^-?\d+$")
+_FLOAT_RE = re.compile(r"^-?\d+\.\d+$")
+_URL_RE = re.compile(r"^([a-z][a-z0-9+.\-]*)://", re.IGNORECASE)
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_BOOL_WORDS = frozenset({"true", "false", "yes", "no", "on", "off"})
+
+# What a typed placeholder looks like when its name is no longer in the
+# index. Only the self-describing shapes can be recognised this way: a bare
+# `17` is indistinguishable from a real port, and is deliberately treated as
+# a real value (erring toward "this might be a secret").
+_ORPHAN_TYPED_RE = re.compile(
+    r"^(?:[a-z][a-z0-9+.\-]*://placeholder-\d+\.invalid"
+    r"|placeholder-\d+@example\.invalid)$", re.IGNORECASE)
+
+SHAPES_FILE_NAME = "placeholder_shapes.json"
+
+
+def _bare(text: str) -> str:
+    """One layer of matching surrounding quotes removed, if present."""
+    t = (text or "").strip()
+    if len(t) >= 2 and t[0] == t[-1] and t[0] in ('"', "'"):
+        return t[1:-1]
+    return t
+
+
+def validate_shape(shape) -> bool:
+    """placeholder_shapes.json is plaintext and agent-writable, like the
+    index. Everything rendered from a shape ends up on a line in the user's
+    .env, so an unrecognised one is refused rather than interpolated."""
+    if not isinstance(shape, str):
+        return False
+    return (shape in _PLAIN_SHAPES
+            or bool(_SHAPE_URL_RE.match(shape))
+            or bool(_SHAPE_JSON_RE.match(shape)))
+
+
+def infer_shape(value: str) -> str:
+    """The shape of a real value, decided once at vault time while the
+    plaintext is in memory. Order matters: `0` and `1` are ints that also
+    parse as bools, and pydantic accepts either for a bool field, so `bit`
+    renders `0` and satisfies both."""
+    if not isinstance(value, str):
+        return SHAPE_STR
+    v = value.strip()
+    if not v:
+        return SHAPE_STR
+    if v in ("0", "1"):
+        return SHAPE_BIT
+    if _INT_RE.match(v):
+        return SHAPE_INT
+    if _FLOAT_RE.match(v):
+        return SHAPE_FLOAT
+    if v.lower() in _BOOL_WORDS:
+        return SHAPE_BOOL
+    m = _URL_RE.match(v)
+    if m:
+        return f"url:{m.group(1).lower()}"
+    if _EMAIL_RE.match(v):
+        return SHAPE_EMAIL
+    if v[0] == "[" or v[0] == "{":
+        return "json:list" if v[0] == "[" else "json:object"
+    return SHAPE_STR
+
+
+def render_placeholder(number: int, shape: Optional[str]) -> str:
+    """The exact text that follows `=` on a placeholder line, quoting
+    included. An unknown or absent shape renders the legacy `"value N"`, so
+    an index that has never been retyped produces byte-identical files.
+
+    The number stays visible in every shape that can carry it, because that
+    is what lets a human look at a managed line and find the variable it
+    belongs to -- the property `"value N"` established.
+    """
+    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        raise ValueError(f"placeholder number must be a positive int, got {number!r}")
+    if shape is None or not validate_shape(shape) or shape == SHAPE_STR:
+        return f'"value {number}"'
+    if shape == SHAPE_INT:
+        return str(number)
+    if shape == SHAPE_BIT:
+        # Not the real bit: which of 0/1 it is would be one bit of content.
+        return "0"
+    if shape == SHAPE_BOOL:
+        # Always false, for the same reason -- the real truthiness is content.
+        return "false"
+    if shape == SHAPE_FLOAT:
+        return f"{number}.0"
+    if shape == SHAPE_EMAIL:
+        return f"placeholder-{number}@example.invalid"
+    m = _SHAPE_URL_RE.match(shape)
+    if m:
+        # .invalid is reserved by RFC 2606 and can never resolve, so a
+        # placeholder that leaks into a real config fails closed.
+        return f"{m.group(1)}://placeholder-{number}.invalid"
+    m = _SHAPE_JSON_RE.match(shape)
+    if m:
+        return "[]" if m.group(1) == "list" else "{}"
+    return f'"value {number}"'
+
+
+def _shapes_path() -> Path:
+    return ROOT / SHAPES_FILE_NAME
+
+
+def load_shapes() -> dict:
+    """{VAR_NAME: shape}. Validated on read, like the index: a malformed
+    entry is dropped rather than raised, because a bad shapes file should
+    cost fidelity (a line renders as `"value N"`) and never a run.
+
+    Deliberately NOT pruned when a secret is removed from the vault. The
+    entry is a tombstone: without it, a typed placeholder left behind for a
+    name that has left the index is indistinguishable from a real value, and
+    resync_targets' data-loss guard -- which counts how many managed lines
+    still hold OUR placeholder -- would silently stop counting them.
+    """
+    p = _shapes_path()
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for name, shape in data.items():
+        if not isinstance(name, str) or not validate_shape(shape):
+            continue
+        try:
+            validate_var_name(name)
+        except ValueError:
+            continue
+        out[name] = shape
+    return out
+
+
+def record_shapes(new: dict) -> None:
+    """Merge shapes in. Never removes an entry -- see load_shapes."""
+    clean = {n: s for n, s in (new or {}).items() if validate_shape(s)}
+    if not clean:
+        return
+    merged = load_shapes()
+    merged.update(clean)
+    _atomic_write_text(_shapes_path(), json.dumps(merged, indent=2, sort_keys=True) + "\n")
+
+
+def placeholder_for(name: str, index: Optional[dict], shapes: Optional[dict] = None) -> str:
+    """The placeholder text for `name`, or the pending marker if its number
+    is unknown. The single renderer -- resync and recovery both go through
+    it, so a typed vault cannot end up with one of them writing the legacy
+    form over the other's typed one."""
+    if index and name in index:
+        if shapes is None:
+            shapes = load_shapes()
+        return render_placeholder(index[name], shapes.get(name))
+    return PENDING_PLACEHOLDER
+
+
+def is_placeholder(name: str, value: str, index: Optional[dict],
+                   shapes: Optional[dict] = None) -> bool:
+    """Is this line's value one of ours, rather than a real secret?
+
+    Exact, not pattern-based, for anything typed: the value must equal what
+    this name's number and shape render to. A name with no shape (or no
+    index entry) falls back to the legacy regex, so nothing about an
+    un-retyped vault changes.
+    """
+    v = (value or "").strip()
+    if PLACEHOLDER_VALUE_RE.match(v):
+        return True
+    if shapes is None:
+        shapes = load_shapes()
+    shape = shapes.get(name)
+    if shape is None or shape == SHAPE_STR:
+        # No shape recorded: the only placeholder form is the legacy one,
+        # already checked above.
+        return False
+    if index and name in index:
+        rendered = render_placeholder(index[name], shape)
+        # Compare bare too: callers hand us both raw line text and values
+        # already unquoted by parse_env_file, and a styles-preserving writer
+        # may have quoted a typed render to match its line.
+        if v == rendered or _bare(v) == _bare(rendered):
+            return True
+        # A MISNUMBERED placeholder is still ours, but only where the form
+        # says so by itself. `https://placeholder-99.invalid` can only have
+        # come from us, so resync can renumber it. A bare `99` cannot be
+        # told from a real port, so it is left alone and reported as a
+        # conflict -- the number drifts when a freed index slot is reused,
+        # and clobbering a possible secret is the worse error.
+        return bool(_ORPHAN_TYPED_RE.match(_bare(v)))
+    # The name has left the index but the shape tombstone survives, so a
+    # self-describing form is still recognisable. A bare `17` is not, and is
+    # treated as a real value on purpose.
+    return bool(_ORPHAN_TYPED_RE.match(v))
+
+
+def looks_like_orphan_placeholder(value: str) -> bool:
+    """A self-describing typed placeholder whose name we know nothing about.
+    Used only where the alternative is to leave a line alone forever."""
+    return bool(_ORPHAN_TYPED_RE.match((value or "").strip()))
+
+
 # Well-known OS/runtime-critical environment variable names.  Vaulting a
 # secret under one of these names and then calling run_with_env will
 # completely replace that variable for the launched child process (e.g. a
@@ -663,7 +908,8 @@ def _quote_style(raw_value: str) -> str:
     return ""
 
 
-def sync_target_file(path: Path, index: dict, managed_names, force_names=None) -> list:
+def sync_target_file(path: Path, index: dict, managed_names, force_names=None,
+                     shapes=None) -> list:
     """Rewrite one external .env in place, touching only lines for
     `managed_names` (this file's own previously-migrated variables) --
     never variables that belong to some other registered target.
@@ -713,12 +959,18 @@ def sync_target_file(path: Path, index: dict, managed_names, force_names=None) -
     # is) must still always pass -- that's the behavior this guard exists
     # to leave alone -- so the fraction check is gated on at least 2
     # removals to begin with.
+    if shapes is None:
+        shapes = load_shapes()
     currently_live, would_be_removed = set(), set()
     for line in lines:
         m = ENV_LINE_RE.match(line)
         if m and m.group("name") in managed_names:
             name = m.group("name")
-            if PLACEHOLDER_VALUE_RE.match(m.group("value").strip()):
+            # Index-aware: a typed placeholder for a name that has already
+            # left the index is still recognised through its shape
+            # tombstone, or this guard would quietly stop counting the very
+            # lines it exists to protect.
+            if is_placeholder(name, m.group("value"), index, shapes):
                 currently_live.add(name)
                 if name not in index and name not in force_names:
                     would_be_removed.add(name)
@@ -743,13 +995,13 @@ def sync_target_file(path: Path, index: dict, managed_names, force_names=None) -
             current = m.group("value").strip()
             prefix = f'{m.group("indent")}{m.group("export") or ""}'
             if name in index:
-                expected = f'"value {index[name]}"'
-                if name in force_names or current == expected or PLACEHOLDER_VALUE_RE.match(current):
+                expected = placeholder_for(name, index, shapes)
+                if name in force_names or current == expected or                         is_placeholder(name, current, index, shapes):
                     out_lines.append(f'{prefix}{name}={expected}')
                 else:
                     out_lines.append(line)  # don't clobber something that isn't our own placeholder
                     conflicts.append(name)
-            elif PLACEHOLDER_VALUE_RE.match(current):
+            elif is_placeholder(name, current, index, shapes):
                 # Indent only, never the "export " prefix -- "export # ..."
                 # is not a comment, it's an unparseable bare `export`
                 # statement to python-dotenv and to `source`.
@@ -1098,13 +1350,12 @@ def _ends_in_odd_backslashes(value: str) -> bool:
     return n % 2 == 1
 
 
-def _placeholder_line(prefix: str, name: str, index: Optional[dict]) -> str:
+def _placeholder_line(prefix: str, name: str, index: Optional[dict],
+                      shapes: Optional[dict] = None) -> str:
     """The canonical placeholder line, or the pending marker when the number
     is unknown -- a line, not a comment, so resync_targets can finish the job
     without anyone un-commenting anything by hand."""
-    if index and name in index:
-        return f'{prefix}{name}="value {index[name]}"'
-    return f"{prefix}{name}={PENDING_PLACEHOLDER}"
+    return f"{prefix}{name}={placeholder_for(name, index, shapes)}"
 
 
 def _scan_env_bytes(path: Path) -> tuple:
@@ -1169,13 +1420,24 @@ def _terminator(line: bytes) -> bytes:
     return line[len(line.rstrip(b"\r\n")):]
 
 
-def placeholder_state(path: Path, names) -> dict:
-    """What a swap of `names` into `path` would touch, without any secret:
+def placeholder_state(path: Path, names, index: Optional[dict] = None,
+                      shapes: Optional[dict] = None) -> dict:
+    """Which of `names` currently hold one of our placeholders in `path`,
+    and which hold something else -- names only, never a value:
     {"swappable": [...], "not_in_file": [...], "not_placeholder": [...],
-    "duplicates": [...]}. run_with_env shows this in the dialog and refuses
-    before it opens when nothing would be swapped. Raises ValueError on a
-    file that cannot be rewritten safely."""
+    "pending": [...], "duplicates": [...]}.
+
+    This is vault_status's journal-INDEPENDENT leak check: `not_placeholder`
+    is how a real value left on disk by any means -- a crash whose journal
+    was deleted, a pre-2.0 server that can no longer be reached, a hand
+    edit -- becomes visible on the next status call, trusting no record an
+    agent can edit. Raises ValueError on a file that cannot be read safely.
+    """
     names = set(names)
+    if index is None:
+        index = load_index()
+    if shapes is None:
+        shapes = load_shapes()
     _bom, _lines, texts = _scan_env_bytes(path)
     seen, placeholder, pending, other = {}, set(), set(), set()
     for text in texts:
@@ -1187,7 +1449,7 @@ def placeholder_state(path: Path, names) -> dict:
         value = m.group("value").strip()
         if PENDING_VALUE_RE.match(value):
             pending.add(name)
-        elif PLACEHOLDER_VALUE_RE.match(value):
+        elif is_placeholder(name, value, index, shapes):
             placeholder.add(name)
         else:
             other.add(name)

@@ -146,7 +146,7 @@ def _entry_is_live(entry: dict) -> bool:
     return procs.pid_alive(entry["pid"], entry.get("pid_start"))
 
 
-def _file_is_all_placeholders(path: Path, names) -> bool:
+def _file_is_all_placeholders(path: Path, names, index=None, shapes=None) -> bool:
     """True if no line for `names` holds anything but a placeholder.
 
     Deliberately NOT store.placeholder_state, which this used to call: that is
@@ -158,6 +158,10 @@ def _file_is_all_placeholders(path: Path, names) -> bool:
     elsewhere in the file.
     """
     names = set(names)
+    if index is None:
+        index = store.load_index()
+    if shapes is None:
+        shapes = store.load_shapes()
     try:
         _bom, _lines, texts = store._scan_env_bytes(path)
     except (OSError, ValueError):
@@ -168,7 +172,8 @@ def _file_is_all_placeholders(path: Path, names) -> bool:
         if not m or m.group("name") not in names:
             continue
         value = m.group("value").strip()
-        if store.PENDING_VALUE_RE.match(value) or store.PLACEHOLDER_VALUE_RE.match(value):
+        if store.PENDING_VALUE_RE.match(value) or store.is_placeholder(
+                m.group("name"), value, index, shapes):
             placeholder.add(m.group("name"))
         else:
             other.add(m.group("name"))
@@ -205,7 +210,8 @@ def live_swaps() -> dict:
             if e["state"] == "active" and _entry_is_live(e)}
 
 
-def recover_swap_file(path: Path, names, index: dict, started: float) -> dict:
+def recover_swap_file(path: Path, names, index: dict, started: float,
+                      shapes: Optional[dict] = None) -> dict:
     """Crash recovery: the process that swapped `names` into `path` is gone,
     and with it the record of what it wrote. Rewrite every line for those
     names whose value is not already a placeholder -- unconditionally,
@@ -217,6 +223,8 @@ def recover_swap_file(path: Path, names, index: dict, started: float) -> dict:
     report = {"path": str(path), "restored": [], "cleared": [], "temp_files_removed": [],
               "error": None, "missing": False}
     names = set(names)
+    if shapes is None:
+        shapes = store.load_shapes()
     # Every `.<name>.<random>.tmp` beside the target is ours and holds a
     # full copy of the file as it was being written. There is no legitimate
     # one to preserve, so age is not a criterion -- the earlier mtime check
@@ -246,11 +254,12 @@ def recover_swap_file(path: Path, names, index: dict, started: float) -> dict:
         m = store.ENV_LINE_RE.match(text)
         if not m or m.group("name") not in names:
             continue
-        if store.PLACEHOLDER_VALUE_RE.match(m.group("value").strip()):
-            continue
         name = m.group("name")
+        if store.is_placeholder(name, m.group("value"), index, shapes):
+            continue
         prefix = f'{m.group("indent")}{m.group("export") or ""}'
-        out[i] = store._placeholder_line(prefix, name, index).encode("utf-8") + store._terminator(lines[i])
+        out[i] = store._placeholder_line(prefix, name, index,
+                                         shapes).encode("utf-8") + store._terminator(lines[i])
         if index and name in index:
             report["restored"].append(name)
         else:

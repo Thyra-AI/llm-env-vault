@@ -1256,6 +1256,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                 fresh = {item[1]: item[2] for item in fresh_parsed if item[0] == "var"}
 
                 index = store.load_index()
+                shapes = store.load_shapes()
                 names = [name for name, _ in to_migrate]
                 for name, original_value in to_migrate:
                     fresh_value = fresh.get(name)
@@ -1263,7 +1264,8 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                     # this dialog: never treat an empty value or something that
                     # already looks like one of our own placeholders as a
                     # real secret, even if that's what's on disk right now.
-                    if fresh_value and not store.PLACEHOLDER_VALUE_RE.match(fresh_value):
+                    if fresh_value and not store.is_placeholder(name, fresh_value, index,
+                                                                 shapes):
                         secrets[name] = fresh_value
                     else:
                         secrets[name] = original_value

@@ -798,6 +798,7 @@ def _install_migrate_impl(target_path: str) -> dict:
 
         parsed = store.parse_env_file(target)
         index_now = store.load_index()
+        shapes_now = store.load_shapes()
         targets_now = store.load_targets()
     except (OSError, UnicodeDecodeError, ValueError) as e:
         return {"applied": False, "error": str(e)}
@@ -824,10 +825,14 @@ def _install_migrate_impl(target_path: str) -> dict:
         if not value:
             empty_names.append(name)
             continue
-        if name in index_now and value == f"value {index_now[name]}":
+        if name in index_now and value == store._bare(
+                store.placeholder_for(name, index_now, shapes_now)):
             already_migrated.append(name)
             continue
-        if store.PLACEHOLDER_VALUE_RE.match(value):
+        # The guard that stops a placeholder being vaulted AS ITS OWN VALUE.
+        # Index-aware since 2.0: without it a typed vault would store the
+        # literal `false` as SMTP_USE_SSL's secret on the next migrate.
+        if store.is_placeholder(name, value, index_now, shapes_now):
             stale_placeholders.append(name)
             continue
         to_migrate.append((name, value))
