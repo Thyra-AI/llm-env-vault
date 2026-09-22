@@ -1,0 +1,17 @@
+{
+  "entries": {
+    "__ENV_PATH__": {
+      "names": [
+        "API_TOKEN",
+        "DB_PASSWORD",
+        "PLAIN"
+      ],
+      "pid": 44292,
+      "pid_start": 1790098633.4083054,
+      "server_id": "24607bd06fecb934",
+      "started": 1790098636.1478667,
+      "state": "active"
+    }
+  },
+  "version": 1
+}
