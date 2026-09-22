@@ -286,38 +286,25 @@ def _():
         "above would then pass for the wrong reason")
 
 
-@check("unlock_dialog_discloses_every_file_it_will_swap")
+@check("unlock_dialog_states_the_single_view_rule_for_materialize")
 def _():
-    """A swap= run writes real values INTO the project's own .env. The human
-    must see each file, how many values, what is skipped and why, the git
-    warning when the file is tracked, and that the trust checkbox is still
-    offered (same exposure class as materialize, not files=)."""
-    entries = [{"path": _FAKE_PLAINTEXT, "names": ["A", "B"], "skipped": {"C": "no line"},
-                "git_tracked": True, "git_ignored": False}]
+    """materialize= writes real values to a fresh path for the lifetime of
+    one command -- the last standing exception to "no file an agent can read
+    holds a real value" after swap= was retired in 2.0. The human must see
+    the path, when the file goes away, and, under max_reads, that the revert
+    is counted in opens by ANY program when the reader cannot be told apart.
+    That last clause is the one that must not quietly soften."""
     widgets = build_dialog(lambda: gui.unlock_for_run_dialog(
-        "docker compose up", only_vars=["A", "B", "C"], swap=entries))
+        "docker run --env-file .env app", only_vars=["A", "B"],
+        materialize_path=_FAKE_PLAINTEXT))
     blob = all_text(widgets)
-    assert "real values into" in blob, (
-        "the unlock dialog no longer says it will write real values into project files")
-    # The per-file list (path, value count, skips) is a Text widget, which
-    # the snapshot cannot read -- the labels around it are what is checked.
-    assert "tracked by git" in blob, (
-        "the unlock dialog no longer warns that a swapped file is tracked by git")
-    assert "readable by the ai assistant" in blob, (
-        "the unlock dialog no longer discloses that the swapped file is agent-readable")
+    assert "deleted the moment the command exits" in blob, (
+        "the unlock dialog no longer says when the materialized file goes away")
     assert "Checkbutton" in [c for c, _t in widgets], (
-        "the trust checkbox vanished from swap runs -- they are the materialize class")
-    # The time bound is stated in the unit a human reads: minutes, or seconds
-    # below one minute. timeout=None (a plain run) must build too.
-    bounded = build_dialog(lambda: gui.unlock_for_run_dialog(
-        "docker compose up", only_vars=["A"], swap=entries, timeout=45))
-    assert "after 45 seconds" in all_text(bounded), (
-        "the unlock dialog no longer states the swap time bound")
-    bounded = build_dialog(lambda: gui.unlock_for_run_dialog(
-        "docker compose up", only_vars=["A"], swap=entries, timeout=3600))
-    assert "after 60 minutes" in all_text(bounded)
+        "the trust checkbox vanished from materialize runs -- they are still trustable")
     single = build_dialog(lambda: gui.unlock_for_run_dialog(
-        "docker compose up", only_vars=["A"], swap=entries, timeout=3600, max_reads=2))
+        "docker compose up", only_vars=["A"], materialize_path=_FAKE_PLAINTEXT,
+        timeout=3600, max_reads=2))
     blob = all_text(single)
     assert "after the first 2 open(s)" in blob and "any program" in blob, (
         "the unlock dialog no longer states the single-view rule honestly")

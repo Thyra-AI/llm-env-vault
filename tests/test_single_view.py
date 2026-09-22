@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import mcp_server  # noqa: E402
 from vault_lib import legacy_swap, procs, singleview, store, trust  # noqa: E402
-from test_swap import (INDEX, PLACEHOLDER_ENV, SECRETS, fake_dialog, stub_run,  # noqa: E402
+from _vault_workspace import (INDEX, PLACEHOLDER_ENV, SECRETS, fake_dialog, stub_run,  # noqa: E402
                        workspace)
 
 IS_WIN = sys.platform == "win32"
@@ -56,100 +56,12 @@ READ_TWICE = ("import sys,time\n"
               "time.sleep(0.4)\n")
 
 
-def test_first_read_is_real_second_read_while_running_is_placeholder() -> None:
-    if _need_windows():
-        return
-    with workspace(styles={"API_TOKEN": '"'}) as (project, env_path):
-        with fake_dialog() as calls:
-            r = mcp_server._run_with_env_impl([PYTHON, "-c", READ_TWICE], None, False,
-                                              str(project), ["API_TOKEN"], None,
-                                              swap=[".env"], max_reads=1)
-        assert r["applied"] and r["exit_code"] == 0, r
-        first, second = r["stdout"].splitlines()
-        assert first == "[REDACTED:API_TOKEN (as written to .env)]", first
-        assert second == '"value 1"', second
-        rep = r["single_read"][str(env_path)]
-        assert rep["restored_early"] is True and rep["reads"] == 1
-        assert rep["reads_after_restore"] == 1
-        assert r["single_read_restored_early"] == {str(env_path): 1}
-        assert calls[0]["max_reads"] == 1
-        assert env_path.read_bytes() == PLACEHOLDER_ENV
-        assert "swap_restore_conflicts" not in r and not legacy_swap._journal_path().exists()
 
 
-def test_max_reads_two_serves_both_reads() -> None:
-    if _need_windows():
-        return
-    with workspace(styles={"API_TOKEN": '"'}) as (project, env_path):
-        with fake_dialog():
-            r = mcp_server._run_with_env_impl([PYTHON, "-c", READ_TWICE], None, False,
-                                              str(project), ["API_TOKEN"], None,
-                                              swap=[".env"], max_reads=2)
-        first, second = r["stdout"].splitlines()
-        assert first == second == "[REDACTED:API_TOKEN (as written to .env)]", r["stdout"]
-        rep = r["single_read"][str(env_path)]
-        assert rep["reads"] == 2 and rep["restored_early"] is True
-        assert "single_read_restored_early" not in r
-        assert env_path.read_bytes() == PLACEHOLDER_ENV
 
 
-def test_stat_only_is_not_a_read() -> None:
-    if _need_windows():
-        return
-    code = ("import os,time\n"
-            "for _ in range(20): os.stat('.env'); os.path.isfile('.env'); os.path.getsize('.env')\n"
-            "time.sleep(0.3)\n")
-    with workspace() as (project, env_path):
-        with fake_dialog():
-            r = mcp_server._run_with_env_impl([PYTHON, "-c", code], None, False, str(project),
-                                              ["API_TOKEN"], None, swap=[".env"], max_reads=1)
-        rep = r["single_read"][str(env_path)]
-        assert rep["reads"] == 0 and rep["restored_early"] is False, rep
-        assert env_path.read_bytes() == PLACEHOLDER_ENV  # restored at exit as usual
 
 
-def test_foreign_holder_is_reported_and_not_counted() -> None:
-    if _need_windows():
-        return
-    with workspace(styles={"API_TOKEN": '"'}) as (project, env_path):
-        # The command waits 0.5 s, then reads once. Meanwhile a process OUTSIDE
-        # the job opens the file and holds it for 1 s.
-        code = ("import time\n"
-                "time.sleep(1.6)\n"
-                "print(open('.env', encoding='utf-8').read().count('tok-'), flush=True)\n"
-                "time.sleep(0.4)\n")
-        holder = {}
-
-        def start_holder(*_a):
-            holder["p"] = subprocess.Popen(
-                [PYTHON, "-c", "import sys,time; f=open(sys.argv[1]); time.sleep(1.0); f.close()",
-                 str(env_path)])
-
-        original = mcp_server._run_command
-
-        def wrapped(command, env, cwd, timeout, bind=True, on_start=None):
-            def hooked(job, pid):
-                on_start(job, pid)
-                time.sleep(0.2)
-                start_holder()
-            return original(command, env, cwd, timeout, bind=bind, on_start=hooked)
-
-        mcp_server._run_command = wrapped
-        try:
-            with fake_dialog():
-                r = mcp_server._run_with_env_impl([PYTHON, "-c", code], None, False,
-                                                  str(project), ["API_TOKEN"], None,
-                                                  swap=[".env"], max_reads=1)
-        finally:
-            mcp_server._run_command = original
-            if "p" in holder:
-                holder["p"].wait()
-        rep = r["single_read"][str(env_path)]
-        assert rep.get("foreign_opens", 0) >= 1 and "Python" in rep.get("foreign_apps", []), rep
-        # The command's own read still got the real value and was counted.
-        assert r["stdout"].strip() == "1", r
-        assert rep["reads"] == 1 and rep["restored_early"] is True
-        assert env_path.read_bytes() == PLACEHOLDER_ENV
 
 
 def test_materialize_with_max_reads_is_emptied_after_first_read() -> None:
@@ -170,39 +82,6 @@ def test_materialize_with_max_reads_is_emptied_after_first_read() -> None:
         assert r["single_read"][str(project / ".env.runtime")]["restored_early"] is True
 
 
-def test_refusals_before_the_dialog() -> None:
-    with workspace() as (project, env_path):
-        with fake_dialog() as calls:
-            r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None, None,
-                                              max_reads=1)
-            assert "only means something" in r["error"]
-            r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None, None,
-                                              swap=[".env"], max_reads=0)
-            assert "between 1 and" in r["error"]
-            r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None, None,
-                                              swap=[".env"], max_reads=True)
-            assert "between 1 and" in r["error"]
-            r = mcp_server._run_with_env_impl(["cmd"], None, True, str(project), None, None,
-                                              swap=[".env"], max_reads=1)
-            assert "background" in r["error"]
-            if IS_WIN:
-                original = singleview.self_test
-                singleview.self_test = lambda path, timeout=3.0: "simulated: no oplock here"
-                try:
-                    r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None,
-                                                      None, swap=[".env"], max_reads=1)
-                finally:
-                    singleview.self_test = original
-                assert "cannot be honoured" in r["error"] and "no oplock" in r["error"]
-            else:
-                r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None,
-                                                  None, swap=[".env"], max_reads=1)
-                assert "Windows" in r["error"]
-        assert calls == []
-        a = trust.make_signature(["c"], str(project), None, None, False, None, max_reads=1)
-        b = trust.make_signature(["c"], str(project), None, None, False, None, max_reads=2)
-        c = trust.make_signature(["c"], str(project), None, None, False, None)
-        assert len({a, b, c}) == 3
 
 
 def test_self_test_proves_holding_and_refuses_when_a_holder_exists() -> None:
@@ -223,58 +102,8 @@ def test_self_test_proves_holding_and_refuses_when_a_holder_exists() -> None:
             holder.wait()
 
 
-def test_a_run_that_never_reads_restores_at_exit_and_reports_zero_reads() -> None:
-    if _need_windows():
-        return
-    with workspace() as (project, env_path):
-        with fake_dialog():
-            r = mcp_server._run_with_env_impl([PYTHON, "-c", "print('hi')"], None, False,
-                                              str(project), ["PLAIN"], None, swap=[".env"],
-                                              max_reads=1)
-        rep = r["single_read"][str(env_path)]
-        assert rep["reads"] == 0 and not rep["restored_early"]
-        assert env_path.read_bytes() == PLACEHOLDER_ENV
-        assert not legacy_swap._journal_path().exists()
 
 
-def test_failure_on_a_later_target_rolls_back_an_armed_earlier_one() -> None:
-    """Two swap targets, max_reads set. The first is armed (exclusive handle
-    held, real values written through it) when the second fails. The
-    rollback must release the first watcher's handle before the file-based
-    restore, or the restore cannot even open the file."""
-    if _need_windows():
-        return
-    with workspace() as (project, env_path):
-        second = project / ".env.second"
-        second.write_bytes(b'PLAIN="value 3"\n')
-        store.add_target(str(second), ["PLAIN"])
-        original = mcp_server._swap_through_watcher
-        calls = {"n": 0}
-
-        def failing_second(key, *a, **k):
-            calls["n"] += 1
-            if calls["n"] == 2:
-                raise ValueError("simulated failure on the second target")
-            return original(key, *a, **k)
-
-        mcp_server._swap_through_watcher = failing_second
-        try:
-            with fake_dialog():
-                r = mcp_server._run_with_env_impl([PYTHON, "-c", "pass"], None, False,
-                                                  str(project), ["PLAIN"], None,
-                                                  swap=[".env", ".env.second"], max_reads=1)
-        finally:
-            mcp_server._swap_through_watcher = original
-        assert r["applied"] is False and "simulated" in r["error"], r
-        assert env_path.read_bytes() == PLACEHOLDER_ENV, "first target not rolled back"
-        assert b"justletters123" not in second.read_bytes()
-        assert "swap_restore_failed" not in r
-        assert not legacy_swap._journal_path().exists()
-        # And nothing of ours is left holding either file.
-        for p in (env_path, second):
-            w = singleview.Watcher(str(p), 1, lambda _w: {}, threading.Lock())
-            w.open()
-            w.close()
 
 
 def test_short_write_is_refused() -> None:
@@ -345,42 +174,6 @@ READ_THRICE = ("import time\n"
                "    time.sleep(0.9)\n")
 
 
-def test_a_failed_early_restore_is_retried_on_the_next_read() -> None:
-    """A transient failure while reverting must not leave the real values
-    on disk for the rest of the run: the next counted open retries."""
-    if _need_windows():
-        return
-    real = store.compute_unswap_bytes
-    calls = {"n": 0}
-
-    def flaky(*args, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise OSError(0, "simulated transient failure")
-        return real(*args, **kwargs)
-
-    store.compute_unswap_bytes = flaky
-    try:
-        with workspace(styles={"API_TOKEN": '"'}) as (project, env_path):
-            with fake_dialog():
-                r = mcp_server._run_with_env_impl([PYTHON, "-c", READ_THRICE], None, False,
-                                                  str(project), ["API_TOKEN"], None,
-                                                  swap=[".env"], max_reads=1)
-            assert r["applied"] and r["exit_code"] == 0, r
-            first, second, third = r["stdout"].splitlines()
-            assert first == "[REDACTED:API_TOKEN (as written to .env)]", first
-            # The second read still saw the real value (the failed attempt);
-            # the third proves the retry happened.
-            assert second == "[REDACTED:API_TOKEN (as written to .env)]", second
-            assert third == '"value 1"', third
-            rep = r["single_read"][str(env_path)]
-            assert rep["restored_early"] is True, rep
-            assert rep["restore_attempts"] == 2 and "restore_error" not in rep, rep
-            assert rep["reads"] == 2 and rep["reads_after_restore"] == 1, rep
-            assert env_path.read_bytes() == PLACEHOLDER_ENV
-            assert "swap_restore_conflicts" not in r and not legacy_swap._journal_path().exists()
-    finally:
-        store.compute_unswap_bytes = real
 
 
 def test_padded_tail_from_a_mapped_view_is_trimmed_after_release() -> None:
@@ -446,21 +239,6 @@ def test_job_observer_is_told_before_the_job_handle_closes() -> None:
     assert seen.get("valid_at_close") is True, seen
 
 
-def test_watcher_thread_is_gone_and_handle_released_after_the_run() -> None:
-    if _need_windows():
-        return
-    with workspace() as (project, env_path):
-        before = threading.active_count()
-        with fake_dialog():
-            mcp_server._run_with_env_impl([PYTHON, "-c", "print(open('.env').read()[:1])"],
-                                          None, False, str(project), ["PLAIN"], None,
-                                          swap=[".env"], max_reads=1)
-        time.sleep(0.2)
-        assert threading.active_count() <= before + 1  # run_bound's watchdog may linger 2 s
-        # An exclusive open must succeed: no handle of ours is left on the file.
-        w = singleview.Watcher(str(env_path), 1, lambda _w: {}, threading.Lock())
-        w.open()
-        w.close()
 
 
 if __name__ == "__main__":

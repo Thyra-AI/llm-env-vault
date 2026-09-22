@@ -31,8 +31,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import mcp_server  # noqa: E402
 from vault_lib import legacy_swap, procs, store, trust  # noqa: E402
-from test_swap import (INDEX, PLACEHOLDER_ENV, SECRETS, TEST_PASSWORD, _read_journal,  # noqa: E402
-                       fake_dialog, stub_run, workspace)
+from _vault_workspace import (INDEX, PLACEHOLDER_ENV, SECRETS, TEST_PASSWORD, _read_journal,  # noqa: E402
+                              fake_dialog, stub_run, workspace)
 
 IS_WIN = os.name == "nt"
 
@@ -152,32 +152,6 @@ def test_journal_entries_off_the_registry_are_quarantined_not_acted_on() -> None
         assert not legacy_swap._journal_path().exists()
 
 
-def test_swap_argument_unc_and_remote_are_refused_before_resolve() -> None:
-    with workspace() as (project, env_path):
-        original_resolve = Path.resolve
-        resolved = []
-
-        def spy(self, *a, **k):
-            resolved.append(str(self))
-            return original_resolve(self, *a, **k)
-
-        Path.resolve = spy
-        try:
-            with fake_dialog() as calls:
-                for bad in (r"\\evil\share\.env", "//evil/share/.env", r"\\?\C:\x\.env"):
-                    r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None,
-                                                      None, swap=[bad])
-                    assert "refused" in r["error"] or "UNC" in r["error"], r
-                r = mcp_server._run_with_env_impl(["cmd"], None, False, r"\\evil\share", None,
-                                                  None, swap=[".env"])
-                assert "UNC" in r["error"]
-                r = mcp_server._run_with_env_impl([r"\\evil\share\tool.exe"], None, False,
-                                                  str(project), None, None)
-                assert "UNC" in r["error"]
-        finally:
-            Path.resolve = original_resolve
-        assert not any(p.startswith(("\\\\", "//")) for p in resolved), resolved
-        assert calls == []
 
 
 def test_journal_add_validates_names_against_the_registry() -> None:
@@ -195,37 +169,8 @@ def test_journal_add_validates_names_against_the_registry() -> None:
 # WP2 -- restore correctness
 # ---------------------------------------------------------------------------
 
-def test_requoted_secret_during_run_is_restored_not_treated_as_edit() -> None:
-    with workspace(styles={"API_TOKEN": '"'}) as (project, env_path):
-        def formatter(env, cwd):
-            data = env_path.read_bytes().replace(b'export API_TOKEN="tok-abcdefgh-123456"',
-                                                 b"export API_TOKEN=tok-abcdefgh-123456")
-            env_path.write_bytes(data)
-            return ""
-
-        with fake_dialog(), stub_run(observer=formatter):
-            r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project),
-                                              ["API_TOKEN"], None, swap=[".env"])
-        assert "swap_restore_conflicts" not in r, r
-        assert "swap_verify_failed" not in r
-        assert b'export API_TOKEN="value 1"\r\n' in env_path.read_bytes()
-        assert not legacy_swap._journal_path().exists()
 
 
-def test_secret_copied_under_another_name_is_reported_by_line_number() -> None:
-    with workspace() as (project, env_path):
-        def copier(env, cwd):
-            env_path.write_bytes(env_path.read_bytes() + b"BACKUP_TOKEN=tok-abcdefgh-123456\r\n")
-            return ""
-
-        with fake_dialog(), stub_run(observer=copier):
-            r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project),
-                                              ["API_TOKEN"], None, swap=[".env"])
-        seen = r["swap_secret_seen_elsewhere"]
-        assert seen == [{"line": 6, "name": "API_TOKEN", "path": str(env_path)}], seen
-        assert "line 6" in r["swap_warning"]
-        assert "tok-abcdefgh" not in json.dumps(r)
-        assert b'export API_TOKEN="value 1"\r\n' in env_path.read_bytes()
 
 
 def test_restore_writes_in_place_when_replace_is_blocked() -> None:
@@ -313,36 +258,6 @@ def test_dotenv_decode_reads_single_backslash_escapes() -> None:
     assert store._carries_value('"a\\\\b"', entry) is True
 
 
-def test_a_registered_target_that_became_a_link_is_refused_everywhere() -> None:
-    with workspace() as (project, env_path):
-        victim = project / "victim.env"
-        victim.write_bytes(b'PLAIN="value 3"\n')
-        real = project / "real.env"
-        env_path.rename(real)
-        try:
-            os.symlink(victim, env_path)
-        except (OSError, NotImplementedError):
-            real.rename(env_path)
-            return _skip("symlink creation not permitted here")
-        try:
-            assert store._is_link(env_path)
-            with fake_dialog() as calls:
-                r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None,
-                                                  None, swap=[".env"])
-            assert "link" in r["error"] and calls == []
-            for fn in (lambda: store.preview_swap(env_path, ["PLAIN"]),
-                       lambda: store.swap_target_file(env_path, ["PLAIN"], SECRETS, {}),
-                       lambda: legacy_swap.recover_swap_file(env_path, ["PLAIN"], INDEX, 0)):
-                try:
-                    out = fn()
-                except ValueError as e:
-                    assert "link" in str(e)
-                else:
-                    assert isinstance(out, dict) and out.get("error") and "link" in out["error"]
-            assert victim.read_bytes() == b'PLAIN="value 3"\n'
-        finally:
-            env_path.unlink()
-            real.rename(env_path)
 
 
 def test_trailing_backslash_never_renders_unterminated() -> None:
@@ -374,66 +289,10 @@ def test_own_pid_leftover_entry_is_cleared_when_file_already_restored() -> None:
 # WP3 -- time bound, process binding, the real kill
 # ---------------------------------------------------------------------------
 
-def test_swap_run_has_a_default_timeout_and_it_is_in_the_signature() -> None:
-    with workspace() as (project, env_path):
-        with fake_dialog() as calls, stub_run():
-            mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None, None,
-                                          swap=[".env"])
-            assert calls[0]["timeout"] == mcp_server.SWAP_DEFAULT_TIMEOUT_SECONDS
-            mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None, None)
-            assert calls[1]["timeout"] is None
-            r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None, None,
-                                              timeout=True)
-            assert "timeout must be" in r["error"]
-            r = mcp_server._run_with_env_impl(["cmd"], None, True, str(project), None, None,
-                                              timeout=5)
-            assert "background" in r["error"]
-        a = trust.make_signature(["cmd"], str(project), None, None, False, None, timeout=3600)
-        b = trust.make_signature(["cmd"], str(project), None, None, False, None, timeout=60)
-        c = trust.make_signature(["cmd"], str(project), None, None, False, None)
-        assert len({a, b, c}) == 3
 
 
-def test_timed_out_swap_run_kills_the_tree_and_restores() -> None:
-    with workspace() as (project, env_path):
-        code = ("import subprocess,sys,time\n"
-                "g=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'])\n"
-                "print('grandchild', g.pid, flush=True)\n"
-                "time.sleep(60)\n")
-        t = time.time()
-        with fake_dialog():
-            r = mcp_server._run_with_env_impl([sys.executable, "-c", code], None, False,
-                                              str(project), ["PLAIN"], None, swap=[".env"],
-                                              timeout=2)
-        assert r["timed_out"] is True and r["exit_code"] is None, r
-        assert time.time() - t < 15
-        assert env_path.read_bytes() == PLACEHOLDER_ENV
-        gpid = int(r["stdout"].split()[1])
-        time.sleep(0.5)
-        if r.get("process_binding") is None:  # bound: the grandchild must be gone
-            assert procs.process_start_time(gpid)[0] is False
 
 
-def test_plain_runs_are_not_bound_but_swap_runs_are() -> None:
-    with workspace() as (project, env_path):
-        seen = []
-        original = mcp_server._run_command
-
-        def spy(command, env, cwd, timeout, bind=True, on_start=None):
-            seen.append(bind)
-            return procs.RunResult(0, "", "", False, "job" if bind else "none")
-
-        mcp_server._run_command = spy
-        try:
-            with fake_dialog():
-                mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None, None)
-                mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None, None,
-                                              swap=[".env"])
-                mcp_server._run_with_env_impl(["cmd"], ".env.runtime", False, str(project),
-                                              None, None)
-        finally:
-            mcp_server._run_command = original
-        assert seen == [False, True, True]
 
 
 def test_watchdog_never_touches_a_closed_job_and_ends_lingering_descendants() -> None:
@@ -540,49 +399,10 @@ def test_vault_status_reports_managed_lines_holding_real_values_without_a_journa
 # WP5 -- refusals and disclosure
 # ---------------------------------------------------------------------------
 
-def test_git_command_is_refused_for_swap() -> None:
-    with workspace() as (project, env_path):
-        with fake_dialog() as calls:
-            for argv0 in ("git", "GIT.EXE", r"C:\Program Files\Git\cmd\git.exe"):
-                r = mcp_server._run_with_env_impl([argv0, "add", "-A"], None, False,
-                                                  str(project), None, None, swap=[".env"])
-                assert "git" in r["error"], r
-        assert calls == []
 
 
-def test_cloud_synced_folder_is_disclosed_to_the_dialog() -> None:
-    with workspace() as (project, env_path):
-        old = os.environ.get("OneDrive")
-        os.environ["OneDrive"] = str(project.parent)
-        try:
-            with fake_dialog() as calls, stub_run():
-                mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None, None,
-                                              swap=[".env"])
-        finally:
-            if old is None:
-                os.environ.pop("OneDrive", None)
-            else:
-                os.environ["OneDrive"] = old
-        assert calls[0]["swap"][0]["cloud"] == "OneDrive"
 
 
-def test_file_that_became_tracked_during_the_run_is_reported() -> None:
-    if mcp_server._GIT_EXE is None:
-        return _skip("git not on PATH")
-    with workspace() as (project, env_path):
-        subprocess.run([mcp_server._GIT_EXE, "init", "-q", str(project)], check=True,
-                       capture_output=True)
-
-        def commit_during_run(env, cwd):
-            subprocess.run([mcp_server._GIT_EXE, "-C", str(project), "add", "-A"],
-                           check=True, capture_output=True)
-            return ""
-
-        with fake_dialog(), stub_run(observer=commit_during_run):
-            r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), ["PLAIN"],
-                                              None, swap=[".env"])
-        assert r["swap_target_committed"] == [str(env_path)]
-        assert "Rotate" in r["swap_warning"]
 
 
 if __name__ == "__main__":

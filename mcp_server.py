@@ -85,23 +85,19 @@ there is nothing in it for you -- do not try to decrypt one outside this server.
 - Never propose encrypt_file on a file you were not asked to encrypt. It \
 destroys the original after encrypting, and the only way back is the master \
 password or the recovery key.
-- run_with_env(swap=[path]) writes REAL values into an already-migrated .env \
-for the duration of one foreground command and restores the placeholders when \
-it exits. Use it only when the tool is known to read that file and nothing \
-else reaches it: a loader with override/overload semantics, `source .env`, \
-compose `env_file:`, `docker run --env-file .env`, kubectl --from-env-file, \
-or a test harness that scrubs the child environment. Prefer plain injection \
-when the tool reads its environment (almost all do by default), and \
-materialize= when it accepts an env-file path of your choosing. Always pair \
-swap with only_vars, and with max_reads=1 (2 for docker compose) so the file \
-reverts the moment the command has read it instead of when it exits.
-- While a swap run is active, never read, cat, copy, hash, diff, commit or \
-stash the swapped file, and never run a git write command in that project. \
-Never edit targets.json, target_styles.json or swap.journal.json.
-- If a result contains swap_restore_conflicts, swap_restore_failed, \
-swap_verify_failed or swap_recovered, stop, quote that field to the user \
-verbatim, and wait for their instruction before running anything else -- it \
-means real values may still be on disk somewhere the user needs to look.
+- Real values reach a command through its ENVIRONMENT. That serves every \
+consumer that reads its own environment, which is almost all of them by \
+default -- python-dotenv, pydantic-settings, Node --env-file, Vite, Next, \
+Bun, uv run and compose ${VAR} interpolation all let the environment win \
+over the file. Reach for materialize= only for a tool that reads an env \
+FILE and nothing else: `docker run --env-file`, compose `env_file:`, \
+kubectl --from-env-file. Pair it with only_vars, and with max_reads=1 (2 \
+for docker compose) so the file is emptied the moment it has been read.
+- Never edit targets.json, target_styles.json or swap.journal.json.
+- If a result contains swap_recovered or legacy_swap_live, a pre-2.0 \
+install left real values in a project's own .env. Stop, quote that field to \
+the user verbatim, and wait for their instruction before running anything \
+else -- real values may still be on disk somewhere they need to look.
 """
 
 mcp = FastMCP("llm-env-vault", instructions=_AGENT_INSTRUCTIONS)
@@ -260,7 +256,7 @@ def _vault_status_core() -> dict:
     # human asking "is anything unlocked right now" gets a true answer.
     live, live_error = _live_swap_paths()
     if live:
-        result["swaps_in_progress"] = [
+        result["legacy_swap_live"] = [
             {"path": k, "names": e["names"], "pid": e["pid"]} for k, e in sorted(live.items())]
     if live_error:
         result["swap_journal_error"] = live_error
@@ -1514,228 +1510,7 @@ def _reparse_points_to_share(path_str: str) -> bool:
     return False
 
 
-def _resolve_swap_plan(command: list, swap: list, cwd: Optional[str], only_vars: Optional[list],
-                       files_restore_paths: list) -> list:
-    """Turn the caller's swap list into [{key, path, names, skipped,
-    git_tracked, git_ignored}] or raise ValueError -- all before the dialog
-    opens, and all without a single secret: what would be swapped is a
-    function of targets.json, the index, and the placeholder lines currently
-    in the file.
-
-    Each entry must be a registered install_migrate target: the registry is
-    the only record of which names in that file are the vault's to touch,
-    and a swap into an unregistered file would have nothing to restore
-    against. `names` is the set that will actually change -- registered,
-    present in the vault, requested by only_vars if given, and currently
-    sitting on a placeholder line. A file where that set is empty is a
-    pointless request and is refused; so is an only_vars name the caller
-    explicitly asked to swap into a file where it cannot be, because that
-    is a contradiction the human should not be asked to approve.
-    """
-    if not isinstance(swap, list) or not all(isinstance(x, str) and x.strip() for x in swap):
-        raise ValueError("swap must be a list of non-empty path strings.")
-    if command and os.path.splitext(os.path.basename(command[0]))[0].lower() == "git":
-        # A git command needs no secrets, and `git add -A` / `commit` /
-        # `stash` with real values in .env is the one-dialog path to
-        # committing them. Wrapped invocations (`sh -c "git ..."`) are the
-        # dialog's amber line's job; the bare case is refused outright.
-        raise ValueError("swap is refused for a git command: git needs no secrets, and "
-                         "running it while .env holds real values is how they get committed.")
-    targets = store.load_targets()
-    index = store.load_index()
-    if cwd is not None and store._looks_like_unc(str(cwd)):
-        raise ValueError(f"cwd {cwd!r} is a UNC path -- refusing before touching it.")
-    base = (Path(cwd) if cwd else Path.cwd()).resolve()
-    plan, seen = [], set()
-    for raw in swap:
-        joined = raw if os.path.isabs(raw) else os.path.join(str(base), raw)
-        # String checks BEFORE resolve(): resolving a UNC path opens a
-        # network connection, which is exactly what an agent-chosen string
-        # must not be able to cause. The registry check needs the resolved
-        # form, so it comes after -- and repeats the UNC test on the result,
-        # since a junction can point at a share.
-        if store._looks_like_unc(joined) or joined.startswith(("\\\\?\\", "\\\\.\\")):
-            raise ValueError(f"swap path {raw!r} is a UNC or device path -- refused.")
-        if _drive_is_remote(joined) or _reparse_points_to_share(joined):
-            raise ValueError(f"swap path {raw!r} is on a network drive or behind a link to "
-                             f"one -- refused.")
-        try:
-            resolved = Path(joined).resolve()
-        except OSError as e:
-            raise ValueError(f"swap path {raw!r} could not be resolved: {e}") from None
-        try:
-            key = store.validate_target_key(str(resolved), [], targets)
-        except ValueError as e:
-            raise ValueError(
-                f"{e} -- only registered install_migrate targets can be swapped "
-                f"(registered: {', '.join(sorted(targets)) or 'none'}). Migrate it first, or "
-                f"use materialize= for a file the vault does not manage.") from None
-        if key in seen:
-            continue
-        seen.add(key)
-        path = Path(key)
-        if not path.is_file():
-            raise ValueError(f"{key} is registered but is not a file on disk.")
-        if store._is_link(path):
-            # The registry key was a regular file when it was migrated. A link
-            # there now means something replaced it; the swap's os.replace
-            # would turn the link into a real-values file and the restore's
-            # in-place fallback would write through it. Refused, before the
-            # dialog, whatever it points at.
-            raise ValueError(f"{key} is a symlink or junction -- refusing to swap through a "
-                             f"link.")
-        if not os.access(path, os.W_OK):
-            raise ValueError(f"{key} is not writable -- the placeholders could not be "
-                             f"restored after the run, so it is refused before it.")
-        if any(os.path.normcase(str(r)) == os.path.normcase(key) for r in files_restore_paths):
-            raise ValueError(f"{key} is both a swap target and the restore path of a "
-                             f"files= entry -- pick one.")
-        registered = set(targets[key])
-        candidates = registered & set(index)
-        if only_vars is not None:
-            candidates &= set(only_vars)
-        preview = store.preview_swap(path, candidates)
-        names = preview["swappable"]
-        skipped = {}
-        for n in preview["not_in_file"]:
-            skipped[n] = "no line for this name in the file"
-        for n in preview["not_placeholder"]:
-            skipped[n] = "current value is not a vault placeholder"
-        for n in sorted(registered - set(index)):
-            if only_vars is None or n in only_vars:
-                skipped[n] = "no longer in the vault"
-        if only_vars is not None:
-            contradicted = sorted((set(only_vars) & registered) - set(names))
-            if contradicted:
-                raise ValueError(
-                    f"only_vars names {', '.join(contradicted)} for {key}, but they cannot be "
-                    f"swapped there: "
-                    + "; ".join(f"{n}: {skipped.get(n, 'unknown')}" for n in contradicted))
-        if not names:
-            why = ("; ".join(f"{n}: {r}" for n, r in sorted(skipped.items()))
-                   or "it has no registered variables in the vault")
-            raise ValueError(f"nothing in {key} would be swapped ({why}).")
-        plan.append({
-            "key": key, "path": path, "names": names, "skipped": skipped,
-            "duplicates": preview["duplicates"],
-            "git_tracked": _git_tracks(path), "git_ignored": _git_ignores(path),
-            "cloud": _cloud_synced(path),
-        })
-    return plan
-
-
-def _restore_swaps(swapped: list, index: dict) -> dict:
-    """Undo every swap in `swapped` ([(key, path, record)]) in reverse order,
-    each independently, then release or flag its journal entry. Returns the
-    per-file outcome the result reports. Never raises.
-
-    Journal bookkeeping after the restore, per file:
-      - write failed            -> keep the entry, flagged restore_failed, so
-                                   every later tool call retries.
-      - verify_failed non-empty -> same. The write succeeded but a swapped
-                                   value was found in the file afterwards
-                                   (an editor re-saved a stale buffer); that
-                                   is a confirmed secret on disk and recovery
-                                   must keep going after it.
-      - conflicts only          -> remove the entry. A conflict is a line
-                                   someone changed during the run; recovery
-                                   rewrites journaled lines unconditionally
-                                   and would destroy that edit, which is the
-                                   one thing the restore refuses to do. The
-                                   result names the variable instead.
-      - clean                   -> remove the entry.
-    A failure of the bookkeeping itself is reported separately from a
-    failure of the restore: the placeholders are back on disk in that case,
-    and saying otherwise would send the user hunting for a leak that is not
-    there."""
-    outcome = {"restored": {}, "conflicts": {}, "verify_failed": {}, "failed": {},
-               "journal_errors": {}}
-    for key, path, record in reversed(swapped):
-        try:
-            if record.get("early_result") is not None:
-                # The single-view watcher already put the placeholders back
-                # through its own handle, mid-run. Running the file-based
-                # restore again would find placeholders where it expects
-                # rendered values and report every line as a conflict.
-                res = record["early_result"]
-            else:
-                res = store.unswap_target_file(path, record, index)
-        except Exception as e:  # noqa: BLE001 -- must reach the journal step regardless
-            res = {"restored": [], "conflicts": [], "verify_failed": [],
-                   "error": f"{type(e).__name__}: {e}"}
-        if res["restored"]:
-            outcome["restored"][key] = res["restored"]
-        if res["conflicts"]:
-            outcome["conflicts"][key] = res["conflicts"]
-        if res["verify_failed"]:
-            outcome["verify_failed"][key] = res["verify_failed"]
-        for item in res.get("secret_seen_elsewhere", ()):
-            outcome.setdefault("secret_seen_elsewhere", []).append(dict(item, path=key))
-        if res["error"]:
-            outcome["failed"][key] = res["error"]
-        try:
-            if res["error"] or res["verify_failed"]:
-                legacy_swap.journal_mark_restore_failed(key)
-            else:
-                legacy_swap.journal_remove(key)
-        except (OSError, ValueError, RuntimeError) as e:
-            outcome["journal_errors"][key] = str(e)
-    return outcome
-
-
-# The window a swap run is allowed to keep real values in the project's own
-# .env before the command is killed and the placeholders restored. A
-# foreground `npm run dev` never exits on its own; without a bound, "for the
-# lifetime of one command" would mean "until you notice". Overridable per
-# call, disclosed in the dialog, part of the trust signature.
-SWAP_DEFAULT_TIMEOUT_SECONDS = 3600
 MAX_TIMEOUT_SECONDS = 24 * 3600
-
-
-def _swap_through_watcher(key: str, path: Path, names, secrets: dict, styles: dict,
-                          max_reads: int, index: dict, restore_lock, watchers: dict,
-                          deadline) -> dict:
-    """The max_reads variant of store.swap_target_file: the real values go in
-    THROUGH the watcher's exclusive handle, so the file is armed from the
-    first byte. Returns the swap record; the watcher is registered in
-    `watchers`. Any failure closes the handle with nothing written."""
-    record_box = {}
-
-    def on_restore(w):
-        raw = w.read_all()
-        new_bytes, res, _changed = store.compute_unswap_bytes(raw, record_box["record"], index,
-                                                              label=key)
-        w.write_all(new_bytes)
-        # The write succeeded: from here the placeholders ARE on disk and the
-        # end-of-run path must not run the file-based restore again (it
-        # would see placeholders where it expects rendered values). A
-        # failing verification read is reported as unverified, not as a
-        # failed restore.
-        try:
-            return store.verify_unswap_bytes(w.read_all(), record_box["record"], res, label=key)
-        except Exception as e:  # noqa: BLE001
-            res["verify_failed"] = []
-            res["verify_error"] = f"{type(e).__name__}: {e}"
-            return res
-
-    w = singleview.Watcher(path, max_reads, on_restore, restore_lock, deadline=deadline)
-    w.open()
-    try:
-        raw = w.read_all()
-        new_bytes, record = store.compute_swap_bytes(raw, names, secrets, styles, label=key)
-        record_box["record"] = record
-        if record["lines"]:
-            w.write_all(new_bytes)
-            w.arm()
-            w.settle()
-    except Exception:
-        w.close()
-        raise
-    if not record["lines"]:
-        w.close()
-        return record
-    watchers[key] = w
-    return record
 
 
 def _run_command(command: list, env: dict, cwd: Optional[str],
@@ -1761,17 +1536,17 @@ MAX_READS_LIMIT = 1000
 
 def _run_with_env_impl(command: list, materialize: Optional[str], background: bool,
                         cwd: Optional[str], only_vars: Optional[list] = None,
-                        files: Optional[list] = None, swap: Optional[list] = None,
+                        files: Optional[list] = None,
                         timeout: Optional[int] = None,
                         max_reads: Optional[int] = None) -> dict:
     return _with_swap_recovery(
         lambda: _run_with_env_core(command, materialize, background, cwd, only_vars, files,
-                                   swap, timeout, max_reads))
+                                   timeout, max_reads))
 
 
 def _run_with_env_core(command: list, materialize: Optional[str], background: bool,
                         cwd: Optional[str], only_vars: Optional[list] = None,
-                        files: Optional[list] = None, swap: Optional[list] = None,
+                        files: Optional[list] = None,
                         timeout: Optional[int] = None,
                         max_reads: Optional[int] = None) -> dict:
     if not command or not all(isinstance(c, str) for c in command):
@@ -1781,8 +1556,6 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
     # user's credentials -- on an agent's say-so, before any dialog.
     if store._looks_like_unc(command[0]) or (cwd is not None and store._looks_like_unc(str(cwd))):
         return {"error": "UNC paths are refused for the command and cwd."}
-    if swap == []:
-        swap = None
     if timeout is not None:
         if isinstance(timeout, bool) or not isinstance(timeout, int) or \
                 not 1 <= timeout <= MAX_TIMEOUT_SECONDS:
@@ -1791,27 +1564,19 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         if background:
             return {"error": "timeout is not supported together with background=True (the "
                              "process is detached; nothing is left to enforce it)."}
-    if swap and timeout is None:
-        timeout = SWAP_DEFAULT_TIMEOUT_SECONDS
     if max_reads is not None:
         if isinstance(max_reads, bool) or not isinstance(max_reads, int) or \
                 not 1 <= max_reads <= MAX_READS_LIMIT:
             return {"error": f"max_reads must be an integer between 1 and {MAX_READS_LIMIT}."}
-        if not swap and not materialize:
-            return {"error": "max_reads only means something with swap= or materialize= -- "
-                             "there is no file to revert otherwise."}
+        if not materialize:
+            return {"error": "max_reads only means something with materialize= -- there is "
+                             "no file to revert otherwise."}
         if background:
             return {"error": "max_reads is not supported together with background=True in "
                              "this release."}
         reason = singleview.unsupported_reason()
         if reason:
             return {"error": reason}
-    if background and swap:
-        return {"error": "swap is not supported together with background=True (a detached "
-                         "process has no exit moment at which the placeholders could be "
-                         "restored, and a .env full of real values left behind indefinitely "
-                         "is exactly what this tool exists to prevent). Run it in the "
-                         "foreground, or rely on environment injection alone."}
     if background and materialize:
         return {"error": "materialize is not supported together with background=True "
                           "(there's no reliable moment to clean the file up if the "
@@ -1855,20 +1620,8 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         # never puts a modal window in front of a human. Re-checked again
         # right before writing, because the dialog can sit open for minutes.
         file_pairs = _resolve_restore_paths(files, cwd) if files else []
-        swap_plan = _resolve_swap_plan(command, swap, cwd, only_vars,
-                                       [rp for _vp, rp in file_pairs]) if swap else []
     except (OSError, ValueError, VaultCorrupted, VaultTampered, UnicodeDecodeError) as e:
         return {"error": str(e)}
-    swap_keys = [e["key"] for e in swap_plan]
-    if max_reads is not None:
-        # Prove on each target -- before the dialog, on placeholder content
-        # -- that this filesystem grants an oplock with handle caching and
-        # holds a foreign open until we release. The dialog then promises
-        # only what will hold.
-        for entry in swap_plan:
-            reason = singleview.self_test(entry["key"])
-            if reason:
-                return {"error": f"max_reads cannot be honoured for {entry['key']}: {reason}"}
 
     # Trust is scoped to this exact (command, cwd, only_vars, materialize,
     # background) shape AND the content of every file named directly on
@@ -1876,10 +1629,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
     # lives only in this server process's memory; it's forgotten the
     # moment the process exits, same as if the feature didn't exist.
     signature = trust.make_signature(command, cwd, only_vars, materialize, background,
-                                      files,
-                                      swap=[(e["key"], e["names"]) for e in swap_plan]
-                                      if swap_plan else None,
-                                      timeout=timeout, max_reads=max_reads)
+                                      files, timeout=timeout, max_reads=max_reads)
     if file_pairs:
         # A run that writes decrypted files to disk is NEVER auto-allowed and
         # never grants trust: a human sees the paths and approves every single
@@ -1888,7 +1638,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         # another, and the trust feature was designed for the first.
         auto_ok, invalidated_reason = False, None
     else:
-        auto_ok, invalidated_reason = trust.check(signature, command, cwd, swap_keys)
+        auto_ok, invalidated_reason = trust.check(signature, command, cwd)
     trust_info = {}
 
     # trust.check()'s own contract guarantees cached_secrets(signature) is
@@ -1925,7 +1675,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         # the dialog can sit open for minutes while a human reads it, and
         # trust must bind to the file content they actually reviewed, not
         # to whatever it happens to contain the instant they click Allow.
-        pre_hashes = trust.referenced_file_hashes(command, cwd, swap_keys)
+        pre_hashes = trust.referenced_file_hashes(command, cwd)
         # Determine what the trust grant will actually monitor, so we can
         # warn the human BEFORE they tick the trust checkbox -- not only in
         # the tool result they see afterward.
@@ -1953,12 +1703,6 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                                              only_vars=only_vars,
                                              trust_note=dialog_trust_note,
                                              files=file_pairs or None,
-                                             swap=[{"path": e["key"], "names": e["names"],
-                                                    "skipped": e["skipped"],
-                                                    "git_tracked": e["git_tracked"],
-                                                    "git_ignored": e["git_ignored"],
-                                                    "cloud": e["cloud"]}
-                                                   for e in swap_plan] or None,
                                              timeout=timeout, max_reads=max_reads)
         raw_secrets = outcome["secrets"]
         if raw_secrets is None:
@@ -2032,7 +1776,6 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         elif invalidated_reason:
             trust_info["trust_note"] = invalidated_reason
 
-    _swap_state = {"swapped": [], "outcome": None, "notes": []}
     # Single-view watchers, keyed by path. Created after the unlock, torn down
     # in the finally; their early restores are folded into the outcome.
     watchers = {}
@@ -2046,8 +1789,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
 
     def _finish(result: dict) -> dict:
         result.update(trust_info)
-        return _attach_swap_outcome(result, _swap_state["swapped"], _swap_state["outcome"],
-                                    _swap_state["notes"])
+        return result
 
     secrets = raw_secrets
     if only_vars is not None:
@@ -2135,66 +1877,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                         "error": f"Could not restore {restore_path}: {e}"})
             restored_paths.append(restore_path)
 
-    # Swap last among the preparations, so the window with real values in
-    # the project's own file is as short as it can be, and journal each file
-    # BEFORE its first byte is written -- a crash between the two leaves an
-    # entry whose recovery finds only placeholders and does nothing, which is
-    # the harmless direction. A crash the other way round would leave real
-    # values with no record.
-    swapped = []
-    swap_notes = []
     redact_map = dict(raw_secrets)
-    if swap_plan:
-        try:
-            index_now = store.load_index()
-            styles_all = store.load_target_styles()
-        except (OSError, UnicodeDecodeError, ValueError) as e:
-            _cleanup_restored(restored_paths)
-            if materialized_path is not None:
-                materialized_path.unlink(missing_ok=True)
-            return _finish({"applied": False, "error": str(e)})
-        for entry in swap_plan:
-            key, path = entry["key"], entry["path"]
-            try:
-                legacy_swap.journal_add(key, entry["names"])
-                if max_reads is not None:
-                    record = _swap_through_watcher(key, path, entry["names"], secrets,
-                                                   styles_all.get(key, {}), max_reads,
-                                                   index_now, _restore_lock, watchers,
-                                                   time.time() + timeout if timeout else None)
-                else:
-                    record = store.swap_target_file(path, entry["names"], secrets,
-                                                    styles_all.get(key, {}))
-            except (OSError, ValueError, RuntimeError) as e:
-                # Includes SwapInProgress and a value with a newline. Undo
-                # whatever was already swapped, then everything else.
-                if not isinstance(e, legacy_swap.SwapInProgress):
-                    try:
-                        legacy_swap.journal_remove(key)
-                    except (OSError, ValueError, RuntimeError):
-                        pass
-                # Earlier targets' watchers still hold their exclusive
-                # handles (no thread has started yet, so this thread owns
-                # them); the file-based rollback below cannot open the files
-                # until they are released.
-                for w in watchers.values():
-                    w.close()
-                undo = _restore_swaps(swapped, index_now)
-                _swap_state["swapped"], _swap_state["outcome"] = swapped, undo
-                _cleanup_restored(restored_paths)
-                if materialized_path is not None:
-                    materialized_path.unlink(missing_ok=True)
-                return _finish({"applied": False, "error": f"could not swap {key}: {e}"})
-            swapped.append((key, path, record))
-            swap_notes.extend(f"{path.name}: {n}" for n in record["notes"])
-            _swap_state["swapped"], _swap_state["notes"] = swapped, swap_notes
-            # The rendered form can differ from the raw value (quotes,
-            # escapes). A command that prints the file would otherwise hand
-            # back the real value in a form the redactor does not know.
-            for line_entry in record["lines"].values():
-                rendered = line_entry["rendered_value"]
-                if rendered != secrets.get(line_entry["name"]):
-                    redact_map[f"{line_entry['name']} (as written to {path.name})"] = rendered
 
     if background:
         # Under the stdio transport this process's own stdout/stdin ARE the
@@ -2243,7 +1926,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                         "Use the OS/your own process manager to stop it later."})
 
     old_sigterm = None
-    if materialized_path is not None or restored_paths or swapped:
+    if materialized_path is not None or restored_paths:
         # `or restored_paths` is load-bearing: without it a SIGTERM during a
         # files-only run skips the handler entirely and leaves decrypted
         # private keys sitting in the working directory.
@@ -2254,7 +1937,6 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
 
     cleanup_error = None
     survivors = []
-    swap_outcome = None
     early = None
     try:
         try:
@@ -2273,7 +1955,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                     w.set_job(job_handle)
 
             proc = _run_command(command, env, cwd, timeout,
-                                bind=bool(swapped or materialized_path is not None
+                                bind=bool(materialized_path is not None
                                           or restored_paths),
                                 on_start=_on_start if watchers else None)
         except subprocess.TimeoutExpired as e:
@@ -2282,8 +1964,8 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
             proc = procs.RunResult(None, e.stdout or "", e.stderr or "", True, "none")
         except OSError as e:
             # Not returned from inside the try: the result must be built
-            # AFTER the finally block below has restored the swapped files,
-            # or it could not report how that restore went.
+            # AFTER the finally block below has cleaned the materialized
+            # file up, or it could not report how that cleanup went.
             early = {"applied": False, "error": f"could not run {command[0]!r}: {e}"}
         except (KeyboardInterrupt, _Terminated):
             early = {"applied": False, "message": "Interrupted."}
@@ -2304,21 +1986,8 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                 # let the restore below report the file it could not open;
                 # the journal keeps the entry for the next recovery.
                 w.error = (w.error or "") + " watcher thread did not stop within 5 s"
-        with _restore_lock:
-            for key, path, record in swapped:
-                w = watchers.get(key)
-                if w is not None and w.restore_result is not None and \
-                        w.restore_result.get("error") is None:
-                    # A mapped view may have blocked the in-handle truncate;
-                    # the handle is released now, so finish the job by path.
-                    w.trim_padded_tail()
-                    record["early_result"] = w.restore_result
-        # Swapped files first: they are the project's own .env, the one
-        # place a leftover is most likely to be committed or synced. Each
-        # step here is independent -- a failure in one never skips the next.
-        if swapped:
-            swap_outcome = _restore_swaps(swapped, index_now)
-            _swap_state["outcome"] = swap_outcome
+        # Each step here is independent -- a failure in one never skips
+        # the next.
         if materialized_path is not None:
             try:
                 materialized_path.unlink(missing_ok=True)
@@ -2360,18 +2029,9 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                 f"Real values were reverted before the command exited for: {', '.join(early)}. "
                 f"A read labelled 'unattributed' was too fast for the Restart Manager to name "
                 f"the reader; it was counted because the command was running at that moment.")
-        # The materialize file is unlinked in the finally above whatever its
-        # tail looks like; only a swapped .env can be left padded.
-        padded = [k for k, w in watchers.items()
-                  if w.mapped_tail_pending and (materialized_path is None
-                                                or k != str(materialized_path))]
-        if padded:
-            result["single_read_note"] = result.get("single_read_note", "") + (
-                " A memory-mapped view blocked the exact-length truncate on: "
-                + ", ".join(padded) +
-                ". Every byte of the real values was overwritten, but the file ends in "
-                "newline padding that could not be trimmed (see mapped_view_tail_error); "
-                "trim it by hand or run resync_targets.")
+        # No padded-tail note: the only watched file left is the materialize
+        # target, which the finally above unlinks whatever its tail looks
+        # like. Rewrite-in-place was the only mode that could leave padding.
         after = {k: w.reads_after_restore for k, w in watchers.items() if w.reads_after_restore}
         if after:
             result["single_read_restored_early"] = after
@@ -2409,76 +2069,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
             + ", ".join(str(p) for p in survivors))
     if restored_paths and not survivors:
         result["files_restored"] = len(restored_paths)
-    if swapped:
-        newly_tracked = [key for key, path, _r in swapped
-                         if not any(e["git_tracked"] for e in swap_plan if e["key"] == key)
-                         and _git_tracks(path) is True]
-        if newly_tracked:
-            result["swap_target_committed"] = newly_tracked
-            result["swap_warning"] = (result.get("swap_warning", "") + " " if "swap_warning"
-                                      in result else "") + (
-                "These files became tracked by git DURING the run -- a commit or `git add` "
-                "captured the real values into the repository: " + ", ".join(newly_tracked)
-                + ". Rotate those credentials and rewrite history.")
     return _finish(result)
-
-
-def _attach_swap_outcome(result: dict, swapped: list, swap_outcome: Optional[dict],
-                         swap_notes: list) -> dict:
-    """Report the swap the way the rest of this tool reports leftovers: by
-    name, loudly, never silently. Names only -- no field here may ever
-    carry a value or a line."""
-    if not swapped:
-        return result
-    result["swapped"] = {key: record["swapped"] for key, _p, record in swapped}
-    skipped = {key: record["skipped"] for key, _p, record in swapped if record["skipped"]}
-    if skipped:
-        result["swap_skipped"] = skipped
-    if swap_notes:
-        result["swap_note"] = "; ".join(swap_notes)
-    if swap_outcome is None:
-        return result
-    if swap_outcome["conflicts"]:
-        result["swap_restore_conflicts"] = swap_outcome["conflicts"]
-        result["swap_warning"] = (
-            "These variables were changed by something else while the command ran, so "
-            "their lines were left as they are -- if one still holds a real value, put "
-            "the placeholder back by hand: "
-            + "; ".join(f"{k}: {', '.join(v)}" for k, v in swap_outcome["conflicts"].items()))
-    if swap_outcome["failed"]:
-        result["swap_restore_failed"] = swap_outcome["failed"]
-        result["swap_warning"] = (result.get("swap_warning", "") + " " if "swap_warning"
-                                  in result else "") + (
-            "The placeholders could NOT be written back to these files -- they still "
-            "contain REAL values. The swap journal keeps the entry, so the next tool call "
-            "(any tool, any session) retries the restore; you can also call vault_status "
-            "to trigger it now: "
-            + "; ".join(f"{k}: {v}" for k, v in swap_outcome["failed"].items()))
-    if swap_outcome.get("journal_errors"):
-        result["swap_journal_warning"] = (
-            "The placeholders were written back, but swap.journal.json could not be "
-            "updated afterwards -- a later tool call will re-run recovery on these files, "
-            "which is harmless on a restored file: "
-            + "; ".join(f"{k}: {v}" for k, v in swap_outcome["journal_errors"].items()))
-    if swap_outcome.get("secret_seen_elsewhere"):
-        result["swap_secret_seen_elsewhere"] = swap_outcome["secret_seen_elsewhere"]
-        result["swap_warning"] = (result.get("swap_warning", "") + " " if "swap_warning"
-                                  in result else "") + (
-            "A swapped value was found on a line the vault did not write (by line number; "
-            "the command or an editor copied it there): "
-            + "; ".join(f"line {i['line']} ({i['name']})"
-                        for i in swap_outcome["secret_seen_elsewhere"])
-            + " -- remove it by hand.")
-    if swap_outcome["verify_failed"]:
-        result["swap_verify_failed"] = swap_outcome["verify_failed"]
-        result["swap_warning"] = (result.get("swap_warning", "") + " " if "swap_warning"
-                                  in result else "") + (
-            "After the restore, a real value was STILL found in the file for: "
-            + "; ".join(f"{k}: {', '.join(v)}" for k, v in
-                        swap_outcome["verify_failed"].items())
-            + " -- something rewrote the file after the placeholders went back (an editor "
-              "saving a stale buffer is the usual cause). Check it by hand.")
-    return result
 
 
 @mcp.tool()
@@ -2486,7 +2077,6 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
                   background: bool = False, cwd: Optional[str] = None,
                   only_vars: Optional[list[str]] = None,
                   files: Optional[list[str]] = None,
-                  swap: Optional[list[str]] = None,
                   timeout: Optional[int] = None,
                   max_reads: Optional[int] = None) -> dict:
     """Run a real command with the vault's real secret values injected as
@@ -2541,45 +2131,15 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     prints one hands you the real secret verbatim, so never write one that
     does.
 
-    swap: paths of already-migrated .env files (registered install_migrate
-    targets, resolved relative to cwd) whose placeholder lines are rewritten
-    with the REAL values for the lifetime of this one foreground command and
-    restored the instant it exits -- including on error, Ctrl+C or SIGTERM,
-    and, if this server dies, by the next tool call in any session via a
-    journal written before the first byte lands. This is materialize at the
-    canonical path, for the consumers nothing else reaches: loaders that
-    override the environment from the file (load_dotenv(override=True),
-    godotenv.Overload, `source .env`, direnv), tools hard-wired to read
-    `.env` (compose env_file:, docker run --env-file .env, kubectl
-    --from-env-file, an IDE's envFile) and test harnesses that scrub the
-    child environment before a loader runs. Every mainstream loader lets
-    the environment win by default, so try plain injection first. Only
-    lines whose value is currently a vault placeholder are touched; each
-    value is written back in the quoting its original line used (recorded
-    at migration), because no quoting works for every parser. only_vars
-    scopes the swap exactly as it scopes injection. Not compatible with
-    background=True. The dialog names every file, the number of values,
-    and whether git tracks it -- do not commit, stash or `git add -A` while
-    the command runs. While it runs the file is readable by anything that
-    can read files, including you: never read it. Results report `swapped`
-    and, if anything could not be put back, `swap_restore_conflicts`,
-    `swap_restore_failed` or `swap_verify_failed` -- stop and show those to
-    the user. See docs/env-consumption-research.md for which consumer needs
-    which mode.
-
     timeout: seconds after which a foreground command is killed -- its whole
     process tree, via a Windows Job object / POSIX process group -- and every
     real value is restored or removed. Plain runs have no limit unless you
-    pass one. swap runs default to 3600: a foreground dev server never exits
-    on its own, and "for the lifetime of one command" must not mean "until
-    someone notices". Part of the trust signature and shown in the dialog.
-    A run that hits it returns timed_out=true. Not compatible with
-    background=True. A swap run is also refused outright when the command
-    is git: git needs no secrets, and a `git add -A` with real values in
-    .env is how they get committed.
+    pass one. Part of the trust signature and shown in the dialog. A run
+    that hits it returns timed_out=true. Not compatible with
+    background=True.
 
-    max_reads: single-view mode (Windows). With swap= or materialize=, the
-    real values are reverted as soon as the command's process tree has
+    max_reads: single-view mode (Windows). With materialize=, the real
+    values are reverted as soon as the command's process tree has
     opened and closed the file this many times -- a dotenv loader reads
     once at startup -- instead of when the command exits, so the window
     with real values on disk is milliseconds, not the command's lifetime.
@@ -2596,7 +2156,7 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
 
     Trusted commands: the dialog offers a "Trust this exact command for
     the rest of this session" checkbox. If checked, this exact
-    (command, cwd, only_vars, materialize, background, files, swap, timeout,
+    (command, cwd, only_vars, materialize, background, files, timeout,
     max_reads) combination
     auto-runs on every later call with no dialog at all, as long as every
     file named directly on the command line (e.g. a compose file named
@@ -2611,7 +2171,7 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     README.md's "Trusted commands" section, which also covers what this
     can't catch -- e.g. a Dockerfile only referenced indirectly via a
     compose file's `context:`)."""
-    return _run_with_env_impl(command, materialize, background, cwd, only_vars, files, swap,
+    return _run_with_env_impl(command, materialize, background, cwd, only_vars, files,
                               timeout, max_reads)
 
 

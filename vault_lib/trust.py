@@ -117,7 +117,7 @@ def _deobfuscate(data: bytes, key: bytes) -> str:
 
 
 def make_signature(command, cwd, only_vars, materialize, background=False, files=None,
-                   swap=None, timeout=None, max_reads=None):
+                   timeout=None, max_reads=None):
     """A hashable key identifying "this exact run_with_env call shape".
     Any change to any of these is treated as a different, unapproved
     command.
@@ -140,19 +140,10 @@ def make_signature(command, cwd, only_vars, materialize, background=False, files
     are normalised so two spellings of one request are one signature, and
     None stays distinct from () for the same reason only_vars does.
 
-    swap is a sequence of (path, names) pairs -- the registered file AND the
-    exact set of variables whose placeholder lines would be swapped, as
-    computed at call time from targets.json and the file's current
-    contents. The names are in here, not just the paths, on purpose:
-    targets.json is agent-writable, so a signature keyed on paths alone
-    would let a grant approved for "swap 2 values into .env" auto-allow a
-    later call that swaps 20, after the agent appended 18 names to the
-    registry. Binding the names means any such change is a new, unapproved
-    signature.
-
-    timeout is in here because it bounds how long real values stay on disk
-    for a swap run: a grant approved for "one hour" must not auto-allow a
-    call asking for twenty-four.
+    timeout is in here because it bounds how long a run holds real values
+    -- in a materialized file, or in a detached process's environment: a
+    grant approved for "one hour" must not auto-allow a call asking for
+    twenty-four.
     """
     return (
         tuple(command),
@@ -162,9 +153,6 @@ def make_signature(command, cwd, only_vars, materialize, background=False, files
         bool(background),
         tuple(sorted({os.path.normcase(os.path.abspath(f)) for f in files}))
         if files is not None else None,
-        tuple(sorted((os.path.normcase(os.path.abspath(p)), tuple(sorted(set(n))))
-                     for p, n in swap))
-        if swap is not None else None,
         int(timeout) if timeout is not None else None,
         int(max_reads) if max_reads is not None else None,
     )
@@ -304,7 +292,7 @@ def _candidate_paths(command, cwd, extra_paths=None):
     """Returns (paths, truncated). paths is every command argument that
     resolves to an existing regular file, PLUS the resolved program being
     executed (see _resolve_argv0), PLUS any `extra_paths` the caller names
-    (run_with_env passes its swap targets -- see referenced_file_hashes),
+    (see referenced_file_hashes),
     capped at _MAX_HASHED_FILES; truncated is True if more distinct files
     were found than that cap.
 
@@ -337,11 +325,9 @@ def _candidate_paths(command, cwd, extra_paths=None):
         if extra not in seen:
             seen.add(extra)
             paths.append(extra)
-    # Swap targets. A grant for a swap run binds to the placeholder file the
-    # human reviewed; if anything in it changes -- a line added for a name
-    # that was registered but absent, a placeholder hand-edited -- the next
-    # run must go back through the dialog rather than write real values
-    # into a file that no longer looks like the approved one.
+    # Caller-named extra files to drift-hash. A general extension point:
+    # anything a grant should be invalidated by, but that does not appear
+    # as a command argument.
     for raw in (extra_paths or ()):
         try:
             candidate = Path(raw)

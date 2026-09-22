@@ -1274,9 +1274,9 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                 vault_saved = True
                 all_names = names + [n for n in also_register if n not in names]
                 store.add_target(str(target), all_names)
-                # Remember how each migrated line was quoted, so a later
-                # run_with_env(swap=...) can put the real value back in the
-                # exact form this file's consumers were already parsing.
+                # Remember how each migrated line was quoted, so anything
+                # that rewrites this file later (resync_targets, typed
+                # placeholders) keeps the form its consumers already parse.
                 # Recorded only for the names captured right now -- a name
                 # that was already a placeholder tells us nothing about
                 # its original quoting.
@@ -2028,7 +2028,7 @@ def _manage_action_result_keys(action: str) -> frozenset:
 
 
 def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None,
-                          trust_note: str = None, files=None, *, swap=None, timeout=None,
+                          trust_note: str = None, files=None, *, timeout=None,
                           max_reads=None):
     """Used by the run_with_env MCP tool. Returns an outcome dict:
     {"secrets": dict_or_None, "trust": bool}. secrets is None if
@@ -2051,17 +2051,6 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     different risk from injecting a token into an environment, and this
     feature was designed for the latter. Every files= run is approved by a
     human, every time.
-
-    swap: optional list of {"path", "names", "skipped", "git_tracked",
-    "git_ignored"} dicts -- registered .env files whose placeholder lines
-    will be overwritten with real values for the lifetime of the command
-    and restored when it exits. Keyword-only with a None default so every
-    existing caller and test wrapper is unaffected. Disclosed here in full:
-    which files, how many values, what is skipped and why, and -- in amber
-    -- when the file is tracked by git, since a commit made while the
-    command runs would capture the real values. The trust checkbox stays
-    available: this is the same exposure class as materialize (real values
-    on disk for one run), not the files= class.
 
     trust_note: optional text shown above the command box, e.g. an
     explanation that a *previous* trust grant for this same command was
@@ -2209,79 +2198,15 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
         path_frame.grid_columnconfigure(0, weight=1)
         path_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
         row += 1
-        _label(root, "(file deleted the moment the command exits)", fg=FG_MUTED).grid(
-            row=row, column=0, columnspan=2, sticky="w", **pad)
-        row += 1
-
-    if swap:
-        _label(root, "Writes REAL values INTO these project file(s) while the command runs:",
-               fg=WARNING, justify="left").grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(6, 0))
-        row += 1
-        swap_frame = tk.Frame(root, bg=WINDOW_BG)
-        swap_txt = _textbox(swap_frame, fg=FG, font=FONT_BODY,
-                            height=min(6, max(2, len(swap))), width=52)
-        for entry in swap:
-            names = entry.get("names") or []
-            skipped = entry.get("skipped") or {}
-            line = (f"{_collapse_whitespace(str(entry.get('path')))}  "
-                    f"({len(names)} value{'s' if len(names) != 1 else ''}")
-            if skipped:
-                line += f"; skips {', '.join(sorted(skipped))}"
-            line += ")"
-            swap_txt.insert("end", line + "\n")
-        swap_txt.config(state="disabled")
-        swap_yscroll = _scrollbar(swap_frame, orient="vertical", command=swap_txt.yview)
-        swap_txt.config(yscrollcommand=swap_yscroll.set)
-        swap_txt.grid(row=0, column=0, sticky="nsew")
-        swap_yscroll.grid(row=0, column=1, sticky="ns")
-        swap_frame.grid_rowconfigure(0, weight=1)
-        swap_frame.grid_columnconfigure(0, weight=1)
-        swap_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
-        row += 1
-        clouded = [(str(e.get("path")), e.get("cloud")) for e in swap if e.get("cloud")]
-        if clouded:
-            # The most probable accidental leak on a default Windows install:
-            # Documents and Desktop are OneDrive roots, and the sync client
-            # can upload the swapped file before the command finishes.
-            _label(root, "Inside a cloud-synced folder -- the sync client may upload the "
-                         "real values before they are restored: " + "; ".join(
-                             f"{_collapse_whitespace(p)} ({prov})" for p, prov in clouded),
-                   fg=WARNING, justify="left", wraplength=480).grid(
-                row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
-            row += 1
-        unguarded = [str(e.get("path")) for e in swap
-                     if e.get("git_tracked") is False and e.get("git_ignored") is False]
-        if unguarded:
-            _label(root, "Not tracked and not ignored by git -- `git add -A` would stage the "
-                         "real values: " + ", ".join(_collapse_whitespace(u) for u in unguarded),
-                   fg=WARNING, justify="left", wraplength=480).grid(
-                row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
-            row += 1
-        tracked = [str(e.get("path")) for e in swap if e.get("git_tracked") is True]
-        if tracked:
-            _label(root, "Tracked by git -- do not commit, stash or `git add -A` until this "
-                         "command finishes: " + ", ".join(
-                             _collapse_whitespace(t) for t in tracked),
-                   fg=WARNING, justify="left", wraplength=480).grid(
-                row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
-            row += 1
-        if timeout:
-            _span = f"{timeout // 60} minutes" if timeout >= 60 else f"{timeout} seconds"
-            _bound = (f"Placeholders are restored when the command exits, is interrupted, or "
-                      f"after {_span} (the command is then killed). ")
-        else:
-            _bound = "Placeholders are restored when the command exits or is interrupted. "
         if max_reads:
-            _bound = (f"Real values are reverted after the first {max_reads} open(s) of the "
-                      f"file -- by the command or, when the reader cannot be told apart, by "
-                      f"any program -- or when the command exits, whichever is first; "
-                      f"detected opens by other programs are listed in the result. ")
-        _label(root, _bound +
-                     "While it runs, the real values are readable by the AI assistant and by "
-                     "anything watching the file: your editor, hot reloaders, IDE local "
-                     "history, cloud-sync folders. Close the file in your editor first.",
-               fg=FG_MUTED, justify="left", wraplength=480).grid(
+            _note = (f"(emptied after the first {max_reads} open(s) of the file -- by the "
+                     f"command or, when the reader cannot be told apart, by any program -- "
+                     f"or when the command exits, whichever is first; detected opens by "
+                     f"other programs are listed in the result, and the file is deleted "
+                     f"either way)")
+        else:
+            _note = "(file deleted the moment the command exits)"
+        _label(root, _note, fg=FG_MUTED, justify="left", wraplength=480).grid(
             row=row, column=0, columnspan=2, sticky="w", **pad)
         row += 1
 
