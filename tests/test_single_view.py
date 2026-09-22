@@ -446,8 +446,30 @@ def test_a_probe_left_by_a_crash_does_not_disable_max_reads_forever() -> None:
         for stale in ("." + MATERIALIZED + ".oplock-probe",            # the 2.0.0 shape
                       "." + MATERIALIZED + ".deadbeef.oplock-probe"):  # a 2.0.1 survivor
             (project / stale).write_bytes(b"# llm-env-vault oplock probe\n")
+        # Backdate them: a sweep only removes probes old enough to be dead.
+        old = time.time() - singleview._STALE_PROBE_SECONDS - 60
+        for p in project.iterdir():
+            if "oplock-probe" in p.name:
+                os.utime(p, (old, old))
         assert singleview.self_test_for_new_file(str(target)) is None, "a crash disabled it"
         # And survivors are swept rather than accumulating.
         assert [p.name for p in project.iterdir() if "oplock-probe" in p.name] == []
         r = _materialize_run(project, "print('hi')")
         assert "error" not in r, r
+
+
+def test_the_sweep_never_removes_another_servers_live_probe() -> None:
+    """The sweep matches the same name shape the live probe uses, so an
+    unconditional one would let a second server delete the first's probe
+    mid-test -- and holding the file is not the protection it looks like,
+    because the probe is closed after it is written and only re-opened by
+    self_test. Only age makes a probe safe to remove."""
+    if _need_windows():
+        return
+    with workspace() as (project, _env_path):
+        target = project / MATERIALIZED
+        live = project / ("." + MATERIALIZED + ".cafebabe.oplock-probe")
+        live.write_bytes(b"# llm-env-vault oplock probe\n")   # another server, just now
+        assert singleview.self_test_for_new_file(str(target)) is None
+        assert live.exists(), "a concurrent server's live probe was swept"
+        live.unlink()

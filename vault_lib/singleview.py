@@ -703,6 +703,12 @@ def self_test(path: str, timeout: float = 3.0) -> Optional[str]:
         w.close()
 
 
+# How old an oplock probe must be before a sweep will remove it. A live
+# probe exists only for the length of one self_test (seconds); anything
+# this old was left by a process that died.
+_STALE_PROBE_SECONDS = 60.0
+
+
 def self_test_for_new_file(path: str, timeout: float = 3.0) -> Optional[str]:
     """self_test for a file that does not exist yet.
 
@@ -734,16 +740,22 @@ def self_test_for_new_file(path: str, timeout: float = 3.0) -> Optional[str]:
         parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return f"could not create an oplock probe beside {path}: {e}"
-    # Sweep survivors of an earlier crash. Every match is ours by
-    # construction; best effort, because a probe another process is holding
-    # right now is not ours to remove.
-    # Both shapes: the randomised one, and the fixed name 2.0.0 shipped --
-    # which is the survivor most likely to actually be out there.
-    for pattern in (f".{target.name}.*.oplock-probe", f".{target.name}.oplock-probe"):
+    # Sweep survivors of an earlier crash -- but ONLY ones old enough to be
+    # certainly dead. The live probe below uses this same name shape, so an
+    # unconditional sweep would let a second server running self_test against
+    # the same target delete the first one's probe. Holding the file is not
+    # the protection it looks like: the probe is closed after it is written
+    # and only re-opened by self_test, so there is a real unprotected gap in
+    # between. Age closes it -- a live probe's whole life is bounded by
+    # self_test's timeout, which is seconds.
+    cutoff = time.time() - _STALE_PROBE_SECONDS
+    for pattern in (f".{target.name}.*.oplock-probe",   # this shape
+                    f".{target.name}.oplock-probe"):    # the fixed name 2.0.0 shipped
         try:
             for stale in parent.glob(pattern):
                 try:
-                    stale.unlink()
+                    if stale.stat().st_mtime < cutoff:
+                        stale.unlink()
                 except OSError:
                     pass
         except OSError:

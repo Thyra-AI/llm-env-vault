@@ -7,6 +7,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.0.2] — 2026-09-22
+
+Fixes a regression in 2.0.1's own fix, found by the push-time review of 2.0.1.
+
+### Fixed
+
+- **The stale-probe sweep could delete a concurrent server's live probe.** 2.0.1 swept every
+  file matching `.{target}.*.oplock-probe` before creating its own -- but the live probe uses
+  that same name shape, so a second server running `self_test_for_new_file` against the same
+  target could remove the first one's probe and make it fail with a spurious refusal. Holding
+  the file is not the protection it appears to be: the probe is closed after it is written and
+  only re-opened by `self_test`, leaving a real unprotected gap between the two.
+
+  A probe is now removed only if it is older than 60 seconds. A live one exists for the length
+  of one `self_test` -- seconds -- so age separates the two cleanly, while a crash survivor from
+  any earlier run is still swept.
+
 ## [2.0.1] — 2026-09-22
 
 Fixes a defect introduced by 2.0.0's own new code, plus the stale prose that
