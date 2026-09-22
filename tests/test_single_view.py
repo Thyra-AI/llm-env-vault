@@ -472,11 +472,78 @@ def test_the_sweep_never_removes_another_servers_live_probe() -> None:
         live.write_bytes(b"# llm-env-vault oplock probe\n")   # another server, just now
         assert singleview.self_test_for_new_file(str(target)) is None
         assert live.exists(), "a concurrent server's live probe was swept"
-        # The threshold follows this call's timeout rather than assuming it.
-        # self_test runs for roughly 2*timeout, so a long one keeps its probe
-        # alive past a fixed 60s window and the sweep has to widen with it.
-        backdated = time.time() - singleview._STALE_PROBE_SECONDS - 5
-        os.utime(live, (backdated, backdated))
+        # The window is flat and absurdly generous rather than derived from
+        # the timeout argument. Tying it to a parameter is what let 2.0.2 and
+        # 2.0.3 each ship a version of this same bug; an hour is longer than
+        # any self_test could run, whatever a caller passes.
+        assert singleview._STALE_PROBE_SECONDS >= 3600
         assert singleview.self_test_for_new_file(str(target), timeout=60.0) is None
-        assert live.exists(), "a long timeout did not widen the staleness window"
+        assert live.exists(), "a long self_test would have had its own probe swept"
         live.unlink()
+
+
+# ---------------------------------------------------------------------------
+# materialize refuses a network location
+# ---------------------------------------------------------------------------
+# materialize writes REAL values to the path for the lifetime of the command.
+# On a mapped drive or a UNC path those cross the wire and land on a server's
+# storage -- backups, snapshots, another machine's disk -- where the unlink on
+# exit cannot reach any copy it has already made. Until 2.0.4 only swap= was
+# guarded this way; materialize inherited nothing when swap was removed.
+
+def test_materialize_refuses_a_unc_path_before_resolving_it() -> None:
+    """The string check runs BEFORE resolve(), because resolving is the
+    dangerous step: it opens SMB with the user's credentials. On Windows an
+    absolute segment also wins the join, so a UNC value would sail past the
+    containment check if it were resolved first."""
+    with workspace() as (project, _env_path):
+        for bad in (r"\\evil-host\share\.env.runtime", "//evil-host/share/.env.runtime"):
+            with fake_dialog() as calls:
+                r = mcp_server._run_with_env_impl(["cmd"], bad, False, str(project),
+                                                  None, None)
+            assert "error" in r, r
+            assert "UNC" in r["error"], r["error"]
+            assert calls == [], "a refused path still opened the dialog"
+
+
+def test_materialize_refuses_a_mapped_network_drive() -> None:
+    """A mapped drive is a UNC path wearing a letter."""
+    if not IS_WIN:
+        return _skip("drive types are a Windows concept")
+    with workspace() as (project, _env_path):
+        original = mcp_server._drive_is_remote
+        mcp_server._drive_is_remote = lambda path_str: True
+        try:
+            with fake_dialog() as calls:
+                r = mcp_server._run_with_env_impl(["cmd"], ".env.runtime", False,
+                                                  str(project), None, None)
+        finally:
+            mcp_server._drive_is_remote = original
+        assert "error" in r and "mapped network drive" in r["error"], r
+        assert "REAL values" in r["error"], "the refusal does not say why"
+        assert calls == [], "a refused path still opened the dialog"
+
+
+def test_materialize_refuses_a_junction_pointing_at_a_share() -> None:
+    """Checked on the UNRESOLVED path: a junction whose target is UNC would
+    make resolve() itself open the share."""
+    if not IS_WIN:
+        return _skip("junctions are a Windows concept")
+    with workspace() as (project, _env_path):
+        original = mcp_server._reparse_points_to_share
+        mcp_server._reparse_points_to_share = lambda path_str: True
+        try:
+            with fake_dialog() as calls:
+                r = mcp_server._run_with_env_impl(["cmd"], "sub/.env.runtime", False,
+                                                  str(project), None, None)
+        finally:
+            mcp_server._reparse_points_to_share = original
+        assert "error" in r and "junction" in r["error"], r
+        assert calls == [], "a refused path still opened the dialog"
+
+
+def test_an_ordinary_local_materialize_path_is_still_accepted() -> None:
+    """The guards must not refuse the normal case."""
+    with workspace() as (project, _env_path):
+        resolved = mcp_server._resolve_materialize_path(".env.runtime", str(project))
+        assert resolved == (project / ".env.runtime").resolve()

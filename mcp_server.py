@@ -1497,12 +1497,37 @@ def _on_sigterm(signum, frame):
 
 def _resolve_materialize_path(materialize: str, cwd: Optional[str]) -> Path:
     base = (Path(cwd) if cwd else Path.cwd()).resolve()
-    resolved = (base / materialize).resolve()
+    # Both string checks run BEFORE resolve(), because resolving is itself the
+    # dangerous step: a UNC path -- or a junction whose target is UNC -- makes
+    # this process open SMB with the user's credentials, and a materialize
+    # target is a file we are about to write REAL VALUES into. On Windows an
+    # absolute segment wins the join, so a UNC `materialize` would escape the
+    # containment check below by being resolved first.
+    if store._looks_like_unc(materialize):
+        raise ValueError(f"materialize path {materialize!r} is a UNC path -- refused. "
+                         f"Real values must not be written to a network location.")
+    candidate = base / materialize
+    if _reparse_points_to_share(str(candidate)):
+        raise ValueError(f"materialize path {materialize!r} is reached through a junction or "
+                         f"symlink pointing at a network share -- refused.")
+    resolved = candidate.resolve()
     if not resolved.is_relative_to(base):
         raise ValueError(
             f"materialize must resolve to a path inside cwd ({base}); got {resolved}, "
             f"which escapes it. Use a plain relative filename, not an absolute path or "
             f"one with '..' segments that climb above cwd."
+        )
+    # A mapped drive is the same exposure as a UNC path wearing a letter: the
+    # real values cross the wire, and land wherever the server keeps them --
+    # backups, snapshots, another machine's disk -- outside anything this tool
+    # can clean up when the command exits.
+    if _drive_is_remote(str(resolved)):
+        raise ValueError(
+            f"{resolved} is on a mapped network drive -- refused. materialize writes REAL "
+            f"values to that path for the lifetime of the command, which would send them "
+            f"over the network and leave them on the server's storage, where the unlink "
+            f"on exit cannot reach any copy it has already made. Point materialize at a "
+            f"local path, or run the command from a local checkout."
         )
     return resolved
 

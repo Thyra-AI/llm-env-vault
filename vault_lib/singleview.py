@@ -703,10 +703,17 @@ def self_test(path: str, timeout: float = 3.0) -> Optional[str]:
         w.close()
 
 
-# How old an oplock probe must be before a sweep will remove it. A live
-# probe exists only for the length of one self_test (seconds); anything
-# this old was left by a process that died.
-_STALE_PROBE_SECONDS = 60.0
+# How old an oplock probe must be before a sweep will remove it.
+#
+# Deliberately a flat, absurdly generous constant rather than anything
+# derived from self_test's timeout. The sweep's whole risk is deleting a
+# probe another server is using right now, so the only question that matters
+# is "could a live probe possibly be this old?" -- and a live one exists for
+# the length of one self_test, which is three seconds by default and has no
+# caller that passes more. Tying the window to the timeout argument made the
+# answer depend on a parameter, which is how 2.0.2 and 2.0.3 each shipped a
+# version of the same bug.
+_STALE_PROBE_SECONDS = 3600.0
 
 
 def self_test_for_new_file(path: str, timeout: float = 3.0) -> Optional[str]:
@@ -718,6 +725,17 @@ def self_test_for_new_file(path: str, timeout: float = 3.0) -> Optional[str]:
     property of the FILESYSTEM the target will live on, not of that
     particular file, so this probes a throwaway sibling in the same
     directory and removes it.
+
+    The probe has to live BESIDE THE TARGET, not somewhere tidier like the
+    plugin's own data directory. Oplock-with-handle-caching is a property of
+    a volume: a mapped drive, exFAT or some virtual mounts do not grant it.
+    Probing C:\ and then promising max_reads for a project on another volume
+    would pass the test and silently fail the feature -- exactly what the
+    test exists to prevent. FILE_FLAG_DELETE_ON_CLOSE, which would remove the
+    probe even on TerminateProcess, does not work either: self_test's last
+    assertion is that the held foreign open COMPLETES once we release, and
+    with the file deleted at that moment it cannot. Hence a real file, and
+    the sweep below.
 
     Runs before the dialog, like self_test, so a run that could not honour
     max_reads is refused before a human is asked to approve it rather than
@@ -748,12 +766,8 @@ def self_test_for_new_file(path: str, timeout: float = 3.0) -> Optional[str]:
     # the same target delete the first one's probe. Holding the file is not
     # the protection it looks like: the probe is closed after it is written
     # and only re-opened by self_test, so there is a real unprotected gap in
-    # between. Age closes it -- and the threshold is DERIVED from this call's
-    # timeout rather than assumed, because self_test runs for roughly
-    # 2*timeout plus overhead. A bare constant would silently become wrong
-    # the first time anyone passed a larger timeout, and the failure would be
-    # this sweep eating a live probe.
-    cutoff = time.time() - max(_STALE_PROBE_SECONDS, timeout * 4.0)
+    # Age closes it, with an hour's margin over any plausible self_test.
+    cutoff = time.time() - _STALE_PROBE_SECONDS
     for pattern in (f".{target.name}.*.oplock-probe",   # this shape
                     f".{target.name}.oplock-probe"):    # the fixed name 2.0.0 shipped
         try:

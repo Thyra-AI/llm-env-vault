@@ -7,6 +7,39 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.0.4] — 2026-09-23
+
+### Added
+
+- **`materialize` refuses a network location.** A UNC path, a mapped network drive, or a path
+  reached through a junction or symlink pointing at a share. `materialize` writes REAL values
+  to that path for the lifetime of the command; on a network location they cross the wire and
+  land on the server's storage -- backups, snapshots, another machine's disk -- where the unlink
+  on exit cannot reach any copy it has already made.
+
+  The guards themselves are not new: `_drive_is_remote` and `_reparse_points_to_share` were
+  written for `swap=` in 1.6.1 and were left orphaned when 2.0.0 deleted its only caller.
+  `materialize` never had them. The UNC and junction checks run *before* the path is resolved,
+  because resolving is the step that opens SMB with the user's credentials -- and on Windows an
+  absolute segment wins a join, so a UNC value would otherwise be resolved before the
+  containment check could refuse it.
+
+### Changed
+
+- **The oplock-probe staleness window is a flat hour**, not a value derived from `self_test`'s
+  `timeout`. The sweep's only risk is deleting a probe another server is using right now, so the
+  question is "could a live probe possibly be this old?" -- and a live one lives for the length
+  of one `self_test`, three seconds by default. Tying the window to an argument made the answer
+  depend on a parameter, which is how 2.0.2 and 2.0.3 each shipped a version of the same bug.
+
+- `self_test_for_new_file`'s docstring now records why the probe cannot live somewhere tidier,
+  so it is not re-litigated: oplock-with-handle-caching is a property of a VOLUME, and a project
+  can sit on any of them, so probing the plugin's own data directory would pass on C:\ and then
+  silently fail the feature elsewhere. `FILE_FLAG_DELETE_ON_CLOSE`, which would remove the probe
+  even on `TerminateProcess`, was tested and does not work either -- `self_test`'s final
+  assertion is that the held foreign open *completes* once we release, and it cannot if the file
+  is deleted at that moment.
+
 ## [2.0.3] — 2026-09-22
 
 Documentation and a latent coupling in the same function 2.0.1 and 2.0.2 fixed. No behaviour
