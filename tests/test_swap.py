@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import mcp_server  # noqa: E402
 import vault_lib.crypto as crypto  # noqa: E402
-from vault_lib import gui, procs, store, trust  # noqa: E402
+from vault_lib import gui, legacy_swap, procs, store, trust  # noqa: E402
 
 TEST_PASSWORD = "swap-suite-password-123"
 _FAST_PARAMS = crypto.ScryptParams(n=2 ** 12, r=8, p=1)
@@ -158,7 +158,7 @@ def stub_run(observer=None, returncode=0, raise_exc=None):
 
 
 def _read_journal() -> dict:
-    p = store._journal_path()
+    p = legacy_swap._journal_path()
     return json.loads(p.read_text(encoding="utf-8"))["entries"] if p.exists() else {}
 
 
@@ -337,7 +337,7 @@ def test_recover_swap_file_rewrites_unconditionally_and_sweeps_temp_files() -> N
         # _atomic_write_bytes names its temp files ".<name>.<random>.tmp".
         leftover = project / "..env.abc123.tmp"
         leftover.write_bytes(b"API_TOKEN=tok-abcdefgh-123456\n")
-        report = store.recover_swap_file(env_path, ["API_TOKEN", "PLAIN"], INDEX, started=0)
+        report = legacy_swap.recover_swap_file(env_path, ["API_TOKEN", "PLAIN"], INDEX, started=0)
         assert report["restored"] == ["API_TOKEN", "PLAIN"]
         assert [Path(p).name for p in report["temp_files_removed"]] == ["..env.abc123.tmp"]
         assert not leftover.exists()
@@ -353,33 +353,33 @@ def test_recover_swap_file_rewrites_unconditionally_and_sweeps_temp_files() -> N
 def test_journal_add_refuses_live_entry_and_replaces_stale_one() -> None:
     with workspace() as (project, env_path):
         key = str(env_path)
-        store.journal_add(key, ["API_TOKEN"])
+        legacy_swap.journal_add(key, ["API_TOKEN"])
         entry = _read_journal()[key]
         assert entry["pid"] == os.getpid() and entry["server_id"] == store.SERVER_ID
         assert entry["state"] == "active"
         # Same process, same server id -> live -> refused.
         try:
-            store.journal_add(key, ["PLAIN"])
-        except store.SwapInProgress:
+            legacy_swap.journal_add(key, ["PLAIN"])
+        except legacy_swap.SwapInProgress:
             pass
         else:
             raise AssertionError("second swap of a live file was not refused")
         # Same pid, different server id: a dead predecessor that was handed
         # our pid. Stale, replaced.
-        j = json.loads(store._journal_path().read_text(encoding="utf-8"))
+        j = json.loads(legacy_swap._journal_path().read_text(encoding="utf-8"))
         j["entries"][key]["server_id"] = "someone-else"
-        store._journal_path().write_text(json.dumps(j), encoding="utf-8")
-        store.journal_add(key, ["PLAIN"])
+        legacy_swap._journal_path().write_text(json.dumps(j), encoding="utf-8")
+        legacy_swap.journal_add(key, ["PLAIN"])
         assert _read_journal()[key]["names"] == ["PLAIN"]
-        store.journal_remove(key)
-        assert not store._journal_path().exists()
+        legacy_swap.journal_remove(key)
+        assert not legacy_swap._journal_path().exists()
 
 
 def test_liveness_uses_pid_start_time_not_pid_alone() -> None:
     with workspace() as (project, env_path):
         key = str(env_path)
-        store.journal_add(key, ["API_TOKEN"])
-        j = json.loads(store._journal_path().read_text(encoding="utf-8"))
+        legacy_swap.journal_add(key, ["API_TOKEN"])
+        j = json.loads(legacy_swap._journal_path().read_text(encoding="utf-8"))
         e = j["entries"][key]
         # A different, currently-running process (this interpreter's parent
         # is not reliably known, so spawn a child and use its pid) whose
@@ -387,43 +387,43 @@ def test_liveness_uses_pid_start_time_not_pid_alone() -> None:
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
         try:
             e["pid"], e["server_id"], e["pid_start"] = child.pid, "other", 1.0
-            store._journal_path().write_text(json.dumps(j), encoding="utf-8")
-            assert store.live_swaps() == {}
+            legacy_swap._journal_path().write_text(json.dumps(j), encoding="utf-8")
+            assert legacy_swap.live_swaps() == {}
             # Correct start time -> live.
             e["pid_start"] = procs.process_start_time(child.pid)[1]
-            store._journal_path().write_text(json.dumps(j), encoding="utf-8")
+            legacy_swap._journal_path().write_text(json.dumps(j), encoding="utf-8")
             if e["pid_start"] is not None:
-                assert key in store.live_swaps()
+                assert key in legacy_swap.live_swaps()
         finally:
             child.kill()
             child.wait()
-        store.journal_remove(key)
+        legacy_swap.journal_remove(key)
 
 
 def test_recover_stale_swaps_restores_dead_owner_and_leaves_live_alone() -> None:
     with workspace() as (project, env_path):
         key = str(env_path)
         store.swap_target_file(env_path, ["API_TOKEN"], SECRETS, {})
-        store.journal_add(key, ["API_TOKEN"])
-        assert store.recover_stale_swaps() == []  # our own live entry
+        legacy_swap.journal_add(key, ["API_TOKEN"])
+        assert legacy_swap.recover_stale_swaps() == []  # our own live entry
         assert b"tok-abcdefgh-123456" in env_path.read_bytes()
-        j = json.loads(store._journal_path().read_text(encoding="utf-8"))
+        j = json.loads(legacy_swap._journal_path().read_text(encoding="utf-8"))
         j["entries"][key].update({"pid": 4000000, "server_id": "gone", "pid_start": None})
-        store._journal_path().write_text(json.dumps(j), encoding="utf-8")
-        reports = store.recover_stale_swaps()
+        legacy_swap._journal_path().write_text(json.dumps(j), encoding="utf-8")
+        reports = legacy_swap.recover_stale_swaps()
         assert len(reports) == 1 and reports[0]["restored"] == ["API_TOKEN"]
         assert "no longer running" in reports[0]["reason"]
         assert env_path.read_bytes() == PLACEHOLDER_ENV
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
 
 
 def test_recover_stale_swaps_handles_restore_failed_state_regardless_of_pid() -> None:
     with workspace() as (project, env_path):
         key = str(env_path)
         store.swap_target_file(env_path, ["PLAIN"], SECRETS, {})
-        store.journal_add(key, ["PLAIN"])
-        store.journal_mark_restore_failed(key)
-        reports = store.recover_stale_swaps()
+        legacy_swap.journal_add(key, ["PLAIN"])
+        legacy_swap.journal_mark_restore_failed(key)
+        reports = legacy_swap.recover_stale_swaps()
         assert reports and reports[0]["restored"] == ["PLAIN"]
         assert "restore had failed" in reports[0]["reason"]
         assert env_path.read_bytes() == PLACEHOLDER_ENV
@@ -431,9 +431,9 @@ def test_recover_stale_swaps_handles_restore_failed_state_regardless_of_pid() ->
 
 def test_corrupted_journal_is_reported_not_swallowed() -> None:
     with workspace() as (project, env_path):
-        store._journal_path().write_text("{oops", encoding="utf-8")
+        legacy_swap._journal_path().write_text("{oops", encoding="utf-8")
         try:
-            store.recover_stale_swaps()
+            legacy_swap.recover_stale_swaps()
         except ValueError as e:
             assert "corrupted" in str(e)
         else:
@@ -506,7 +506,7 @@ def test_swap_end_to_end_child_with_scrubbed_env_reads_real_value_from_file() ->
         assert r["swapped"] == {str(env_path): ["API_TOKEN", "PLAIN"]}
         assert "swap_restore_conflicts" not in r
         assert env_path.read_bytes() == PLACEHOLDER_ENV
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
         # The dialog was told exactly what would be written where.
         shown = calls[0]["swap"][0]
         assert (shown["path"], shown["names"], shown["skipped"]) == (
@@ -531,7 +531,7 @@ def test_swap_restores_on_command_failure_launch_error_and_interrupt() -> None:
             assert b"tok-abcdefgh-123456" in seen["bytes"]
             assert str(env_path) in seen["journal"]
             assert env_path.read_bytes() == PLACEHOLDER_ENV, kwargs
-            assert not store._journal_path().exists(), kwargs
+            assert not legacy_swap._journal_path().exists(), kwargs
             assert r["swapped"] == {str(env_path): ["API_TOKEN", "DB_PASSWORD", "PLAIN"]}
 
 
@@ -565,7 +565,7 @@ def test_swap_reports_restore_conflict_when_line_changed_during_run() -> None:
         assert "PLAIN" in r["swap_warning"]
         after = env_path.read_bytes()
         assert b"PLAIN=edited" in after and b'API_TOKEN="value 1"' in after
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
 
 
 def test_swap_restore_failure_keeps_journal_entry_and_next_call_recovers() -> None:
@@ -602,7 +602,7 @@ def test_swap_restore_failure_keeps_journal_entry_and_next_call_recovers() -> No
         assert b'export API_TOKEN="value 1"\r\n' in after
         assert b'  DB_PASSWORD="value 2"\r\n' in after
         assert b'PLAIN="value 3"\r\n' in after
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
 
 
 def test_verify_failed_keeps_journal_entry_so_recovery_retries() -> None:
@@ -633,7 +633,7 @@ def test_verify_failed_keeps_journal_entry_so_recovery_retries() -> None:
         status = mcp_server._vault_status_impl()
         assert status["swap_recovered"][0]["restored"] == ["PLAIN"]
         assert b"justletters123" not in env_path.read_bytes()
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
 
 
 def test_conflict_only_releases_journal_and_preserves_user_edit() -> None:
@@ -647,7 +647,7 @@ def test_conflict_only_releases_journal_and_preserves_user_edit() -> None:
             r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None, None,
                                               swap=[".env"])
         assert r["swap_restore_conflicts"] == {str(env_path): ["PLAIN"]}
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
         # A later recovery must NOT rewrite the user's edit.
         assert mcp_server._vault_status_impl().get("swap_recovered") is None
         assert b"PLAIN=user-edit" in env_path.read_bytes()
@@ -655,23 +655,23 @@ def test_conflict_only_releases_journal_and_preserves_user_edit() -> None:
 
 def test_journal_bookkeeping_failure_is_reported_separately_from_a_leak() -> None:
     with workspace() as (project, env_path):
-        original_remove = store.journal_remove
-        store.journal_remove = lambda key: (_ for _ in ()).throw(RuntimeError("lock stuck"))
+        original_remove = legacy_swap.journal_remove
+        legacy_swap.journal_remove = lambda key: (_ for _ in ()).throw(RuntimeError("lock stuck"))
         try:
             with fake_dialog(), stub_run():
                 r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None,
                                                   None, swap=[".env"])
         finally:
-            store.journal_remove = original_remove
+            legacy_swap.journal_remove = original_remove
         assert env_path.read_bytes() == PLACEHOLDER_ENV
         assert "swap_restore_failed" not in r and "swap_warning" not in r
         assert "lock stuck" in r["swap_journal_warning"]
-        store.journal_remove(str(env_path))
+        legacy_swap.journal_remove(str(env_path))
 
 
 def test_unreadable_journal_fails_closed_for_migrate_and_resync() -> None:
     with workspace() as (project, env_path):
-        store._journal_path().write_text("{not json", encoding="utf-8")
+        legacy_swap._journal_path().write_text("{not json", encoding="utf-8")
         r = mcp_server._install_migrate_impl(str(env_path))
         assert "cannot tell whether" in r["error"]
         r = mcp_server._resync_targets_core()
@@ -679,7 +679,7 @@ def test_unreadable_journal_fails_closed_for_migrate_and_resync() -> None:
         status = mcp_server._vault_status_impl()
         assert "swap.journal.json" in status["swap_journal_error"]
         assert env_path.read_bytes() == PLACEHOLDER_ENV
-        store._journal_path().unlink()
+        legacy_swap._journal_path().unlink()
 
 
 def test_startup_recovery_report_is_delivered_in_first_result() -> None:
@@ -708,7 +708,7 @@ def test_resync_and_migrate_refuse_a_live_swapped_file() -> None:
     with workspace() as (project, env_path):
         key = str(env_path)
         store.swap_target_file(env_path, ["API_TOKEN"], SECRETS, {})
-        store.journal_add(key, ["API_TOKEN"])
+        legacy_swap.journal_add(key, ["API_TOKEN"])
         try:
             res = mcp_server._resync_targets_impl()
             assert res[key]["status"] == "swap_in_progress"
@@ -718,7 +718,7 @@ def test_resync_and_migrate_refuse_a_live_swapped_file() -> None:
             status = mcp_server._vault_status_impl()
             assert status["swaps_in_progress"][0]["names"] == ["API_TOKEN"]
         finally:
-            store.journal_remove(key)
+            legacy_swap.journal_remove(key)
 
 
 def test_trust_signature_binds_swapped_names_and_drift_hashes_the_file() -> None:
@@ -791,7 +791,7 @@ def test_denied_dialog_touches_nothing() -> None:
                                               swap=[".env"])
         assert r == {"applied": False, "message": "Denied by user."}
         assert env_path.read_bytes() == PLACEHOLDER_ENV
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
 
 
 def test_second_server_swapping_same_file_is_refused_and_first_is_untouched() -> None:
@@ -800,11 +800,11 @@ def test_second_server_swapping_same_file_is_refused_and_first_is_untouched() ->
         # Simulate another live server's active entry (a child process).
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
         try:
-            store.journal_add(key, ["API_TOKEN"])
-            j = json.loads(store._journal_path().read_text(encoding="utf-8"))
+            legacy_swap.journal_add(key, ["API_TOKEN"])
+            j = json.loads(legacy_swap._journal_path().read_text(encoding="utf-8"))
             j["entries"][key].update({"pid": child.pid, "server_id": "other",
                                       "pid_start": procs.process_start_time(child.pid)[1]})
-            store._journal_path().write_text(json.dumps(j), encoding="utf-8")
+            legacy_swap._journal_path().write_text(json.dumps(j), encoding="utf-8")
             with fake_dialog(), stub_run():
                 r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None,
                                                   None, swap=[".env"])
@@ -814,7 +814,7 @@ def test_second_server_swapping_same_file_is_refused_and_first_is_untouched() ->
         finally:
             child.kill()
             child.wait()
-            store.journal_remove(key)
+            legacy_swap.journal_remove(key)
 
 
 # ---------------------------------------------------------------------------

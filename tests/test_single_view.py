@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 import mcp_server  # noqa: E402
-from vault_lib import procs, singleview, store, trust  # noqa: E402
+from vault_lib import legacy_swap, procs, singleview, store, trust  # noqa: E402
 from test_swap import (INDEX, PLACEHOLDER_ENV, SECRETS, fake_dialog, stub_run,  # noqa: E402
                        workspace)
 
@@ -74,7 +74,7 @@ def test_first_read_is_real_second_read_while_running_is_placeholder() -> None:
         assert r["single_read_restored_early"] == {str(env_path): 1}
         assert calls[0]["max_reads"] == 1
         assert env_path.read_bytes() == PLACEHOLDER_ENV
-        assert "swap_restore_conflicts" not in r and not store._journal_path().exists()
+        assert "swap_restore_conflicts" not in r and not legacy_swap._journal_path().exists()
 
 
 def test_max_reads_two_serves_both_reads() -> None:
@@ -234,7 +234,7 @@ def test_a_run_that_never_reads_restores_at_exit_and_reports_zero_reads() -> Non
         rep = r["single_read"][str(env_path)]
         assert rep["reads"] == 0 and not rep["restored_early"]
         assert env_path.read_bytes() == PLACEHOLDER_ENV
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
 
 
 def test_failure_on_a_later_target_rolls_back_an_armed_earlier_one() -> None:
@@ -269,7 +269,7 @@ def test_failure_on_a_later_target_rolls_back_an_armed_earlier_one() -> None:
         assert env_path.read_bytes() == PLACEHOLDER_ENV, "first target not rolled back"
         assert b"justletters123" not in second.read_bytes()
         assert "swap_restore_failed" not in r
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
         # And nothing of ours is left holding either file.
         for p in (env_path, second):
             w = singleview.Watcher(str(p), 1, lambda _w: {}, threading.Lock())
@@ -378,7 +378,7 @@ def test_a_failed_early_restore_is_retried_on_the_next_read() -> None:
             assert rep["restore_attempts"] == 2 and "restore_error" not in rep, rep
             assert rep["reads"] == 2 and rep["reads_after_restore"] == 1, rep
             assert env_path.read_bytes() == PLACEHOLDER_ENV
-            assert "swap_restore_conflicts" not in r and not store._journal_path().exists()
+            assert "swap_restore_conflicts" not in r and not legacy_swap._journal_path().exists()
     finally:
         store.compute_unswap_bytes = real
 

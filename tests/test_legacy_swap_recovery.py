@@ -14,7 +14,7 @@ and both have to hold:
                  file; restoring under it corrupts the run.
 
 The 1.7.1 suite covered all of this, but it built its state by CALLING the
-writers (`store.swap_target_file`, `store.journal_add`). Those are deleted
+writers (`store.swap_target_file`, `legacy_swap.journal_add`). Those are deleted
 in 2.0, so this suite builds the same state from frozen golden bytes in
 tests/fixtures/legacy_swap/ instead -- see that directory's README. Nothing
 here may call a swap writer; that is the property that keeps this file
@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import mcp_server  # noqa: E402
 import vault_lib.crypto as crypto  # noqa: E402
-from vault_lib import gui, procs, store  # noqa: E402
+from vault_lib import gui, legacy_swap, procs, store  # noqa: E402
 
 TEST_PASSWORD = "legacy-recovery-password-123"
 _FAST_PARAMS = crypto.ScryptParams(n=2 ** 12, r=8, p=1)
@@ -116,11 +116,11 @@ def _write_journal(env_path: Path, *, state="active", pid=DEAD_PID,
         entry["names"] = sorted(names)
     assert entry["state"] == state, f"fixture {source} is not state={state}"
     doc["entries"] = {str(env_path): entry}
-    store._journal_path().write_text(json.dumps(doc), encoding="utf-8")
+    legacy_swap._journal_path().write_text(json.dumps(doc), encoding="utf-8")
 
 
 def _journal_entries() -> dict:
-    p = store._journal_path()
+    p = legacy_swap._journal_path()
     return json.loads(p.read_text(encoding="utf-8"))["entries"] if p.exists() else {}
 
 
@@ -197,12 +197,12 @@ def test_fixture_is_a_real_swap_not_a_transcription() -> None:
 def test_dead_owner_is_restored_byte_exactly() -> None:
     with workspace() as (project, env_path):
         _write_journal(env_path)
-        reports = store.recover_stale_swaps()
+        reports = legacy_swap.recover_stale_swaps()
         assert len(reports) == 1
         assert reports[0]["restored"] == NAMES
         assert "no longer running" in reports[0]["reason"]
         _assert_fully_restored(env_path)
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
 
 
 def test_crash_recovery_normalizes_trailing_whitespace() -> None:
@@ -220,7 +220,7 @@ def test_crash_recovery_normalizes_trailing_whitespace() -> None:
     assert b'"value 2"  \r\n' in PLACEHOLDER_ENV, "fixture lost its trailing-space line"
     with workspace() as (project, env_path):
         _write_journal(env_path)
-        store.recover_stale_swaps()
+        legacy_swap.recover_stale_swaps()
         after = env_path.read_bytes()
         assert b'"value 2"\r\n' in after          # trailing spaces gone
         assert b'"value 2"  \r\n' not in after
@@ -235,7 +235,7 @@ def test_restore_sweeps_the_atomic_write_temp_file() -> None:
         leftover = project / "..env.abc123.tmp"
         leftover.write_bytes(SWAPPED_ENV)
         _write_journal(env_path)
-        reports = store.recover_stale_swaps()
+        reports = legacy_swap.recover_stale_swaps()
         assert [Path(p).name for p in reports[0]["temp_files_removed"]] == ["..env.abc123.tmp"]
         assert not leftover.exists()
 
@@ -245,7 +245,7 @@ def test_no_secret_survives_recovery_anywhere_in_the_project() -> None:
     with workspace() as (project, env_path):
         (project / "..env.xyz.tmp").write_bytes(SWAPPED_ENV)
         _write_journal(env_path)
-        store.recover_stale_swaps()
+        legacy_swap.recover_stale_swaps()
         for path in project.rglob("*"):
             if path.is_file():
                 blob = path.read_bytes()
@@ -263,10 +263,10 @@ def test_live_owner_is_left_alone_and_reported() -> None:
     with workspace() as (project, env_path):
         _write_journal(env_path, pid=os.getpid(), server_id=store.SERVER_ID,
                        pid_start=procs.own_start_time())
-        assert store.recover_stale_swaps() == []
+        assert legacy_swap.recover_stale_swaps() == []
         assert env_path.read_bytes() == SWAPPED_ENV  # untouched, still holding real values
         assert str(env_path) in _journal_entries()
-        assert str(env_path) in {str(k) for k in store.live_swaps()}
+        assert str(env_path) in {str(k) for k in legacy_swap.live_swaps()}
 
 
 def test_liveness_uses_pid_start_time_so_a_reused_pid_is_stale() -> None:
@@ -275,13 +275,13 @@ def test_liveness_uses_pid_start_time_so_a_reused_pid_is_stale() -> None:
         try:
             # Right pid, wrong start time -> the pid was recycled -> stale.
             _write_journal(env_path, pid=child.pid, server_id="other", pid_start=1.0)
-            assert store.live_swaps() == {}
+            assert legacy_swap.live_swaps() == {}
             # Right pid, right start time -> genuinely live.
             actual_start = procs.process_start_time(child.pid)[1]
             if actual_start is not None:
                 _write_journal(env_path, pid=child.pid, server_id="other",
                                pid_start=actual_start)
-                assert str(env_path) in {str(k) for k in store.live_swaps()}
+                assert str(env_path) in {str(k) for k in legacy_swap.live_swaps()}
         finally:
             child.kill()
             child.wait()
@@ -293,7 +293,7 @@ def test_force_overrides_a_live_owner() -> None:
     with workspace() as (project, env_path):
         _write_journal(env_path, pid=os.getpid(), server_id=store.SERVER_ID,
                        pid_start=procs.own_start_time())
-        reports = store.recover_stale_swaps(force=True)
+        reports = legacy_swap.recover_stale_swaps(force=True)
         assert len(reports) == 1 and reports[0]["restored"] == NAMES
         assert reports[0]["reason"] == "forced"
         _assert_fully_restored(env_path)
@@ -307,7 +307,7 @@ def test_restore_failed_is_recovered_even_though_the_owner_is_alive() -> None:
     with workspace() as (project, env_path):
         _write_journal(env_path, state="restore_failed", pid=os.getpid(),
                        server_id=store.SERVER_ID, pid_start=procs.own_start_time())
-        reports = store.recover_stale_swaps()
+        reports = legacy_swap.recover_stale_swaps()
         assert reports and reports[0]["restored"] == NAMES
         assert "restore had failed" in reports[0]["reason"]
         _assert_fully_restored(env_path)
@@ -319,9 +319,9 @@ def test_restore_failed_is_recovered_even_though_the_owner_is_alive() -> None:
 
 def test_corrupted_journal_is_reported_not_swallowed() -> None:
     with workspace() as (project, env_path):
-        store._journal_path().write_text("{oops", encoding="utf-8")
+        legacy_swap._journal_path().write_text("{oops", encoding="utf-8")
         try:
-            store.recover_stale_swaps()
+            legacy_swap.recover_stale_swaps()
         except ValueError as e:
             assert "corrupted" in str(e)
         else:
@@ -338,7 +338,7 @@ def test_unreadable_index_writes_the_pending_marker_rather_than_leaking() -> Non
     with workspace() as (project, env_path):
         store.INDEX_FILE.write_text("{ not json", encoding="utf-8")
         _write_journal(env_path)
-        reports = store.recover_stale_swaps()
+        reports = legacy_swap.recover_stale_swaps()
         assert reports and reports[0].get("pending_index")
         after = env_path.read_bytes()
         for value in SECRETS.values():
@@ -350,7 +350,7 @@ def test_missing_target_file_is_reported_not_fatal() -> None:
     with workspace() as (project, env_path):
         _write_journal(env_path)
         env_path.unlink()
-        reports = store.recover_stale_swaps()
+        reports = legacy_swap.recover_stale_swaps()
         assert reports and reports[0]["missing"] is True
 
 
@@ -364,7 +364,7 @@ def test_without_a_journal_migrate_treats_real_values_as_secrets_to_revault() ->
     the documented recovery, so it must classify those lines as real
     secrets rather than skipping them as placeholders."""
     with workspace(register=False) as (project, env_path):
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
         with _stub_install_dialog(approve=False) as seen:
             mcp_server._install_migrate_impl(str(env_path))
         migrated = dict(seen["to_migrate"])

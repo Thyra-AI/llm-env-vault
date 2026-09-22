@@ -35,7 +35,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from vault_lib import gui, procs, singleview, store, trust
+from vault_lib import gui, legacy_swap, procs, singleview, store, trust
 from vault_lib.crypto import (WrongPassword, WrongRecoveryKey, MalformedRecoveryKey,
                               NoRecoverySlot, VaultCorrupted, VaultTampered)
 
@@ -122,13 +122,13 @@ _startup_recovery: list = []
 
 def _recover_swaps() -> list:
     """Restore any swapped .env whose owning server died or whose own restore
-    failed (see store.recover_stale_swaps), plus anything server start found.
+    failed (see legacy_swap.recover_stale_swaps), plus anything server start found.
     Never raises: a broken journal is reported as an entry, because the
     tool call this runs inside must still do its own job."""
     reports = list(_startup_recovery)
     _startup_recovery.clear()
     try:
-        reports.extend(store.recover_stale_swaps())
+        reports.extend(legacy_swap.recover_stale_swaps())
     except (OSError, ValueError, RuntimeError) as e:
         reports.append({"error": f"could not process swap.journal.json: {e}"})
     return reports
@@ -142,7 +142,7 @@ def _live_swap_paths() -> tuple:
     exactly the state in which a file is most likely to be mid-swap with
     nobody watching it."""
     try:
-        return {os.path.normcase(k): v for k, v in store.live_swaps().items()}, None
+        return {os.path.normcase(k): v for k, v in legacy_swap.live_swaps().items()}, None
     except (OSError, ValueError, RuntimeError) as e:
         return {}, f"swap.journal.json could not be read: {e}"
 
@@ -1675,9 +1675,9 @@ def _restore_swaps(swapped: list, index: dict) -> dict:
             outcome["failed"][key] = res["error"]
         try:
             if res["error"] or res["verify_failed"]:
-                store.journal_mark_restore_failed(key)
+                legacy_swap.journal_mark_restore_failed(key)
             else:
-                store.journal_remove(key)
+                legacy_swap.journal_remove(key)
         except (OSError, ValueError, RuntimeError) as e:
             outcome["journal_errors"][key] = str(e)
     return outcome
@@ -2156,7 +2156,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         for entry in swap_plan:
             key, path = entry["key"], entry["path"]
             try:
-                store.journal_add(key, entry["names"])
+                legacy_swap.journal_add(key, entry["names"])
                 if max_reads is not None:
                     record = _swap_through_watcher(key, path, entry["names"], secrets,
                                                    styles_all.get(key, {}), max_reads,
@@ -2168,9 +2168,9 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
             except (OSError, ValueError, RuntimeError) as e:
                 # Includes SwapInProgress and a value with a newline. Undo
                 # whatever was already swapped, then everything else.
-                if not isinstance(e, store.SwapInProgress):
+                if not isinstance(e, legacy_swap.SwapInProgress):
                     try:
-                        store.journal_remove(key)
+                        legacy_swap.journal_remove(key)
                     except (OSError, ValueError, RuntimeError):
                         pass
                 # Earlier targets' watchers still hold their exclusive
@@ -2628,7 +2628,7 @@ if __name__ == "__main__":
         print("--force / --drop-rejected require an interactive terminal.", file=sys.stderr)
         sys.exit(2)
     try:
-        _startup_recovery.extend(store.recover_stale_swaps(force=_force, drop_rejected=_drop))
+        _startup_recovery.extend(legacy_swap.recover_stale_swaps(force=_force, drop_rejected=_drop))
     except (OSError, ValueError, RuntimeError) as _e:
         _startup_recovery.append({"error": f"could not process swap.journal.json: {_e}"})
     if "--recover" in sys.argv[1:]:

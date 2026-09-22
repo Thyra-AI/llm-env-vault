@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 import mcp_server  # noqa: E402
-from vault_lib import procs, store, trust  # noqa: E402
+from vault_lib import legacy_swap, procs, store, trust  # noqa: E402
 from test_swap import (INDEX, PLACEHOLDER_ENV, SECRETS, TEST_PASSWORD, _read_journal,  # noqa: E402
                        fake_dialog, stub_run, workspace)
 
@@ -126,7 +126,7 @@ def test_journal_entries_off_the_registry_are_quarantined_not_acted_on() -> None
             str(env_path): {"names": ["NOT_REGISTERED"], "pid": 4000000, "pid_start": None,
                             "server_id": "x", "started": 1.0, "state": "active"},
         }
-        store._journal_path().write_text(json.dumps({"version": 1, "entries": entries}),
+        legacy_swap._journal_path().write_text(json.dumps({"version": 1, "entries": entries}),
                                          encoding="utf-8")
         original_exists = Path.exists
         touched = []
@@ -138,7 +138,7 @@ def test_journal_entries_off_the_registry_are_quarantined_not_acted_on() -> None
 
         Path.exists = spy
         try:
-            reports = store.recover_stale_swaps()
+            reports = legacy_swap.recover_stale_swaps()
         finally:
             Path.exists = original_exists
         assert touched == [], "a UNC journal path was stat'ed"
@@ -146,10 +146,10 @@ def test_journal_entries_off_the_registry_are_quarantined_not_acted_on() -> None
         assert outside.read_text(encoding="utf-8") == "API_TOKEN=keep-me\n"
         # Quarantined: still there, still reported, on the next call too.
         assert len(_read_journal()) == 3
-        assert len(store.recover_stale_swaps()) == 3
+        assert len(legacy_swap.recover_stale_swaps()) == 3
         # Only the human's explicit CLI switch clears them.
-        store.recover_stale_swaps(drop_rejected=True)
-        assert not store._journal_path().exists()
+        legacy_swap.recover_stale_swaps(drop_rejected=True)
+        assert not legacy_swap._journal_path().exists()
 
 
 def test_swap_argument_unc_and_remote_are_refused_before_resolve() -> None:
@@ -183,12 +183,12 @@ def test_swap_argument_unc_and_remote_are_refused_before_resolve() -> None:
 def test_journal_add_validates_names_against_the_registry() -> None:
     with workspace() as (project, env_path):
         try:
-            store.journal_add(str(env_path), ["NOT_REGISTERED"])
+            legacy_swap.journal_add(str(env_path), ["NOT_REGISTERED"])
         except ValueError as e:
             assert "not registered" in str(e)
         else:
             raise AssertionError("journal_add accepted a name outside the registry")
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +209,7 @@ def test_requoted_secret_during_run_is_restored_not_treated_as_edit() -> None:
         assert "swap_restore_conflicts" not in r, r
         assert "swap_verify_failed" not in r
         assert b'export API_TOKEN="value 1"\r\n' in env_path.read_bytes()
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
 
 
 def test_secret_copied_under_another_name_is_reported_by_line_number() -> None:
@@ -253,15 +253,15 @@ def test_restore_writes_in_place_when_replace_is_blocked() -> None:
 def test_unreadable_index_during_recovery_yields_pending_marker_then_resync_numbers_it() -> None:
     with workspace() as (project, env_path):
         store.swap_target_file(env_path, ["API_TOKEN", "PLAIN"], SECRETS, {})
-        store.journal_add(str(env_path), ["API_TOKEN", "PLAIN"])
-        j = json.loads(store._journal_path().read_text(encoding="utf-8"))
+        legacy_swap.journal_add(str(env_path), ["API_TOKEN", "PLAIN"])
+        j = json.loads(legacy_swap._journal_path().read_text(encoding="utf-8"))
         j["entries"][str(env_path)].update({"pid": 4000000, "server_id": "gone"})
-        store._journal_path().write_text(json.dumps(j), encoding="utf-8")
+        legacy_swap._journal_path().write_text(json.dumps(j), encoding="utf-8")
         store.INDEX_FILE.write_text("{corrupt", encoding="utf-8")
         old_sleep = store.time.sleep
         store.time.sleep = lambda s: None  # skip the 2 s retry wait
         try:
-            reports = store.recover_stale_swaps()
+            reports = legacy_swap.recover_stale_swaps()
         finally:
             store.time.sleep = old_sleep
         assert reports[0]["cleared"] == ["API_TOKEN", "PLAIN"] and "pending_index" in reports[0]
@@ -279,10 +279,10 @@ def test_unreadable_index_during_recovery_yields_pending_marker_then_resync_numb
 def test_transient_index_lock_is_retried() -> None:
     with workspace() as (project, env_path):
         store.swap_target_file(env_path, ["PLAIN"], SECRETS, {})
-        store.journal_add(str(env_path), ["PLAIN"])
-        j = json.loads(store._journal_path().read_text(encoding="utf-8"))
+        legacy_swap.journal_add(str(env_path), ["PLAIN"])
+        j = json.loads(legacy_swap._journal_path().read_text(encoding="utf-8"))
         j["entries"][str(env_path)].update({"pid": 4000000, "server_id": "gone"})
-        store._journal_path().write_text(json.dumps(j), encoding="utf-8")
+        legacy_swap._journal_path().write_text(json.dumps(j), encoding="utf-8")
         original = store.load_index
         calls = {"n": 0}
 
@@ -296,7 +296,7 @@ def test_transient_index_lock_is_retried() -> None:
         old_sleep = store.time.sleep
         store.time.sleep = lambda s: None
         try:
-            reports = store.recover_stale_swaps()
+            reports = legacy_swap.recover_stale_swaps()
         finally:
             store.load_index = original
             store.time.sleep = old_sleep
@@ -332,7 +332,7 @@ def test_a_registered_target_that_became_a_link_is_refused_everywhere() -> None:
             assert "link" in r["error"] and calls == []
             for fn in (lambda: store.preview_swap(env_path, ["PLAIN"]),
                        lambda: store.swap_target_file(env_path, ["PLAIN"], SECRETS, {}),
-                       lambda: store.recover_swap_file(env_path, ["PLAIN"], INDEX, 0)):
+                       lambda: legacy_swap.recover_swap_file(env_path, ["PLAIN"], INDEX, 0)):
                 try:
                     out = fn()
                 except ValueError as e:
@@ -358,16 +358,16 @@ def test_temp_file_sweep_ignores_age() -> None:
         leftover = project / "..env.old.tmp"
         leftover.write_bytes(b"PLAIN=justletters123\n")
         os.utime(leftover, (0, 0))  # epoch-old
-        report = store.recover_swap_file(env_path, ["PLAIN"], INDEX, started=time.time())
+        report = legacy_swap.recover_swap_file(env_path, ["PLAIN"], INDEX, started=time.time())
         assert not leftover.exists() and report["temp_files_removed"]
 
 
 def test_own_pid_leftover_entry_is_cleared_when_file_already_restored() -> None:
     with workspace() as (project, env_path):
-        store.journal_add(str(env_path), ["PLAIN"])  # file still holds placeholders
-        reports = store.recover_stale_swaps()
+        legacy_swap.journal_add(str(env_path), ["PLAIN"])  # file still holds placeholders
+        reports = legacy_swap.recover_stale_swaps()
         assert reports and reports[0].get("leftover_entry_removed") is True
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
 
 
 # ---------------------------------------------------------------------------
@@ -466,14 +466,14 @@ _CHILD_SWAPPER = r"""
 import sys, time, json
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from vault_lib import store
+from vault_lib import legacy_swap, store
 store.ROOT = Path(sys.argv[2])
 for attr, name in (("INDEX_FILE", "vault_index.json"), ("TARGETS_FILE", "targets.json"),
                    ("TARGETS_LOCK_FILE", "targets.json.lock")):
     setattr(store, attr, store.ROOT / name)
 env_path = Path(sys.argv[3])
 secrets = json.loads(sys.argv[4])
-store.journal_add(str(env_path), sorted(secrets))
+legacy_swap.journal_add(str(env_path), sorted(secrets))
 store.swap_target_file(env_path, sorted(secrets), secrets, {})
 print("swapped", flush=True)
 time.sleep(60)
@@ -498,8 +498,8 @@ def test_real_terminateprocess_of_a_swapping_server_is_recovered() -> None:
         child = _spawn_swapping_server(project, env_path)
         try:
             assert b"justletters123" in env_path.read_bytes()
-            assert store.live_swaps(), "the child's entry should be live"
-            assert store.recover_stale_swaps() == []  # live: untouched
+            assert legacy_swap.live_swaps(), "the child's entry should be live"
+            assert legacy_swap.recover_stale_swaps() == []  # live: untouched
             assert b"justletters123" in env_path.read_bytes()
             child.kill()  # TerminateProcess
             child.wait()
@@ -509,14 +509,14 @@ def test_real_terminateprocess_of_a_swapping_server_is_recovered() -> None:
         reports = mcp_server._recover_swaps()
         assert reports and reports[0]["restored"] == ["PLAIN"], reports
         assert env_path.read_bytes() == PLACEHOLDER_ENV
-        assert not store._journal_path().exists()
+        assert not legacy_swap._journal_path().exists()
 
 
 def test_force_recovers_a_live_entry_and_needs_no_password() -> None:
     with workspace() as (project, env_path):
         child = _spawn_swapping_server(project, env_path)
         try:
-            reports = store.recover_stale_swaps(force=True)
+            reports = legacy_swap.recover_stale_swaps(force=True)
             assert reports and reports[0]["reason"] == "forced"
             assert env_path.read_bytes() == PLACEHOLDER_ENV
         finally:
