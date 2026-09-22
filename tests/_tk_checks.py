@@ -333,6 +333,8 @@ def _():
                 _FAKE_SIDECAR),
             "confirm_abandon_files_dialog": lambda: gui.confirm_abandon_files_dialog(
                 {"OLDGEN01": ["abcdef0123456789"]}, {"abcdef0123456789": "server.pem"}),
+            "retype_placeholders_dialog": lambda: gui.retype_placeholders_dialog(
+                ["SMTP_PORT", "SMTP_USE_SSL"]),
         }
         for name, call in cases.items():
             widgets = build_dialog(call)

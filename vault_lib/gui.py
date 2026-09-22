@@ -969,6 +969,181 @@ def _shorten_path(text: str, max_len: int = 64) -> str:
     return _safe_display(text, max_len)
 
 
+def retype_placeholders_dialog(names):
+    """Turn this vault's placeholders into typed ones.
+
+    Needs the master password because a shape can only be inferred from the
+    real value, and the real values are in vault.enc. Nothing is returned to
+    the caller: the shapes are written here, the targets are rewritten here,
+    and the plaintext never leaves this function.
+
+    `names`: the variables to retype, already narrowed by the caller.
+    Returns {"approved": bool, "retyped": {name: shape}, "conflicts": {path:
+    [names]}, "partial_failure": Optional[str]}.
+    """
+    outcome = {"approved": False, "retyped": {}, "conflicts": {}, "partial_failure": None}
+    state = {"password": None, "secrets": None, "plan": {}}
+    pad = {"padx": 18, "pady": 7}
+
+    root, _run_modal = _new_window()
+    root.title("llm-env-vault")
+    root.resizable(True, True)
+    _style(root)
+
+    container = tk.Frame(root, bg=WINDOW_BG)
+    container.pack()
+    _branding_footer(root).pack(side="bottom", fill="x")
+
+    def clear():
+        for w in container.winfo_children():
+            w.destroy()
+
+    def show_step1():
+        clear()
+        row = 0
+        _label(container, "Unlock Vault", font=FONT_TITLE).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(pad["pady"], 14))
+        row += 1
+        _label(container,
+               f"About to give {len(names)} placeholder(s) a type, so a\n"
+               f"placeholder-only .env can be PARSED by the app that reads it.",
+               justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        _label(container, "The master password is needed because a value's type can\n"
+                          "only be read from the real value.", fg=FG_MUTED,
+               justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+        _label(container, "Master password:").grid(row=row, column=0, sticky="e", **pad)
+        pw = _entry(container, show="*", width=30)
+        pw.grid(row=row, column=1, **pad)
+        row += 1
+        err = _label(container, "", fg=DANGER)
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+        row += 1
+
+        def on_continue():
+            password = pw.get()
+            if not password:
+                _show_error(root, err, "Password cannot be empty.")
+                return
+            try:
+                secrets = store.load_secrets(password)
+            except WrongPassword as e:
+                _show_error(root, err, str(e))
+                return
+            except (FileNotFoundError, ValueError) as e:
+                _show_error(root, err, f"Vault error: {e}")
+                return
+            state["password"] = password
+            state["secrets"] = secrets
+            state["plan"] = {n: store.infer_shape(secrets[n]) for n in names if n in secrets}
+            if not state["plan"]:
+                _show_error(root, err, "None of those variables are in this vault.")
+                return
+            show_step2()
+
+        def on_cancel():
+            root.destroy()
+
+        btns = tk.Frame(container, bg=WINDOW_BG)
+        btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+        _button(btns, "Cancel", command=on_cancel).pack(side="left", padx=6)
+        _button(btns, "Continue", command=on_continue, kind="primary").pack(side="left", padx=6)
+        root.bind("<Escape>", lambda e: on_cancel())
+        root.bind("<Return>", lambda e: on_continue())
+        pw.focus_force()
+        _center(root)
+
+    def show_step2():
+        clear()
+        row = 0
+        _label(container, "Confirm Typed Placeholders", font=FONT_TITLE).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(pad["pady"], 14))
+        row += 1
+        _label(container, "Each line below will read exactly this, in every registered\n"
+                          "file that declares it. No real value is written anywhere.",
+               justify="left").grid(row=row, column=0, columnspan=2, sticky="w", **pad)
+        row += 1
+
+        frame = tk.Frame(container, bg=WINDOW_BG)
+        txt = _textbox(frame, fg=FG, font=FONT_BODY,
+                       height=min(12, max(3, len(state["plan"]))), width=56)
+        index = store.load_index()
+        for name in sorted(state["plan"]):
+            shape = state["plan"][name]
+            rendered = store.render_placeholder(index.get(name, 1), shape)
+            txt.insert("end", f"{_safe_display(name)}={rendered}\n")
+        txt.config(state="disabled")
+        ys = _scrollbar(frame, orient="vertical", command=txt.yview)
+        txt.config(yscrollcommand=ys.set)
+        txt.grid(row=0, column=0, sticky="nsew")
+        ys.grid(row=0, column=1, sticky="ns")
+        frame.grid_rowconfigure(0, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
+        row += 1
+
+        leaks = sorted({s.split(":")[0] for s in state["plan"].values() if s != store.SHAPE_STR})
+        if leaks:
+            _label(container,
+                   "This discloses the TYPE of each value -- and a URL's scheme -- to\n"
+                   "anything that can read the file, including the AI assistant: "
+                   + ", ".join(leaks) + ".\nIt never discloses content.",
+                   fg=WARNING, justify="left", wraplength=480).grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+
+        err = _label(container, "", fg=DANGER)
+        err.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
+        row += 1
+
+        def on_allow():
+            try:
+                store.record_shapes(state["plan"])
+                store.set_placeholder_style(store.STYLE_TYPED)
+            except (OSError, ValueError) as e:
+                _show_error(root, err, f"Could not record the types: {e}")
+                return
+            outcome["retyped"] = dict(state["plan"])
+            outcome["approved"] = True
+            # Rewrite the registered files so they match what was just
+            # approved. A failure here is reported, not swallowed: the vault
+            # now says "typed" while some file still says otherwise, and the
+            # user needs to know which.
+            try:
+                index_now = store.load_index()
+                shapes_now = store.load_shapes()
+                for path_str, names_for_path in store.load_targets().items():
+                    try:
+                        conflicts = store.sync_target_file(
+                            Path(path_str), index_now, names_for_path, shapes=shapes_now)
+                    except (OSError, ValueError) as e:
+                        outcome["conflicts"].setdefault(path_str, []).append(f"error: {e}")
+                        continue
+                    if conflicts:
+                        outcome["conflicts"][path_str] = conflicts
+            except (OSError, ValueError) as e:
+                outcome["partial_failure"] = (
+                    f"The types were recorded, but the registered files could not be "
+                    f"rewritten: {e}. Run resync_targets once that is fixed.")
+            root.destroy()
+
+        def on_cancel():
+            root.destroy()
+
+        btns = tk.Frame(container, bg=WINDOW_BG)
+        btns.grid(row=row, column=0, columnspan=2, pady=(20, 4))
+        _button(btns, "Cancel", command=on_cancel).pack(side="left", padx=6)
+        _button(btns, "Allow", command=on_allow, kind="primary").pack(side="left", padx=6)
+        root.bind("<Escape>", lambda e: on_cancel())
+        root.bind("<Return>", lambda e: on_allow())
+        _center(root)
+
+    show_step1()
+    _run_modal()
+    return outcome
+
+
 def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                    sensitive_names=None):
     """target: Path to the real .env being migrated.

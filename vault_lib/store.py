@@ -256,36 +256,71 @@ def _shapes_path() -> Path:
     return ROOT / SHAPES_FILE_NAME
 
 
-def load_shapes() -> dict:
-    """{VAR_NAME: shape}. Validated on read, like the index: a malformed
-    entry is dropped rather than raised, because a bad shapes file should
-    cost fidelity (a line renders as `"value N"`) and never a run.
+# Written at the top of a managed file whose vault records shapes. Typed
+# placeholders are the reason it exists: `SMTP_PORT=17` is indistinguishable
+# from real configuration to a human skimming the file, where `"value 17"`
+# announced itself. The prefix is matched separately so the wording can be
+# reworded later without every existing file growing a second header.
+MANAGED_HEADER_PREFIX = "# Managed by llm-env-vault"
+MANAGED_HEADER = (MANAGED_HEADER_PREFIX +
+                  " -- the values below are PLACEHOLDERS, not real secrets.")
 
-    Deliberately NOT pruned when a secret is removed from the vault. The
-    entry is a tombstone: without it, a typed placeholder left behind for a
-    name that has left the index is indistinguishable from a real value, and
-    resync_targets' data-loss guard -- which counts how many managed lines
-    still hold OUR placeholder -- would silently stop counting them.
+STYLE_TYPED = "typed"
+STYLE_OPAQUE = "opaque"
+
+
+def _load_shape_doc() -> dict:
+    """{"shapes": {...}, "high_water": int, "style": "typed"|"opaque"}.
+
+    Accepts the bare {name: shape} map C5 wrote, so a vault written by an
+    earlier 2.0 build still loads. A malformed file yields defaults rather
+    than raising: a broken shapes file must cost fidelity (a line renders as
+    the legacy `"value N"`) and never a run.
     """
+    default = {"shapes": {}, "high_water": 0, "style": STYLE_OPAQUE}
     p = _shapes_path()
     if not p.exists():
-        return {}
+        return default
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return {}
+        return default
     if not isinstance(data, dict):
-        return {}
-    out = {}
-    for name, shape in data.items():
+        return default
+    raw = data.get("shapes") if "shapes" in data else data
+    if not isinstance(raw, dict):
+        raw = {}
+    shapes = {}
+    for name, shape in raw.items():
         if not isinstance(name, str) or not validate_shape(shape):
             continue
         try:
             validate_var_name(name)
         except ValueError:
             continue
-        out[name] = shape
-    return out
+        shapes[name] = shape
+    hw = data.get("high_water", 0)
+    if not isinstance(hw, int) or isinstance(hw, bool) or hw < 0:
+        hw = 0
+    style = data.get("style")
+    return {"shapes": shapes, "high_water": hw,
+            "style": STYLE_TYPED if style == STYLE_TYPED else STYLE_OPAQUE}
+
+
+def _save_shape_doc(doc: dict) -> None:
+    _atomic_write_text(_shapes_path(), json.dumps({
+        "style": doc.get("style", STYLE_OPAQUE),
+        "high_water": int(doc.get("high_water", 0)),
+        "shapes": dict(sorted((doc.get("shapes") or {}).items())),
+    }, indent=2) + "\n")
+
+
+def load_shapes() -> dict:
+    """{VAR_NAME: shape}. Deliberately NOT pruned when a secret is removed:
+    the entry is a tombstone, and without it a typed placeholder left behind
+    for a departed name is indistinguishable from a real value -- resync's
+    data-loss guard would silently stop counting the lines it protects."""
+    return _load_shape_doc()["shapes"]
 
 
 def record_shapes(new: dict) -> None:
@@ -293,9 +328,61 @@ def record_shapes(new: dict) -> None:
     clean = {n: s for n, s in (new or {}).items() if validate_shape(s)}
     if not clean:
         return
-    merged = load_shapes()
-    merged.update(clean)
-    _atomic_write_text(_shapes_path(), json.dumps(merged, indent=2, sort_keys=True) + "\n")
+    doc = _load_shape_doc()
+    doc["shapes"].update(clean)
+    _save_shape_doc(doc)
+
+
+def placeholder_style() -> str:
+    """Whether newly vaulted values get a shape recorded.
+
+    A vault created on 2.0 is `typed`. A vault that predates it stays
+    `opaque` -- upgrading must not rewrite anybody's .env -- until a human
+    runs retype_placeholders, which flips it.
+    """
+    return _load_shape_doc()["style"]
+
+
+def set_placeholder_style(style: str) -> None:
+    if style not in (STYLE_TYPED, STYLE_OPAQUE):
+        raise ValueError(f"placeholder style must be {STYLE_TYPED!r} or {STYLE_OPAQUE!r}")
+    doc = _load_shape_doc()
+    doc["style"] = style
+    _save_shape_doc(doc)
+
+
+def note_placeholders_used(index: dict) -> None:
+    """Raise the high-water mark to cover every number currently in use.
+
+    Called from save_index, which is the one place a number becomes real.
+    Doing it here rather than in next_placeholder means a dialog the human
+    cancels burns no number.
+    """
+    if not index:
+        return
+    try:
+        top = max(int(v) for v in index.values())
+    except (TypeError, ValueError):
+        return
+    doc = _load_shape_doc()
+    if top > doc["high_water"]:
+        doc["high_water"] = top
+        _save_shape_doc(doc)
+
+
+def next_placeholder(index: dict) -> int:
+    """A number no variable has ever held in this vault.
+
+    Freed numbers are NOT recycled. A recycled number is the only way a
+    placeholder already written into a project file can come to mean a
+    different variable, and for a typed placeholder that drift is
+    unrecoverable: `SMTP_PORT=17` where 17 is now someone else's number is
+    indistinguishable from a real port, so resync cannot renumber it and has
+    to report a conflict instead. Never reusing costs nothing but larger
+    numbers over a vault's life.
+    """
+    used = {int(v) for v in index.values()} if index else set()
+    return max([_load_shape_doc()["high_water"]] + list(used) + [0]) + 1
 
 
 def placeholder_for(name: str, index: Optional[dict], shapes: Optional[dict] = None) -> str:
@@ -496,15 +583,10 @@ def save_index(index: dict) -> None:
     for name in index:
         validate_var_name(name)
     _atomic_write_text(INDEX_FILE, json.dumps(index, indent=2, sort_keys=True) + "\n")
+    # The one place a placeholder number becomes real, so the one place the
+    # high-water mark has to move. next_placeholder never recycles below it.
+    note_placeholders_used(index)
     regenerate_llm_env(index)
-
-
-def next_placeholder(index: dict) -> int:
-    used = set(index.values())
-    n = 1
-    while n in used:
-        n += 1
-    return n
 
 
 def regenerate_llm_env(index: dict) -> None:
@@ -1015,7 +1097,16 @@ def sync_target_file(path: Path, index: dict, managed_names, force_names=None,
 
     for name in sorted(managed_names):
         if name in index and name not in seen:
-            out_lines.append(f'{name}="value {index[name]}"')
+            out_lines.append(f"{name}={placeholder_for(name, index, shapes)}")
+
+    # A typed placeholder reads like real configuration -- `SMTP_PORT=17` far
+    # more so than `SMTP_PORT="value 17"` ever did -- so say what the file is.
+    # A whole-line comment only: `docker run --env-file` treats everything
+    # after `=` as the value, so an inline one would become part of a secret.
+    # Opaque vaults get nothing, which is what keeps an upgrade byte-identical.
+    if placeholder_style() == STYLE_TYPED and not any(
+            line.startswith(MANAGED_HEADER_PREFIX) for line in out_lines):
+        out_lines.insert(0, MANAGED_HEADER)
 
     _atomic_write_bytes(
         path,
@@ -2082,6 +2173,15 @@ def save_secrets(
     that the weakness is not persisted.
     """
     _write_body(password, secrets, expect_fingerprint, merge_reserved=True)
+    # Shape is inferred HERE because this is the only moment the plaintext is
+    # in hand. Re-inferring every name on every save is deliberate: it is
+    # cheap, idempotent, and it means a vault can never drift into a state
+    # where some names have a shape and others that were saved alongside them
+    # do not. Gated on the vault's style, so upgrading a pre-2.0 vault records
+    # nothing and its files stay byte-identical until a human retypes it.
+    if placeholder_style() == STYLE_TYPED:
+        record_shapes({n: infer_shape(v) for n, v in (secrets or {}).items()
+                       if isinstance(v, str)})
 
 
 def _write_body(
@@ -2380,6 +2480,10 @@ def create_v2_vault(
     )
     _atomic_write_bytes(SECRETS_FILE, envelope)
     _write_format_file(2)
+    # A vault created on 2.0 records shapes from its first secret. Only a
+    # vault that predates this file stays opaque, which is what makes an
+    # upgrade leave every existing .env byte-identical.
+    set_placeholder_style(STYLE_TYPED)
 
     return (
         crypto.format_recovery_key(bytes(recovery_raw))

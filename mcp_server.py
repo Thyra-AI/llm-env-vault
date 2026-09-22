@@ -283,6 +283,24 @@ def _vault_status_core() -> dict:
     if holding:
         result["targets_holding_non_placeholders"] = holding
 
+    # Whether placeholders carry a type, and which variables do not yet. A
+    # vault made before typed placeholders existed stays in the old format
+    # until a human runs retype_placeholders -- upgrading never rewrites
+    # anybody's .env on its own -- so this is how that state is visible
+    # rather than something the user has to already know to ask about.
+    shapes_now = store.load_shapes()
+    result["placeholder_style"] = store.placeholder_style()
+    managed_names = {n for names in targets.values() for n in names}
+    untyped = sorted(n for n in managed_names
+                     if shapes_now.get(n, store.SHAPE_STR) == store.SHAPE_STR)
+    if untyped and result["placeholder_style"] != store.STYLE_TYPED:
+        result["untyped_vars"] = untyped
+        result["untyped_note"] = (
+            f"{len(untyped)} variable(s) still use the untyped `\"value N\"` placeholder, "
+            f"which a typed settings loader (pydantic-settings, django-environ) cannot "
+            f"parse from a placeholder-only .env. Call retype_placeholders to fix that; "
+            f"it needs the master password and rewrites the registered files.")
+
     # Non-secret recovery-slot metadata so the agent can surface "you have no
     # recovery slot set up" without ever touching private key material.
     # vault_id is deliberately excluded: it is a random internal identifier that
@@ -977,6 +995,84 @@ def resync_targets() -> dict:
     already look like one of this tool's own placeholders; a variable
     removed from the vault gets its line commented out, not deleted."""
     return _resync_targets_impl()
+
+
+def _retype_placeholders_impl(only_vars: Optional[list] = None) -> dict:
+    index = store.load_index()
+    if not index:
+        return {"applied": False, "message": "This vault has no variables yet."}
+    shapes_before = store.load_shapes()
+    if only_vars is not None:
+        if not isinstance(only_vars, list) or not all(isinstance(v, str) for v in only_vars):
+            return {"error": "only_vars must be a list of variable-name strings."}
+        unknown = sorted(set(only_vars) - set(index))
+        if unknown:
+            return {"error": f"not in this vault: {', '.join(unknown)}"}
+        names = sorted(set(only_vars))
+    else:
+        names = sorted(index)
+    outcome = gui.retype_placeholders_dialog(names)
+    if not outcome["approved"]:
+        if outcome["partial_failure"]:
+            return {"applied": False, "error": outcome["partial_failure"]}
+        return {"applied": False, "message": "Denied by user."}
+    # `retyped` is what a human would SEE change in their files. A value with
+    # no shape to preserve -- an opaque string, a password -- keeps the
+    # legacy `"value N"` because there is nothing better to render, so
+    # listing it as retyped would overstate what happened.
+    result = {
+        "applied": True,
+        "retyped": {n: s for n, s in outcome["retyped"].items()
+                    if s != store.SHAPE_STR and shapes_before.get(n) != s},
+        "left_opaque": sorted(n for n, s in outcome["retyped"].items()
+                              if s == store.SHAPE_STR),
+        "already_typed": sorted(n for n, s in outcome["retyped"].items()
+                                if s != store.SHAPE_STR and shapes_before.get(n) == s),
+        "placeholder_style": store.placeholder_style(),
+    }
+    if outcome["conflicts"]:
+        result["conflicts"] = outcome["conflicts"]
+        result["conflict_note"] = (
+            "These lines were left exactly as they are because they do not hold one of "
+            "this tool's own placeholders -- a real value may have been hand-edited back "
+            "in. Look at each one; nothing was overwritten.")
+    if outcome["partial_failure"]:
+        result["warning"] = outcome["partial_failure"]
+    return result
+
+
+@mcp.tool()
+def retype_placeholders(only_vars: Optional[list[str]] = None) -> dict:
+    """Give this vault's placeholders a TYPE, so a placeholder-only .env can
+    be parsed by the app that reads it.
+
+    `SMTP_PORT="value 17"` is not an int and `SMTP_USE_SSL="value 38"` is not
+    a bool, so a protected project cannot run a test suite that loads .env
+    with a typed settings library -- pydantic-settings, django-environ,
+    Spring -- even with this tool not involved in the run at all. After
+    retyping, those lines read `SMTP_PORT=17` and `SMTP_USE_SSL=false` and
+    parse cleanly, while still carrying no real value.
+
+    Opens a password dialog: a value's type can only be read from the real
+    value. The dialog lists every line exactly as it will end up, and says
+    what this discloses -- the TYPE of each value, and a URL's scheme, to
+    anything that can read the file, including you. Never the content: a
+    bool always renders `false` and a bit always `0`, whatever the real one
+    is.
+
+    Applies to the whole vault, or to `only_vars`. Registered target files
+    are rewritten to match, and a line that does NOT currently hold one of
+    our own placeholders is reported in `conflicts` and left untouched.
+    Retyping changes the bytes of every managed file, so any trusted
+    docker/compose command drift-hashing one of them is revoked and the
+    human re-approves it once -- that is the trust feature working, not a
+    fault.
+
+    A vault created on 2.0 is typed from its first secret and never needs
+    this. It exists for vaults made before typed placeholders existed, which
+    stay in the old format until you run it -- upgrading must not rewrite
+    anybody's .env on its own."""
+    return _with_swap_recovery(lambda: _retype_placeholders_impl(only_vars))
 
 
 def _change_password_impl() -> dict:

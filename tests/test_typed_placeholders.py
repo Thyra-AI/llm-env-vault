@@ -267,11 +267,40 @@ def test_resync_rewrites_a_drifted_typed_line_and_leaves_a_real_value_alone() ->
         assert "ADMIN_EMAIL" in conflicts
 
 
-def test_resync_is_idempotent_on_a_typed_file() -> None:
+def test_resync_is_idempotent_and_the_header_is_written_once() -> None:
+    """The first resync of a typed file adds the header; every later one
+    must be a byte-for-byte no-op, or a file in git churns on every call."""
     with typed_workspace() as (_project, env_path, _shapes):
-        before = env_path.read_bytes()
         store.sync_target_file(env_path, dict(TYPED_INDEX), sorted(TYPED_SECRETS))
-        assert env_path.read_bytes() == before
+        first = env_path.read_bytes()
+        assert first.startswith(store.MANAGED_HEADER.encode("utf-8"))
+        for _ in range(3):
+            store.sync_target_file(env_path, dict(TYPED_INDEX), sorted(TYPED_SECRETS))
+        assert env_path.read_bytes() == first
+        assert first.count(store.MANAGED_HEADER_PREFIX.encode("utf-8")) == 1
+
+
+def test_an_opaque_vault_gets_no_header_so_upgrading_touches_nothing() -> None:
+    with typed_workspace(record=False) as (_project, env_path, _shapes):
+        store.set_placeholder_style(store.STYLE_OPAQUE)
+        env_path.write_bytes(b'A="value 1"\n')
+        store.add_target(str(env_path), ["A"])
+        store.sync_target_file(env_path, {"A": 1}, ["A"])
+        assert env_path.read_bytes() == b'A="value 1"\n'
+
+
+def test_a_missing_managed_line_is_appended_in_the_right_form() -> None:
+    """The eighth rendering site: a managed name with no line at all gets
+    one appended. It went through a hardcoded "value N" until 2.0, which on
+    a typed vault would have written a line its own loader cannot parse."""
+    with typed_workspace() as (_project, env_path, _shapes):
+        text = "".join(line + "\n" for line in env_path.read_text(encoding="utf-8").splitlines()
+                       if not line.startswith("SMTP_PORT="))
+        env_path.write_text(text, encoding="utf-8")
+        store.sync_target_file(env_path, dict(TYPED_INDEX), sorted(TYPED_SECRETS))
+        after = env_path.read_text(encoding="utf-8")
+        assert "SMTP_PORT=1\n" in after, after
+        assert '"value 1"' not in after
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +334,191 @@ def test_legacy_recovery_writes_typed_placeholders_not_the_old_form() -> None:
         assert "SMTP_PORT=1\n" in after and "SMTP_USE_SSL=false\n" in after
         assert "placeholder-4@example.invalid" in after
         assert "2525" not in after and "ops@example.com" not in after
+
+
+# ---------------------------------------------------------------------------
+# Numbering: a freed number is never handed out again
+# ---------------------------------------------------------------------------
+
+def test_a_freed_placeholder_number_is_never_reused() -> None:
+    """The only way a placeholder already written into a project file can
+    come to mean a DIFFERENT variable. For a typed placeholder that drift is
+    unrecoverable -- `SMTP_PORT=17` where 17 is now someone else's number
+    cannot be told from a real port -- so the number is retired instead."""
+    with typed_workspace() as (_project, _env_path, _shapes):
+        index = dict(TYPED_INDEX)
+        store.save_index(index)
+        assert store.next_placeholder(index) == 6
+        del index["SMTP_USE_SSL"]          # number 2 is now free
+        store.save_index(index)
+        assert store.next_placeholder(index) == 6, "a freed number came back"
+        index["BRAND_NEW"] = store.next_placeholder(index)
+        store.save_index(index)
+        assert index["BRAND_NEW"] == 6
+        assert store.next_placeholder(index) == 7
+
+
+def test_the_high_water_mark_survives_emptying_the_vault() -> None:
+    with typed_workspace() as (_project, _env_path, _shapes):
+        store.save_index(dict(TYPED_INDEX))
+        store.save_index({})
+        assert store.next_placeholder({}) == 6, "numbering restarted from 1"
+
+
+def test_a_cancelled_dialog_burns_no_number() -> None:
+    """next_placeholder is a question, not a reservation: only save_index
+    moves the mark, so a human who cancels leaves no gap behind."""
+    with typed_workspace() as (_project, _env_path, _shapes):
+        store.save_index(dict(TYPED_INDEX))
+        for _ in range(5):
+            assert store.next_placeholder(dict(TYPED_INDEX)) == 6
+
+
+# ---------------------------------------------------------------------------
+# Style: an upgrade must not rewrite anybody's .env
+# ---------------------------------------------------------------------------
+
+def test_a_new_vault_is_typed_and_records_shapes_as_secrets_are_saved() -> None:
+    with typed_workspace(record=False) as (_project, _env_path, _shapes):
+        assert store.placeholder_style() == store.STYLE_TYPED
+        # typed_workspace's save_secrets already recorded them.
+        assert store.load_shapes()["SMTP_PORT"] == "int"
+        store.save_secrets(TEST_PASSWORD, dict(TYPED_SECRETS, NEW_FLAG="true"))
+        assert store.load_shapes()["NEW_FLAG"] == "bool"
+
+
+def test_an_opaque_vault_records_nothing_when_secrets_are_saved() -> None:
+    """The zero-touch promise: a vault that predates typed placeholders sees
+    no change at all until a human asks for one."""
+    with typed_workspace(record=False) as (_project, _env_path, _shapes):
+        store.set_placeholder_style(store.STYLE_OPAQUE)
+        store._save_shape_doc({"shapes": {}, "high_water": 9, "style": store.STYLE_OPAQUE})
+        store.save_secrets(TEST_PASSWORD, dict(TYPED_SECRETS))
+        assert store.load_shapes() == {}
+        assert store.placeholder_for("SMTP_PORT", TYPED_INDEX) == '"value 1"'
+
+
+def test_the_shape_doc_reads_the_earlier_bare_map_format() -> None:
+    """A vault written by the first 2.0 build has a plain {name: shape}
+    file with no wrapper. It must still load."""
+    with typed_workspace() as (_project, _env_path, _shapes):
+        store._shapes_path().write_text(json.dumps({"SMTP_PORT": "int"}), encoding="utf-8")
+        assert store.load_shapes() == {"SMTP_PORT": "int"}
+        assert store.placeholder_style() == store.STYLE_OPAQUE   # absent -> opaque
+        assert store.next_placeholder({}) == 1                   # absent -> 0
+
+
+# ---------------------------------------------------------------------------
+# retype_placeholders
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def stub_retype_dialog(approve=True):
+    """Runs the real recording and rewriting the dialog would do, without a
+    window -- so the tool's contract is tested, not a mock of it."""
+    original = gui.retype_placeholders_dialog
+    seen = {}
+
+    def fake(names):
+        seen["names"] = list(names)
+        if not approve:
+            return {"approved": False, "retyped": {}, "conflicts": {}, "partial_failure": None}
+        secrets = store.load_secrets(TEST_PASSWORD)
+        plan = {n: store.infer_shape(secrets[n]) for n in names if n in secrets}
+        store.record_shapes(plan)
+        store.set_placeholder_style(store.STYLE_TYPED)
+        conflicts = {}
+        index_now, shapes_now = store.load_index(), store.load_shapes()
+        for path_str, names_for_path in store.load_targets().items():
+            got = store.sync_target_file(Path(path_str), index_now, names_for_path,
+                                         shapes=shapes_now)
+            if got:
+                conflicts[path_str] = got
+        return {"approved": True, "retyped": plan, "conflicts": conflicts,
+                "partial_failure": None}
+
+    gui.retype_placeholders_dialog = fake
+    try:
+        yield seen
+    finally:
+        gui.retype_placeholders_dialog = original
+
+
+def test_retype_turns_an_opaque_vault_into_a_parseable_one() -> None:
+    """The whole point, end to end: before, the file cannot be loaded by a
+    typed settings library; after, it can, and still holds no real value."""
+    with typed_workspace(record=False) as (_project, env_path, _shapes):
+        store._save_shape_doc({"shapes": {}, "high_water": 5, "style": store.STYLE_OPAQUE})
+        env_path.write_bytes(b"".join(
+            f'{n}="value {TYPED_INDEX[n]}"\n'.encode("utf-8") for n in sorted(TYPED_SECRETS)))
+        with stub_retype_dialog():
+            result = mcp_server._retype_placeholders_impl()
+        assert result["applied"] is True
+        assert result["retyped"]["SMTP_PORT"] == "int"
+        assert result["placeholder_style"] == store.STYLE_TYPED
+        after = env_path.read_text(encoding="utf-8")
+        assert "SMTP_PORT=1\n" in after and "SMTP_USE_SSL=false\n" in after
+        assert "postgres://placeholder-3.invalid" in after
+        assert "placeholder-4@example.invalid" in after
+        # API_TOKEN is an opaque string: there is no shape to preserve, so it
+        # keeps the legacy form. Retyping is not "everything changes".
+        assert store.load_shapes()["API_TOKEN"] == store.SHAPE_STR
+        assert 'API_TOKEN="value 5"' in after
+        assert "API_TOKEN" not in result["retyped"]
+        assert result["left_opaque"] == ["API_TOKEN"]
+        for real in TYPED_SECRETS.values():
+            assert real not in after
+
+
+def test_retype_can_be_scoped_and_rejects_unknown_names() -> None:
+    with typed_workspace(record=False) as (_project, _env_path, _shapes):
+        store._save_shape_doc({"shapes": {}, "high_water": 5, "style": store.STYLE_OPAQUE})
+        bad = mcp_server._retype_placeholders_impl(["NOPE"])
+        assert "not in this vault" in bad["error"]
+        with stub_retype_dialog() as seen:
+            result = mcp_server._retype_placeholders_impl(["SMTP_PORT"])
+        assert seen["names"] == ["SMTP_PORT"]
+        assert set(result["retyped"]) == {"SMTP_PORT"}
+        assert "SMTP_USE_SSL" not in store.load_shapes()
+
+
+def test_retype_denied_changes_nothing() -> None:
+    with typed_workspace(record=False) as (_project, env_path, _shapes):
+        store._save_shape_doc({"shapes": {}, "high_water": 5, "style": store.STYLE_OPAQUE})
+        before = env_path.read_bytes()
+        with stub_retype_dialog(approve=False):
+            result = mcp_server._retype_placeholders_impl()
+        assert result["applied"] is False and result["message"] == "Denied by user."
+        assert env_path.read_bytes() == before
+        assert store.load_shapes() == {}
+        assert store.placeholder_style() == store.STYLE_OPAQUE
+
+
+def test_retype_reports_a_hand_edited_line_instead_of_overwriting_it() -> None:
+    with typed_workspace(record=False) as (_project, env_path, _shapes):
+        store._save_shape_doc({"shapes": {}, "high_water": 5, "style": store.STYLE_OPAQUE})
+        text = "".join(f'{n}="value {TYPED_INDEX[n]}"\n' for n in sorted(TYPED_SECRETS))
+        text = text.replace('ADMIN_EMAIL="value 4"', "ADMIN_EMAIL=real.person@corp.com")
+        env_path.write_text(text, encoding="utf-8")
+        with stub_retype_dialog():
+            result = mcp_server._retype_placeholders_impl()
+        assert result["applied"] is True
+        assert "ADMIN_EMAIL" in result["conflicts"][str(env_path)]
+        assert "real.person@corp.com" in env_path.read_text(encoding="utf-8")
+
+
+def test_vault_status_surfaces_an_untyped_vault() -> None:
+    with typed_workspace(record=False) as (_project, _env_path, _shapes):
+        store._save_shape_doc({"shapes": {}, "high_water": 5, "style": store.STYLE_OPAQUE})
+        status = mcp_server._vault_status_impl()
+        assert status["placeholder_style"] == store.STYLE_OPAQUE
+        assert set(status["untyped_vars"]) == set(TYPED_SECRETS)
+        assert "retype_placeholders" in status["untyped_note"]
+        with stub_retype_dialog():
+            mcp_server._retype_placeholders_impl()
+        status = mcp_server._vault_status_impl()
+        assert status["placeholder_style"] == store.STYLE_TYPED
+        assert "untyped_vars" not in status
 
 
 if __name__ == "__main__":

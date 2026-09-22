@@ -8,6 +8,7 @@ files.json
 vault.enc.lock
 files.json.lock
 target_styles.json
+placeholder_shapes.json
 swap.journal.json
 swap.journal.lock
 vault_index.json

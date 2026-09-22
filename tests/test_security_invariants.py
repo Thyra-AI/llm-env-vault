@@ -273,7 +273,8 @@ def test_agent_instructions_are_honest_about_redaction_limits() -> None:
 EXPECTED_TOOLS = {
     "add_secret", "change_password", "decrypt_file", "encrypt_file",
     "install_migrate", "manage_vault", "recover_vault", "remove_secret",
-    "resync_targets", "run_with_env", "sync_llm_env", "vault_status",
+    "resync_targets", "retype_placeholders", "run_with_env", "sync_llm_env",
+    "vault_status",
 }
 
 
