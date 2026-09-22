@@ -729,7 +729,8 @@ def self_test_for_new_file(path: str, timeout: float = 3.0) -> Optional[str]:
     The probe has to live BESIDE THE TARGET, not somewhere tidier like the
     plugin's own data directory. Oplock-with-handle-caching is a property of
     a volume: a mapped drive, exFAT or some virtual mounts do not grant it.
-    Probing C:\ and then promising max_reads for a project on another volume
+    Probing the system drive and then promising max_reads for a project on
+    another volume
     would pass the test and silently fail the feature -- exactly what the
     test exists to prevent. FILE_FLAG_DELETE_ON_CLOSE, which would remove the
     probe even on TerminateProcess, does not work either: self_test's last
@@ -766,7 +767,8 @@ def self_test_for_new_file(path: str, timeout: float = 3.0) -> Optional[str]:
     # the same target delete the first one's probe. Holding the file is not
     # the protection it looks like: the probe is closed after it is written
     # and only re-opened by self_test, so there is a real unprotected gap in
-    # Age closes it, with an hour's margin over any plausible self_test.
+    # between. Age closes it, with an hour's margin over any plausible
+    # self_test.
     cutoff = time.time() - _STALE_PROBE_SECONDS
     for pattern in (f".{target.name}.*.oplock-probe",   # this shape
                     f".{target.name}.oplock-probe"):    # the fixed name 2.0.0 shipped

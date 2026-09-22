@@ -547,3 +547,49 @@ def test_an_ordinary_local_materialize_path_is_still_accepted() -> None:
     with workspace() as (project, _env_path):
         resolved = mcp_server._resolve_materialize_path(".env.runtime", str(project))
         assert resolved == (project / ".env.runtime").resolve()
+
+
+def test_a_chained_junction_to_a_share_is_refused() -> None:
+    """One hop of indirection is not enough. `A -> C:\\local\\B` where B is
+    itself a junction to `\\\\share` looks innocent when only A's own target
+    is inspected, and the component walk never visits B because it only ever
+    steps through components of the ORIGINAL path. Simulated rather than
+    built from real junctions, so it runs without the privileges those need
+    and pins the logic rather than the filesystem."""
+    if not IS_WIN:
+        return _skip("reparse points are a Windows concept")
+
+    class _St:
+        def __init__(self, tag):
+            self.st_reparse_tag = tag
+
+    # proj/link -> C:/staging/hop1 -> C:/staging/hop2 -> \\evil-host\share
+    links = {
+        r"C:\proj\link": r"C:\staging\hop1",
+        r"C:\staging\hop1": r"C:\staging\hop2",
+        r"C:\staging\hop2": r"\\evil-host\share\x",
+    }
+    real_lstat, real_readlink = mcp_server.os.lstat, mcp_server.os.readlink
+
+    def fake_lstat(p):
+        return _St(0xA000000C if str(p) in links else 0)
+
+    def fake_readlink(p):
+        return links[str(p)]
+
+    mcp_server.os.lstat, mcp_server.os.readlink = fake_lstat, fake_readlink
+    try:
+        assert mcp_server._reparse_points_to_share(r"C:\proj\link\.env.runtime") is True
+        # And the chain ending somewhere local is still allowed.
+        links[r"C:\staging\hop2"] = r"C:\staging\final"
+        assert mcp_server._reparse_points_to_share(r"C:\proj\link\.env.runtime") is False
+        # A loop is refused rather than followed forever.
+        links[r"C:\staging\hop2"] = r"C:\proj\link"
+        assert mcp_server._reparse_points_to_share(r"C:\proj\link\.env.runtime") is True
+    finally:
+        mcp_server.os.lstat, mcp_server.os.readlink = real_lstat, real_readlink
+
+
+def test_a_plain_local_path_has_no_reparse_points() -> None:
+    with workspace() as (project, _env_path):
+        assert mcp_server._reparse_points_to_share(str(project / ".env.runtime")) is False

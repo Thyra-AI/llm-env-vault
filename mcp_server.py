@@ -1612,6 +1612,12 @@ def _drive_is_remote(path_str: str) -> bool:
         return False
 
 
+# How many junction/symlink hops to follow before refusing. A legitimate
+# chain is one or two; anything longer is a loop or an attempt to hide
+# the destination.
+_MAX_LINK_HOPS = 16
+
+
 def _reparse_points_to_share(path_str: str) -> bool:
     """Walk the UNRESOLVED path with lstat; a junction or symlink whose
     target is UNC would make Path.resolve() open the share before the
@@ -1626,13 +1632,35 @@ def _reparse_points_to_share(path_str: str) -> bool:
             st = os.lstat(probe)
         except OSError:
             return False
-        if getattr(st, "st_reparse_tag", 0):
+        if not getattr(st, "st_reparse_tag", 0):
+            continue
+        # Follow the CHAIN, not just the first hop. A junction whose target
+        # is a plain local path that is ITSELF a junction to a share looks
+        # innocent one link at a time, and the walk above never examines the
+        # second link because it only ever visits components of the original
+        # path. Every step here is an lstat/readlink on a local path, so
+        # following costs nothing on the wire -- which is the whole point,
+        # since resolve() is what we are trying not to reach.
+        hop = probe
+        for _ in range(_MAX_LINK_HOPS):
             try:
-                target = os.readlink(probe)
+                target = os.readlink(hop)
             except OSError:
-                return True
+                return True          # cannot inspect it -- refuse rather than guess
             if store._looks_like_unc(target) or "UNC" in target.upper()[:8]:
                 return True
+            nxt = Path(target)
+            if not nxt.is_absolute():
+                nxt = hop.parent / nxt
+            try:
+                st_next = os.lstat(nxt)
+            except OSError:
+                break                # dangling link: resolve() cannot reach a share through it
+            if not getattr(st_next, "st_reparse_tag", 0):
+                break                # a plain local path -- the chain ends here
+            hop = nxt
+        else:
+            return True              # longer than any legitimate chain, or a loop
     return False
 
 

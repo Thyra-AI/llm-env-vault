@@ -7,6 +7,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.0.5] — 2026-09-23
+
+### Fixed
+
+- **The network-path guard followed only one hop of indirection.** `_reparse_points_to_share`
+  read each reparse point's own target once and checked that single string, so a chain --
+  `proj/link` to a plain local path, which is *itself* a junction to `\share` -- looked
+  innocent at every step: the first link's target is local, and the component walk never visits
+  the second link, because it only ever steps through components of the original path. The
+  chain is now followed to its end (bounded; a loop or an implausibly long chain is refused).
+  Every step is an `lstat`/`readlink` on a local path, so following costs nothing on the wire,
+  which is the point -- `resolve()` is what the guard exists to avoid reaching.
+
+  Pre-existing since 1.6.1, but it only started mattering in 2.0.4, which gave the helper a new
+  caller in `materialize`.
+
+- A comment left as a broken sentence by 2.0.4's edit, and an invalid escape sequence in a
+  docstring added the same day (`DeprecationWarning` on import).
+
 ## [2.0.4] — 2026-09-23
 
 ### Added
