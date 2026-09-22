@@ -7,6 +7,142 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.0.0] — 2026-09-22
+
+`run_with_env(swap=)` is removed. It wrote real secret values into the project's own registered
+`.env` for the lifetime of a command — the one thing this tool exists to prevent — and it was
+refused for `git` commands, which is the most common trigger there is. Typed placeholders
+replace it for the cases that never needed a real value, and `materialize` keeps the ones that
+do.
+
+**Upgrading rewrites none of your files.** A vault created before 2.0 keeps the untyped
+`"value N"` placeholders and produces byte-identical output until you run `retype_placeholders`
+yourself. The cost of that choice, stated plainly: an existing project stays unparseable by a
+typed settings loader until you run it once.
+
+### Removed
+
+- **`run_with_env(swap=)`**, and with it `max_reads` for swap targets, the swap section of the
+  unlock dialog, the swap parameters of the trust signature, and the git refusal (there is no
+  longer a swap for git to be refused).
+
+  Why, in short: it suspended the invariant against precisely the party the invariant protects
+  against — the agent that calls the tool is the agent that can then read the file, which
+  1.7.0's own addendum conceded in its opening paragraph. It did so at a path far more likely to
+  be committed, synced or open in an editor than a materialize target. It never stabilised:
+  four releases in eight days, several of the fixes found only by adversarial review rather than
+  by the suite. And it was structurally unreachable for its most common trigger, a pre-push hook
+  whose tests read `.env`, because a swap is refused for `git`.
+
+  See `docs/security-posture-2.0.0.md` §3, and the status banner on
+  `docs/env-consumption-research.md`.
+
+- **Not supported any more:** a loader that lets the file win (`load_dotenv(override=True)`,
+  `godotenv.Overload`, `dotenvx --overload`, tox `set_env = file|.env`, `direnv`), a shell that
+  sources `.env`, and a reader hard-wired to the canonical `.env` (Compose `env_file: .env`, an
+  IDE's `envFile`). These need the real value in that exact file, and 2.0 declines to put it
+  there. Point the tool at a `materialize` path if it accepts one.
+
+### Added
+
+- **Typed ("shape-preserving") placeholders.** `SMTP_PORT="value 17"` is not an `int` and
+  `SMTP_USE_SSL="value 38"` is not a `bool`, so a placeholder-only `.env` could not be LOADED by
+  pydantic-settings, django-environ or Spring — with the vault not involved in the run at all.
+  A typed placeholder preserves the shape and nothing else, so the file parses:
+
+  | Real value | Placeholder for index N |
+  |---|---|
+  | an integer | `N` |
+  | `0` / `1` | `0` — never the real bit |
+  | true/false/yes/no/on/off | `false` — never the real truthiness |
+  | a float | `N.0` |
+  | `<scheme>://…` | `<scheme>://placeholder-N.invalid` |
+  | an email address | `placeholder-N@example.invalid` |
+  | `[…]` / `{…}` | `[]` / `{}` |
+  | anything else | `"value N"` — an opaque string has no shape to preserve |
+
+  This closes mechanism F and mechanism B-when-scrubbed from
+  `docs/env-consumption-research.md` — the latter being the case that kept failing: a test
+  harness that builds its child's environment from an allowlist, so nothing injected survives
+  and the file is the only source.
+
+  It discloses the TYPE of each value, and a URL's scheme. Never content.
+
+- **`retype_placeholders(only_vars=None)`.** Password-gated, because a value's type can only be
+  read from the real value. Lists every line exactly as it will end up, states what it
+  discloses, records the shapes and rewrites the registered files. A line that does not
+  currently hold one of our placeholders is reported under `conflicts` and left untouched.
+
+- **`placeholder_shapes.json`** in the vault directory: each variable's shape, the highest
+  placeholder number ever issued, and whether this vault is typed. Plaintext and agent-writable
+  like the index, validated on read, gitignored. Never pruned when a secret is removed — the
+  entry is a tombstone, without which a typed placeholder left behind for a departed name is
+  indistinguishable from a real value.
+
+- **A header line in managed files** of a typed vault (`# Managed by llm-env-vault -- the values
+  below are PLACEHOLDERS, not real secrets.`). `SMTP_PORT=17` reads like real configuration
+  where `"value 17"` announced itself. Whole-line only: `docker run --env-file` treats
+  everything after `=` as the value.
+
+- **`docs/security-posture-2.0.0.md`** — the invariant, its two remaining exceptions, the
+  ceiling of the threat model, and what a reviewer should check first.
+
+### Changed
+
+- **Placeholder numbers are never reused.** A freed number handed to a different variable is the
+  only way a placeholder already written into a file can come to mean something else, and for a
+  typed one that drift is unrecoverable — `SMTP_PORT=17` where 17 is now someone else's number
+  cannot be told from a real port. A high-water mark retires numbers instead. `next_placeholder`
+  stays a question rather than a reservation, so a dialog you cancel burns nothing.
+
+- **`vault_status`** reports `placeholder_style` and `untyped_vars`, and renames
+  `swaps_in_progress` to `legacy_swap_live`.
+
+- **Placeholder detection is index-aware and exact.** `PLACEHOLDER_VALUE_RE` is unchanged — a
+  pattern loose enough to match `17` cannot tell a placeholder from a real port. A line is one
+  of ours if it matches the legacy regex, or if it equals the one string this name's number and
+  shape render to. Stricter than 1.x for a typed name, identical for an untyped one.
+
+- **`retype_placeholders` revokes trusted commands** that drift-hash a managed file, because
+  retyping changes its bytes. That is the trust feature working, not a fault.
+
+- `store.preview_swap` → `store.placeholder_state` and `store.render_swap_value` →
+  `store.render_value_in_style`. Neither was ever swap-specific: the first is what
+  `vault_status` uses for its journal-independent "which managed lines hold a real value"
+  report, and the second is what keeps a rewrite in the quoting a file's consumers already
+  parse.
+
+### Fixed
+
+- **A managed line that was missing entirely was appended as `"value N"`** regardless of the
+  vault's style, which on a typed vault wrote a line the file's own loader could not parse. It
+  goes through the single renderer now.
+
+- **The test suite wrote vault state into the repository.** Seven suites redirected store's
+  named file globals but not `ROOT`, and `target_styles.json`, `swap.journal.json` and
+  `placeholder_shapes.json` all derive from `ROOT` at call time. A plugin install is a git
+  clone, so a tracked file of that kind would ship one developer's variable names to every user.
+  Fixed at the source by isolating `ROOT`; `placeholder_shapes.json` is gitignored alongside its
+  siblings.
+
+### Deprecated
+
+- **`vault_lib/legacy_swap.py` and `python mcp_server.py --recover`.** Nothing in 2.x writes a
+  journal; these exist only so a crash from 1.6–1.7 can still be cleaned up. Removal in 3.0.
+
+### Upgrading from 1.6–1.7
+
+| You used swap for… | Now |
+|---|---|
+| a test harness that scrubs the child environment; anything that only needs `.env` to *parse* | `retype_placeholders()` once. Nothing at run time. |
+| `docker run --env-file`, Compose `env_file:`, `kubectl --from-env-file` | `materialize=".env.runtime"` with `max_reads=1` (2 for compose) |
+| `load_dotenv(override=True)`, `source .env`, a tool hard-wired to `.env` | Not supported — see Removed |
+
+If a pre-2.0 server crashed with real values swapped into a `.env`, 2.0 still cleans it up: on
+server start, on the next tool call in any session, or with `python mcp_server.py --recover`. A
+pre-2.0 server that is **still running** is left alone and reported as `legacy_swap_live` until
+it exits. With no journal at all, re-run `/llm-env-vault:protect`.
+
 ## [1.7.1] — 2026-09-22
 
 No behaviour change. Test-only fix; released so existing installs move off the 1.7.0 tree,
