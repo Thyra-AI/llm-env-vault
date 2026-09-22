@@ -7,6 +7,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.0.3] — 2026-09-22
+
+Documentation and a latent coupling in the same function 2.0.1 and 2.0.2 fixed. No behaviour
+change for any current caller.
+
+### Fixed
+
+- **The probe staleness threshold is derived from the call's `timeout`, not assumed.** 2.0.2
+  used a flat 60 seconds, on the stated assumption that "a live probe's whole life is bounded by
+  self_test's timeout, which is seconds". Nothing enforced it: `self_test` runs for roughly
+  2*timeout plus overhead, so the first caller to pass a timeout above ~25s would have had its
+  own live probe swept. No caller does today -- the default is 3s -- so this was latent. The
+  window is now `max(60s, timeout * 4)`.
+- `self_test_for_new_file`'s docstring said an older probe "is swept first" without the age
+  qualification, which is the exact misconception the inline comment below it exists to correct.
+
 ## [2.0.2] — 2026-09-22
 
 Fixes a regression in 2.0.1's own fix, found by the push-time review of 2.0.1.

@@ -472,4 +472,11 @@ def test_the_sweep_never_removes_another_servers_live_probe() -> None:
         live.write_bytes(b"# llm-env-vault oplock probe\n")   # another server, just now
         assert singleview.self_test_for_new_file(str(target)) is None
         assert live.exists(), "a concurrent server's live probe was swept"
+        # The threshold follows this call's timeout rather than assuming it.
+        # self_test runs for roughly 2*timeout, so a long one keeps its probe
+        # alive past a fixed 60s window and the sweep has to widen with it.
+        backdated = time.time() - singleview._STALE_PROBE_SECONDS - 5
+        os.utime(live, (backdated, backdated))
+        assert singleview.self_test_for_new_file(str(target), timeout=60.0) is None
+        assert live.exists(), "a long timeout did not widen the staleness window"
         live.unlink()

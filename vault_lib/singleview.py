@@ -723,8 +723,10 @@ def self_test_for_new_file(path: str, timeout: float = 3.0) -> Optional[str]:
     max_reads is refused before a human is asked to approve it rather than
     after.
 
-    The probe name carries random bytes, and any older one beside the target
-    is swept first. A fixed name would be a trap: the probe is removed in a
+    The probe name carries random bytes, and one beside the target is swept
+    first *if it is old enough to be certainly dead* -- see the sweep below;
+    a fresh one may belong to another server running this same check right
+    now. A fixed name would be a trap: the probe is removed in a
     `finally`, but a process killed between creating it and reaching that
     `finally` leaves the file behind, and then every later max_reads run
     against the same target hits the exclusive-create and is refused --
@@ -746,9 +748,12 @@ def self_test_for_new_file(path: str, timeout: float = 3.0) -> Optional[str]:
     # the same target delete the first one's probe. Holding the file is not
     # the protection it looks like: the probe is closed after it is written
     # and only re-opened by self_test, so there is a real unprotected gap in
-    # between. Age closes it -- a live probe's whole life is bounded by
-    # self_test's timeout, which is seconds.
-    cutoff = time.time() - _STALE_PROBE_SECONDS
+    # between. Age closes it -- and the threshold is DERIVED from this call's
+    # timeout rather than assumed, because self_test runs for roughly
+    # 2*timeout plus overhead. A bare constant would silently become wrong
+    # the first time anyone passed a larger timeout, and the failure would be
+    # this sweep eating a live probe.
+    cutoff = time.time() - max(_STALE_PROBE_SECONDS, timeout * 4.0)
     for pattern in (f".{target.name}.*.oplock-probe",   # this shape
                     f".{target.name}.oplock-probe"):    # the fixed name 2.0.0 shipped
         try:
