@@ -1,5 +1,10 @@
 # Plan: 1.6.1 hardening — closing the super-thinker's findings on the 1.6.0 swap
 
+> **Superseded by 2.0.0.** This is the hardening plan for `run_with_env(swap=)`, which is
+> retired. Kept because the review findings behind it are the clearest record of why: four
+> releases of fixes in eight days, several found only by adversarial review rather than by
+> the suite.
+
 Status: WP1–WP6 SHIPPED in 1.6.1; WP8 (single-view) SHIPPED in 1.7.0, Windows-only, with pipe
 mode and background+swap deferred per the pre-implementation review. Deviations from
 the text below are recorded in CHANGELOG 1.6.1. Source: the hostile second read of `docs/security-posture-1.6.0.md`

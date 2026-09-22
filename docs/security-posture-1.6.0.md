@@ -1,5 +1,13 @@
 # Security posture after 1.6.0 / 1.6.1 / 1.7.0 — what changed, what is new, what to watch
 
+> **Superseded by 2.0.0.** This documents the posture of 1.6.0-1.7.1, whose central new
+> feature -- `run_with_env(swap=)` -- is retired. Its own 1.7.0 addendum states the ceiling
+> that decided it: an agent with filesystem read access can read a swapped file while the
+> command runs, and no software under the same OS account prevents it. 2.0.0 has one
+> standing exception to the invariant (`materialize`, a fresh path, never the project's own
+> file) rather than four. Kept as the record of what was built and why it was not enough;
+> read docs/security-posture-2.0.0.md for what is true now.
+
 This is a maintainer-facing map of the system as it stands after the in-place swap landed
 (1.6.0, `3dabd7e`) and its hardening (1.6.1). It is organised around one question: **where can
 a real secret value be, who can reach it there, and what puts it back.** Everything the swap

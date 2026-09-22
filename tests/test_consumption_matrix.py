@@ -23,6 +23,7 @@ test breaks here before a user finds out.
 Runs under pytest or standalone (`python tests/test_consumption_matrix.py`).
 """
 import contextlib
+import os
 import shutil
 import subprocess
 import sys
@@ -242,6 +243,149 @@ def test_E_materialize_serves_literal_env_file_readers_unquoted() -> None:
 # Cross-cutting: the file is the same before and after, and trust survives
 # ---------------------------------------------------------------------------
 
+
+# ---------------------------------------------------------------------------
+# F. Typed parsing -- the case this release exists for
+# ---------------------------------------------------------------------------
+# A placeholder-only .env used to fail to LOAD, with the vault not involved in
+# the run at all: `SMTP_PORT="value 2"` is not an int and
+# `SMTP_USE_SSL="value 5"` is not a bool, so pydantic-settings raises before
+# the app starts. That is why a protected project could not run its own test
+# suite -- and why `swap=` got built, and then could not be used for the most
+# common trigger, a pre-push hook whose tests spawn children with a scrubbed
+# environment (git commands are refused a swap, correctly).
+#
+# Every test below runs the child with PLAIN subprocess.run and no vault
+# machinery whatsoever. That is the point: the fix has to hold when this tool
+# is not in the room.
+
+TYPED_SECRETS = {
+    "API_TOKEN": "tok-matrix-abcdef0123",
+    "SMTP_PORT": "2525",
+    "SMTP_USE_SSL": "true",
+    "DATABASE_URL": "postgres://user:pw@db.internal:5432/app",
+}
+TYPED_INDEX = {"API_TOKEN": 1, "SMTP_PORT": 2, "SMTP_USE_SSL": 3, "DATABASE_URL": 4}
+
+# The settings class that actually broke: types validated at import time.
+SETTINGS_CODE = (
+    "from pydantic_settings import BaseSettings, SettingsConfigDict\n"
+    "class S(BaseSettings):\n"
+    "    model_config = SettingsConfigDict(env_file='.env', extra='ignore')\n"
+    "    api_token: str\n"
+    "    smtp_port: int\n"
+    "    smtp_use_ssl: bool\n"
+    "    database_url: str\n"
+    "s = S()\n"
+    "print('LOADED', s.smtp_port, s.smtp_use_ssl, s.database_url)\n")
+
+
+@contextlib.contextmanager
+def typed_project(typed=True):
+    """A project whose .env holds placeholders only -- typed or legacy."""
+    with tempfile.TemporaryDirectory(prefix="llm_matrix_f_") as tmp:
+        tmp_path = Path(tmp).resolve()
+        originals = _isolate(tmp_path)
+        old_params = crypto.SCRYPT_DEFAULT
+        crypto.SCRYPT_DEFAULT = _FAST_PARAMS
+        _reset_trust()
+        proj = tmp_path / "project"
+        proj.mkdir()
+        env_path = proj / ".env"
+        try:
+            store.create_v2_vault(TEST_PASSWORD)
+            store.save_secrets(TEST_PASSWORD, dict(TYPED_SECRETS))
+            store.save_index(dict(TYPED_INDEX))
+            if not typed:
+                store.set_placeholder_style(store.STYLE_OPAQUE)
+                store._save_shape_doc({"shapes": {}, "high_water": 4,
+                                       "style": store.STYLE_OPAQUE})
+            shapes = store.load_shapes()
+            env_path.write_text(
+                "".join(f"{n}={store.placeholder_for(n, TYPED_INDEX, shapes)}\n"
+                        for n in sorted(TYPED_SECRETS)), encoding="utf-8")
+            store.add_target(str(env_path), sorted(TYPED_SECRETS))
+            yield proj, env_path
+        finally:
+            _reset_trust()
+            crypto.SCRYPT_DEFAULT = old_params
+            for name, value in originals.items():
+                setattr(store, name, value)
+
+
+def _bare_run(proj: Path, code: str, env=None):
+    """No vault, no dialog, no injection -- just the app and its own .env."""
+    return subprocess.run([sys.executable, "-c", code], cwd=str(proj), env=env,
+                          capture_output=True, text=True, timeout=120)
+
+
+def test_F_legacy_placeholders_cannot_be_loaded_at_all() -> None:
+    """The control. Without this failing, the next test proves nothing."""
+    with typed_project(typed=False) as (proj, env_path):
+        assert b'"value 2"' in env_path.read_bytes()
+        r = _bare_run(proj, SETTINGS_CODE)
+        assert r.returncode != 0, r.stdout
+        assert "smtp_port" in r.stderr and "smtp_use_ssl" in r.stderr
+        assert "should be a valid integer" in r.stderr
+        assert "should be a valid boolean" in r.stderr
+
+
+def test_F_typed_placeholders_load_cleanly_with_no_vault_in_the_room() -> None:
+    """Mechanism F, closed. Same settings class, same absent vault, same
+    placeholder-only file -- it just parses now."""
+    with typed_project() as (proj, env_path):
+        body = env_path.read_text(encoding="utf-8")
+        assert "SMTP_PORT=2\n" in body and "SMTP_USE_SSL=false\n" in body
+        assert "postgres://placeholder-4.invalid" in body
+        r = _bare_run(proj, SETTINGS_CODE)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.startswith("LOADED 2 False postgres://placeholder-4.invalid"), r.stdout
+        for real in TYPED_SECRETS.values():
+            assert real not in body and real not in r.stdout
+
+
+def test_F_a_typed_placeholder_file_still_holds_no_real_value() -> None:
+    """The property that makes the above acceptable rather than a leak."""
+    with typed_project() as (proj, env_path):
+        body = env_path.read_bytes()
+        for real in TYPED_SECRETS.values():
+            assert real.encode("utf-8") not in body
+        # The true/false of a bool and the digits of a port are content, and
+        # neither survives: SMTP_USE_SSL is really `true`, the file says false.
+        assert b"SMTP_USE_SSL=false" in body
+        assert b"2525" not in body
+
+
+def test_B_scrubbed_harness_loads_a_typed_placeholder_file() -> None:
+    """The exact shape that kept failing: a test harness builds its child's
+    environment from an allowlist, so nothing injected survives and the file
+    is the only source. Plain injection cannot reach it and swap= is refused
+    for the git command that usually triggers it. Typed placeholders let the
+    child start."""
+    with typed_project() as (proj, _env_path):
+        keep = {k: v for k, v in os.environ.items()
+                if k.upper() in ("PATH", "SYSTEMROOT", "TEMP", "TMP", "PATHEXT",
+                                 "COMSPEC", "HOME", "USERPROFILE", "LANG")}
+        r = _bare_run(proj, SETTINGS_CODE, env=keep)
+        assert r.returncode == 0, r.stderr
+        assert "LOADED" in r.stdout
+        assert "API_TOKEN" not in r.stdout
+
+
+def test_C_D_E_still_need_a_real_file_and_typed_placeholders_do_not_help() -> None:
+    """Stated so nobody mistakes what shipped. A loader that lets the FILE
+    win, a shell that sources it, or a reader that never consults the
+    environment gets a placeholder -- correctly parsed, and still not the
+    secret. materialize= remains the only answer for those."""
+    with typed_project() as (proj, _env_path):
+        override = ("from dotenv import load_dotenv\n"
+                    "import os\n"
+                    "load_dotenv('.env', override=True)\n"
+                    "print(os.environ['SMTP_PORT'])\n")
+        r = _bare_run(proj, override)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "2"          # the placeholder, not 2525
+        assert "2525" not in r.stdout
 
 
 if __name__ == "__main__":

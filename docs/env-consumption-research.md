@@ -1,6 +1,15 @@
 # How programs consume `.env` values — and which of those paths the vault covers
 
-This is the research behind `run_with_env`'s `swap` parameter (1.6.0). It answers one question:
+> **Status: updated for 2.0.0.** This was written (2026-09-15) as the research behind
+> `run_with_env`'s `swap` parameter. That parameter is **retired in 2.0.0** — it wrote real
+> values into the project's own `.env`, which is the one thing the vault exists to prevent, and
+> it was refused for `git` commands, which is the most common trigger there is (a pre-push hook
+> whose tests read `.env`). The mechanism analysis below stands unchanged; what changed is the
+> answer to mechanisms B-when-scrubbed and F, which is now §6's typed placeholders rather than
+> swap. Sections that still describe swap's write path are kept as the record of why it existed
+> and why it was not enough.
+
+It answers one question:
 **for every ordinary way an application or tool obtains a value that lives in a `.env` file,
 does a vault-managed project still work — and if not, why not, and what closes the gap?**
 
@@ -21,23 +30,28 @@ they are recorded so the gap is visible, not so it can be mistaken for a fact.
 Strip away the tool names and there are only six ways a value gets from a `.env` file into a
 running program. Everything in the per-tool tables is an instance of one of these.
 
-| # | Mechanism | Who reads the file | Example | Placeholder-only `.env` + `run_with_env` env injection |
+| # | Mechanism | Who reads the file | Example | Status in 2.0.0 |
 |---|---|---|---|---|
 | **A** | **Inherit the process environment** | nobody — the child reads `os.environ` / `process.env` | `os.environ["DATABASE_URL"]`, `${VAR}` in a compose file, `docker run -e VAR`, Terraform `TF_VAR_x`, AWS/gcloud CLIs | **Works.** This is what `run_with_env` was built for. |
-| **B** | **Load the file, env wins** | the app's loader, at startup, with `override=False` semantics | `load_dotenv()`, pydantic-settings `env_file`, Node `--env-file`, dotenv npm, Vite, Next, Bun, godotenv `Load`, dotenvy `dotenv()`, phpdotenv immutable, `just`, Taskfile, `uv run --env-file` | **Works while the variable is in the injected env** — the loader sees the placeholder in the file, sees the real value already in the environment, and keeps the environment. **Breaks** the moment something scrubs the environment before the loader runs (a test harness building a child env from an allowlist; `env -i`; `sops --pristine`). Then the file is the only source, and the file holds `"value 17"`. |
-| **C** | **Load the file, file wins** | the app's loader, with explicit override | `load_dotenv(override=True)`, `dotenv.config({override:true})`, godotenv `Overload`, dotenvy `dotenv_override()`, Ruby `Dotenv.overload`, `just` `dotenv-override`, `dotenvx --overload`, tox `set_env = file\|.env`, `direnv`'s `dotenv` (always `export`), phpdotenv `createMutable` | **Breaks.** The placeholder in the file overwrites the real value that was injected. |
-| **D** | **Shell-source the file** | the shell itself | `source .env`, `set -a; . .env; set +a`, `export $(grep -v '^#' .env \| xargs)`, `make` `include .env` | **Breaks.** Same as C — the file is executed as assignments and clobbers the environment. |
-| **E** | **Read the file as the *only* source** | a tool that never consults its own environment for these names | `docker run --env-file`, Compose `env_file:`, `kubectl create secret --from-env-file`, VS Code `launch.json` `envFile`, JetBrains EnvFile, `devcontainer.json` `runArgs --env-file` | **Breaks.** Nothing about the process environment reaches the consumer. `materialize` covers the subset of these that accept *any* path (Docker's `--env-file`, Compose's `--env-file`), but not the ones hard-wired to the canonical filename (Compose `env_file: .env`, an IDE's `envFile` setting). |
-| **F** | **Typed parsing of the file** | a settings library that validates types at load time | pydantic-settings `port: int`, django-environ `env.int()`, Spring `.properties` | **Breaks even with no vault involvement at all**: `SMTP_PORT="value 17"` is not an `int`. Deferred — see §6. |
+| **B** | **Load the file, env wins** | the app's loader, at startup, with `override=False` semantics | `load_dotenv()`, pydantic-settings `env_file`, Node `--env-file`, dotenv npm, Vite, Next, Bun, godotenv `Load`, dotenvy `dotenv()`, phpdotenv immutable, `just`, Taskfile, `uv run --env-file` | **Works while the variable is in the injected env** — the loader sees the placeholder in the file, sees the real value already in the environment, and keeps the environment. **Breaks** the moment something scrubs the environment before the loader runs (a test harness building a child env from an allowlist; `env -i`; `sops --pristine`). Then the file is the only source. **Closed in 2.0.0** by typed placeholders (§6): the scrubbed child loads the file and parses it, and the values it gets are placeholders. |
+| **C** | **Load the file, file wins** | the app's loader, with explicit override | `load_dotenv(override=True)`, `dotenv.config({override:true})`, godotenv `Overload`, dotenvy `dotenv_override()`, Ruby `Dotenv.overload`, `just` `dotenv-override`, `dotenvx --overload`, tox `set_env = file\|.env`, `direnv`'s `dotenv` (always `export`), phpdotenv `createMutable` | **Not supported.** The placeholder in the file overwrites the real value that was injected. A typed placeholder parses but is still not the secret. |
+| **D** | **Shell-source the file** | the shell itself | `source .env`, `set -a; . .env; set +a`, `export $(grep -v '^#' .env \| xargs)`, `make` `include .env` | **Not supported.** Same as C — the file is executed as assignments and clobbers the environment. |
+| **E** | **Read the file as the *only* source** | a tool that never consults its own environment for these names | `docker run --env-file`, Compose `env_file:`, `kubectl create secret --from-env-file`, VS Code `launch.json` `envFile`, JetBrains EnvFile, `devcontainer.json` `runArgs --env-file` | **Breaks.** Nothing about the process environment reaches the consumer. `materialize` covers the subset of these that accept *any* path (Docker's `--env-file`, Compose's `--env-file`), but not the ones hard-wired to the canonical filename (Compose `env_file: .env`, an IDE's `envFile` setting), which are **not supported**. |
+| **F** | **Typed parsing of the file** | a settings library that validates types at load time | pydantic-settings `port: int`, django-environ `env.int()`, Spring `.properties` | Broke even with no vault involvement at all: `SMTP_PORT="value 17"` is not an `int`. **Closed in 2.0.0** — see §6. |
 
 Two things follow from the table:
 
 1. **Mechanism A is the design.** Every mechanism that *can* be served by a process environment
    already is. The vault does not need to change how it injects.
-2. **Mechanisms B-when-scrubbed, C, D and E all reduce to the same requirement:** a file with real
-   values must exist at the canonical path for the lifetime of the command. That is what the
-   `swap` parameter provides. It is `materialize` at the registered path, with the placeholders
-   restored on exit, and it exists because there is no other way to satisfy these four cases.
+2. **Mechanisms B-when-scrubbed, C, D and E were read as one requirement, and that was the
+   mistake.** They look identical — a file at the canonical path must satisfy the consumer for
+   the lifetime of the command — so 1.6.0 answered all four with `swap`, writing REAL values
+   there. But B-when-scrubbed and F do not actually need a real value: a scrubbed test harness
+   and a typed settings loader need the file to **parse**, not to be true. Only C, D and E need
+   the value itself. Splitting them is what 2.0.0 does: typed placeholders (§6) close
+   B-when-scrubbed and F with nothing on disk, and `materialize` — a fresh path, never the
+   project's own file — remains the answer for E. C and D are not served, and are documented as
+   unsupported rather than answered by writing secrets into a tracked file.
 
 ---
 
@@ -266,28 +280,70 @@ is written — exactly as `materialize` refuses them.
 
 | You run… | Call |
 |---|---|
-| `python app.py` reading `os.environ`; `docker compose up` with `${VAR}` interpolation; anything under mechanism A or B | `run_with_env(command=[...], only_vars=[...])` — no swap needed |
-| pytest where a test builds a scrubbed child env, or `load_dotenv(override=True)`, or `source .env` inside a script | `run_with_env(command=[...], cwd=project, swap=[".env"], only_vars=[...])` |
-| `docker compose up` with `env_file: .env` | `run_with_env(command=["docker","compose","up"], cwd=project, swap=[".env"], max_reads=2)` — compose reads `.env` twice; the file reverts after the second read |
+| `python app.py` reading `os.environ`; `docker compose up` with `${VAR}` interpolation; anything under mechanism A or B | `run_with_env(command=[...], only_vars=[...])` |
+| **pytest whose tests build a scrubbed child env**, or any typed settings loader (pydantic-settings, django-environ, Spring) that must PARSE `.env` | `retype_placeholders()` once. Nothing at run time — the file parses on its own, with the vault not involved. See §6. |
 | `docker run --env-file .env.runtime` (a fresh path) | `run_with_env(..., materialize=".env.runtime", max_reads=1)` — the file is emptied the moment docker has read it |
-| `docker run --env-file .env` (the canonical, quoted-placeholder file) | `swap=[".env"]` works if the recorded style is unquoted; if the original file was quoted, Docker will deliver the quotes — that was already true before the vault |
+| `docker compose up` with `env_file: .env.runtime` | `run_with_env(..., materialize=".env.runtime", max_reads=2)` — compose reads it twice |
+| `kubectl create secret --from-env-file .env.runtime` | `run_with_env(..., materialize=".env.runtime", max_reads=1)`; note kubectl keeps quotes literally |
 | An IDE debug session that reads `envFile` | launch the IDE itself through the vault so every terminal and debug session inherits the real env: `run_with_env(command=["code", "."], background=True, only_vars=[...])` |
-| `kubectl create secret --from-env-file .env` | `swap=[".env"]`; note kubectl keeps quotes literally |
+| `load_dotenv(override=True)`, `source .env`, or a tool hard-wired to read the canonical `.env` and nothing else | **Not supported.** Point the tool at a materialize path if it accepts one; otherwise change the tool. 1.6–1.7 answered this with `swap=`, which is retired — see the header. |
 
 ---
 
-## 6. Deferred: shape-preserving placeholders (mechanism F)
+## 6. Implemented in 2.0.0: typed placeholders (mechanism F, and B-when-scrubbed)
 
 `SMTP_PORT="value 17"` fails `int` validation in pydantic-settings, django-environ and Spring
 even when the vault is not involved in the run at all — the placeholder-only file is simply not
-parseable as the types the app declares. A shape-preserving placeholder (an integer placeholder
-for integer values, `false` for booleans, `https://placeholder-17.invalid` for URLs) would let
-placeholder-only files load in tests that never need the real value. It leaks the value's type,
-not its content. Deferred from 1.6.0 because `swap` already covers the runtime case and because
-it widens the `PLACEHOLDER_VALUE_RE` that `resync_targets`' conflict detection relies on. A test
-that assumes *no* `.env` exists at all (asserting "unset" while a real file is on disk) is a
-non-hermetic test, and no vault behaviour can make it pass — it would fail identically against
-the original real `.env`.
+parseable as the types the app declares. A **typed placeholder** preserves the shape of the
+value and nothing else, so the file parses:
+
+| Real value looks like | Placeholder for index N | Notes |
+|---|---|---|
+| an integer | `N` | the index number stays visible, as `"value N"` established |
+| `0` or `1` | `0` | never the real bit — that is one bit of content |
+| true/false/yes/no/on/off | `false` | never the real truthiness |
+| a float | `N.0` | |
+| `<scheme>://…` | `<scheme>://placeholder-N.invalid` | scheme kept: `PostgresDsn` rejects `https://`. `.invalid` is reserved by RFC 2606 and can never resolve, so a placeholder that escapes into a real config fails closed |
+| an email address | `placeholder-N@example.invalid` | |
+| `[…]` / `{…}` | `[]` / `{}` | |
+| anything else | `"value N"` | an opaque string has no shape to preserve, so it is unchanged |
+
+**What this discloses:** the TYPE of each value, and a URL's scheme. Never content. The bool of
+a variable that is really `true` renders `false`; a port of `2525` renders its index number.
+`placeholder_style: "opaque"` opts out entirely.
+
+**The deferral reason, and how it was answered.** This was deferred from 1.6.0 partly because it
+"widens the `PLACEHOLDER_VALUE_RE` that `resync_targets`' conflict detection relies on". That
+turned out to be the wrong fix rather than a blocker: a regex loose enough to match `17` cannot
+tell a placeholder from a real port, so widening it would have broken the guard no matter how
+carefully it was written. **The regex is unchanged.** Detection is index-aware and exact
+instead — a line is one of ours if it matches the legacy regex, or if it equals the one string
+this name's number and shape render to. That is stricter than 1.x for a typed name and
+identical for an untyped one.
+
+**Two consequences worth knowing:**
+
+- *Numbers are never recycled.* A freed index number handed to a different variable is the only
+  way a placeholder already written into a file can come to mean something else, and for a typed
+  one that drift is unrecoverable — `SMTP_PORT=17` where 17 is now someone else's number cannot
+  be told from a real port. 2.0 retires numbers instead of reusing them.
+- *A shape tombstone outlives its secret.* `placeholder_shapes.json` is never pruned when a
+  secret is removed. Without the entry, a typed placeholder left behind for a departed name is
+  indistinguishable from a real value, and `resync_targets`' data-loss guard would silently stop
+  counting the very lines it protects.
+
+**What it does not fix.** Mechanisms C and D (a loader that lets the file win, a shell that
+sources it) and any reader hard-wired to the canonical `.env`: those need the real value, and a
+correctly-parsing placeholder is still not the secret. `materialize` serves the subset that
+accepts a path. A test that assumes *no* `.env` exists at all (asserting "unset" while a real
+file is on disk) is a non-hermetic test, and no vault behaviour can make it pass — it would fail
+identically against the original real `.env`.
+
+**Acceptance.** `tests/test_consumption_matrix.py` runs a real `pydantic-settings` class with
+typed fields against a placeholder-only file using plain `subprocess.run` — no vault, no
+injection, no dialog. The control (legacy placeholders) fails with "should be a valid integer"
+and "should be a valid boolean"; the typed file loads. The scrubbed-harness case, which is what
+a pre-push hook does and what `swap=` was refused for, is covered the same way.
 
 ---
 
