@@ -66,6 +66,7 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Optional
 
 from . import store
@@ -700,3 +701,43 @@ def self_test(path: str, timeout: float = 3.0) -> Optional[str]:
         return None
     finally:
         w.close()
+
+
+def self_test_for_new_file(path: str, timeout: float = 3.0) -> Optional[str]:
+    """self_test for a file that does not exist yet.
+
+    materialize's target must NOT exist when the run starts -- run_with_env
+    refuses to overwrite one -- so the proof cannot be run on the file
+    itself the way a swapped .env allowed. What actually has to hold is a
+    property of the FILESYSTEM the target will live on, not of that
+    particular file, so this probes a throwaway sibling in the same
+    directory and removes it.
+
+    Runs before the dialog, like self_test, so a run that could not honour
+    max_reads is refused before a human is asked to approve it rather than
+    after. The probe name is prefixed with a dot and suffixed distinctly so
+    a stray one is obviously ours if a crash ever leaves it behind.
+    """
+    if unsupported_reason():
+        return unsupported_reason()
+    target = Path(path)
+    probe = target.parent / f".{target.name}.oplock-probe"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # x mode: never clobber something that is already there.
+        with open(probe, "xb") as f:
+            f.write(b"# llm-env-vault oplock probe\n")
+    except OSError as e:
+        return f"could not create an oplock probe beside {path}: {e}"
+    try:
+        reason = self_test(str(probe), timeout)
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+    if reason:
+        # Report it against the real target; the probe is an implementation
+        # detail the caller never asked for.
+        return reason.replace(str(probe), str(target))
+    return None

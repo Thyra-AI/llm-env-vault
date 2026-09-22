@@ -1622,6 +1622,14 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         file_pairs = _resolve_restore_paths(files, cwd) if files else []
     except (OSError, ValueError, VaultCorrupted, VaultTampered, UnicodeDecodeError) as e:
         return {"error": str(e)}
+    if max_reads is not None and materialized_path is not None:
+        # Prove -- before the dialog -- that this filesystem grants an oplock
+        # with handle caching and holds a foreign open until we release, so
+        # the dialog promises only what will hold. The target must not exist
+        # yet, so the proof runs on a throwaway probe beside it.
+        reason = singleview.self_test_for_new_file(str(materialized_path))
+        if reason:
+            return {"error": f"max_reads cannot be honoured for {materialized_path}: {reason}"}
 
     # Trust is scoped to this exact (command, cwd, only_vars, materialize,
     # background) shape AND the content of every file named directly on
@@ -2029,9 +2037,14 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                 f"Real values were reverted before the command exited for: {', '.join(early)}. "
                 f"A read labelled 'unattributed' was too fast for the Restart Manager to name "
                 f"the reader; it was counted because the command was running at that moment.")
-        # No padded-tail note: the only watched file left is the materialize
-        # target, which the finally above unlinks whatever its tail looks
-        # like. Rewrite-in-place was the only mode that could leave padding.
+        # No padded-tail note. The padding itself is NOT swap-only -- if a
+        # memory-mapped view blocks SetEndOfFile, write_all pads the tail with
+        # newlines, and for materialize that is precisely what overwrites the
+        # real values when the file cannot be truncated. What is swap-only is
+        # having anything to say about it afterwards: a swapped .env had to be
+        # left byte-correct for its own project, whereas the materialize target
+        # is unlinked regardless, and a failure to unlink is already reported
+        # as files_warning/cleanup_error.
         after = {k: w.reads_after_restore for k, w in watchers.items() if w.reads_after_restore}
         if after:
             result["single_read_restored_early"] = after

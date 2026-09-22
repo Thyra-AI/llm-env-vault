@@ -259,3 +259,175 @@ if __name__ == "__main__":
             print(f"  FAILED {name}: {exc}")
         sys.exit(1)
     print("All tests passed.")
+
+
+# ---------------------------------------------------------------------------
+# materialize + max_reads
+# ---------------------------------------------------------------------------
+# After swap= was retired in 2.0, materialize is the ONLY standing exception
+# to "no file an agent can read holds a real value", and max_reads is its
+# strongest mitigation -- a `docker run --env-file` reads once at client
+# start, so an early revert cuts the window from the container's lifetime to
+# milliseconds. In 1.7.x this mechanism was proven against swap targets: 13
+# of the 14 tests in this file used one and materialize had exactly one.
+# These port that coverage onto the mode that survived.
+
+MATERIALIZED = ".env.runtime"
+_M = repr(MATERIALIZED)
+
+
+def _materialize_run(project, code, *, only_vars=("PLAIN",), max_reads=1):
+    with fake_dialog():
+        return mcp_server._run_with_env_impl([PYTHON, "-c", code], MATERIALIZED, False,
+                                             str(project), list(only_vars), None,
+                                             max_reads=max_reads)
+
+
+def test_materialize_max_reads_two_serves_both_reads() -> None:
+    if _need_windows():
+        return
+    code = ("import time\n"
+            "print(open(" + _M + ").read().strip(), flush=True)\n"
+            "time.sleep(0.6)\n"
+            "print(open(" + _M + ").read().strip(), flush=True)\n"
+            "time.sleep(0.4)\n")
+    with workspace() as (project, _env_path):
+        r = _materialize_run(project, code, max_reads=2)
+        first, second = r["stdout"].splitlines()
+        assert first == second == "PLAIN=[REDACTED:PLAIN]", r["stdout"]
+        rep = r["single_read"][str(project / MATERIALIZED)]
+        assert rep["reads"] == 2 and rep["restored_early"] is True
+        assert "single_read_restored_early" not in r
+        assert not (project / MATERIALIZED).exists()
+
+
+def test_materialize_stat_only_is_not_a_read() -> None:
+    """Opening is a read; asking the directory about the file is not. If
+    stat counted, any watcher or indexer would burn the budget."""
+    if _need_windows():
+        return
+    code = ("import os,time\n"
+            "for _ in range(20):\n"
+            "    os.stat(" + _M + "); os.path.isfile(" + _M + "); os.path.getsize(" + _M + ")\n"
+            "time.sleep(0.3)\n")
+    with workspace() as (project, _env_path):
+        r = _materialize_run(project, code)
+        rep = r["single_read"][str(project / MATERIALIZED)]
+        assert rep["reads"] == 0 and rep["restored_early"] is False, rep
+        assert not (project / MATERIALIZED).exists()
+
+
+def test_materialize_run_that_never_reads_is_cleaned_up_and_reports_zero_reads() -> None:
+    if _need_windows():
+        return
+    with workspace() as (project, _env_path):
+        r = _materialize_run(project, "print('hi')")
+        rep = r["single_read"][str(project / MATERIALIZED)]
+        assert rep["reads"] == 0 and not rep["restored_early"]
+        assert not (project / MATERIALIZED).exists()
+
+
+def test_materialize_foreign_holder_is_reported_and_not_counted() -> None:
+    """A program outside the job opening the file must not spend the budget
+    -- otherwise an editor or AV scanner reverts it before the command has
+    read it. It is still disclosed."""
+    if _need_windows():
+        return
+    code = ("import time\n"
+            "time.sleep(1.6)\n"
+            "print(open(" + _M + ").read().count('PLAIN='), flush=True)\n"
+            "time.sleep(0.4)\n")
+    with workspace() as (project, _env_path):
+        target = project / MATERIALIZED
+        holder = {}
+        original = mcp_server._run_command
+
+        def wrapped(command, env, cwd, timeout, bind=True, on_start=None):
+            def hooked(job, pid):
+                on_start(job, pid)
+                time.sleep(0.2)
+                holder["p"] = subprocess.Popen(
+                    [PYTHON, "-c",
+                     "import sys,time; f=open(sys.argv[1]); time.sleep(1.0); f.close()",
+                     str(target)])
+            return original(command, env, cwd, timeout, bind=bind, on_start=hooked)
+
+        mcp_server._run_command = wrapped
+        try:
+            r = _materialize_run(project, code)
+        finally:
+            mcp_server._run_command = original
+            if "p" in holder:
+                holder["p"].wait()
+        rep = r["single_read"][str(target)]
+        assert rep.get("foreign_opens", 0) >= 1 and "Python" in rep.get("foreign_apps", []), rep
+        assert r["stdout"].strip() == "1", r
+        assert rep["reads"] == 1 and rep["restored_early"] is True
+        assert not target.exists()
+
+
+def test_materialize_watcher_thread_is_gone_and_handle_released_after_the_run() -> None:
+    if _need_windows():
+        return
+    with workspace() as (project, _env_path):
+        before = threading.active_count()
+        _materialize_run(project, "print(open(" + _M + ").read()[:1])")
+        time.sleep(0.2)
+        assert threading.active_count() <= before + 1  # run_bound's watchdog may linger 2 s
+        probe = project / "probe.env"
+        probe.write_bytes(b"A=1\n")
+        w = singleview.Watcher(str(probe), 1, lambda _w: {}, threading.Lock())
+        w.open()
+        w.close()
+
+
+def test_max_reads_refusals_happen_before_the_dialog() -> None:
+    with workspace() as (project, _env_path):
+        with fake_dialog() as calls:
+            r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None, None,
+                                              max_reads=1)
+            assert "only means something" in r["error"]
+            r = mcp_server._run_with_env_impl(["cmd"], MATERIALIZED, False, str(project), None,
+                                              None, max_reads=0)
+            assert "between 1 and" in r["error"]
+            r = mcp_server._run_with_env_impl(["cmd"], MATERIALIZED, False, str(project), None,
+                                              None, max_reads=True)
+            assert "between 1 and" in r["error"]
+            r = mcp_server._run_with_env_impl(["cmd"], MATERIALIZED, True, str(project), None,
+                                              None, max_reads=1)
+            assert "background" in r["error"]
+            if IS_WIN:
+                original = singleview.self_test
+                singleview.self_test = lambda path, timeout=3.0: "simulated: no oplock here"
+                try:
+                    r = mcp_server._run_with_env_impl(["cmd"], MATERIALIZED, False,
+                                                      str(project), None, None, max_reads=1)
+                finally:
+                    singleview.self_test = original
+                assert "cannot be honoured" in r["error"] and "no oplock" in r["error"]
+            else:
+                r = mcp_server._run_with_env_impl(["cmd"], MATERIALIZED, False, str(project),
+                                                  None, None, max_reads=1)
+                assert "Windows" in r["error"]
+        assert calls == []
+        a = trust.make_signature(["c"], str(project), None, None, False, None, max_reads=1)
+        b = trust.make_signature(["c"], str(project), None, None, False, None, max_reads=2)
+        c = trust.make_signature(["c"], str(project), None, None, False, None)
+        assert len({a, b, c}) == 3
+
+
+def test_oplock_probe_is_removed_and_never_clobbers() -> None:
+    """The probe self_test_for_new_file leaves beside the target must not
+    survive the run, and must never overwrite something already there."""
+    if _need_windows():
+        return
+    with workspace() as (project, _env_path):
+        _materialize_run(project, "print('hi')")
+        leftovers = [p.name for p in project.iterdir() if "oplock-probe" in p.name]
+        assert leftovers == [], leftovers
+        # An existing file at the probe path is a refusal, not a clobber.
+        squatter = project / ("." + MATERIALIZED + ".oplock-probe")
+        squatter.write_bytes(b"do not lose me\n")
+        reason = singleview.self_test_for_new_file(str(project / MATERIALIZED))
+        assert reason and "probe" in reason
+        assert squatter.read_bytes() == b"do not lose me\n"
