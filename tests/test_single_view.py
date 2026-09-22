@@ -286,17 +286,38 @@ def test_short_write_is_refused() -> None:
         w = singleview.Watcher(str(p), 1, lambda _w: {}, threading.Lock())
         w.open()
         try:
-            # The byte count of an overlapped write is reported by
-            # GetOverlappedResult, not by WriteFile itself.
+            # Which call reports the byte count depends on the storage stack.
+            # A handle opened FILE_FLAG_OVERLAPPED may still complete the write
+            # synchronously, and then WriteFile returns TRUE and fills the
+            # count itself -- GetOverlappedResult is never reached. Patch both,
+            # so the guard is exercised either way: patching only
+            # GetOverlappedResult passes on a disk that goes async and silently
+            # tests nothing on one that does not.
+            real_wf = singleview._k32.WriteFile
             real_gor = singleview._k32.GetOverlappedResult
+            shaved = {"n": 0}
 
-            def short(handle, ov, got, wait):
-                ok = real_gor(handle, ov, got, wait)
+            def shave(got):
                 if hasattr(got, "_obj") and got._obj.value > 0:
                     got._obj.value -= 1
+                    shaved["n"] += 1
+
+            def short_wf(handle, buf, n, got, ov):
+                ok = real_wf(handle, buf, n, got, ov)
+                # Only a synchronous completion reports the count here; on the
+                # pending path GetOverlappedResult overwrites it afterwards.
+                if ok:
+                    shave(got)
                 return ok
 
-            singleview._k32.GetOverlappedResult = short
+            def short_gor(handle, ov, got, wait):
+                ok = real_gor(handle, ov, got, wait)
+                if ok:
+                    shave(got)
+                return ok
+
+            singleview._k32.WriteFile = short_wf
+            singleview._k32.GetOverlappedResult = short_gor
             try:
                 try:
                     w.write_all(b"A=2\nB=3\n")
@@ -305,7 +326,11 @@ def test_short_write_is_refused() -> None:
                 else:
                     raise AssertionError("a short write was accepted")
             finally:
+                singleview._k32.WriteFile = real_wf
                 singleview._k32.GetOverlappedResult = real_gor
+            # Guard the guard: if neither patch fired, the branch above proved
+            # nothing and the test would pass for the wrong reason.
+            assert shaved["n"] == 1, f"byte count never shaved ({shaved['n']})"
         finally:
             w.close()
 
