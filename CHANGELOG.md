@@ -7,6 +7,32 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.0.6] — 2026-09-23
+
+### Fixed
+
+- **Reverts 2.0.5's chain-following, which made the thing it was fixing worse.** Following a
+  junction's target meant `os.lstat()` on the full multi-component path that `readlink()`
+  returned -- and the OS transparently follows the *intermediate* components of any path handed
+  to a stat call. So a guard whose entire purpose is to avoid touching the network acquired a
+  new way to touch it, on a path whose prefixes had never been validated. The outer component
+  walk is only safe because it checks each prefix before descending; the chain hop skipped that
+  entirely.
+
+  Back to the one-hop check, and the residual is documented rather than papered over: a chained
+  junction is still caught after resolution by the containment check, so real values are never
+  written to the share, but `resolve()` will have reached it first. Closing that properly means
+  validating every prefix of every target, which is a different piece of work from the one-line
+  loop 2.0.5 shipped.
+
+- **The UNC test no longer refuses legitimate local junctions.** A junction's target comes back
+  in the NT namespace, where the local form (`\??\C:\dir`) begins with the same backslash pair
+  as the network one (`\??\UNC\server\share`), so the plain "starts with two backslashes" test
+  called every long-path junction a share -- and the `"UNC" in target[:8]` test it was paired
+  with called `C:\Uncommon` one too. Both errors block a legitimate local path, and a guard
+  people have to turn off protects nothing. `_target_is_unc` now distinguishes the namespaces
+  precisely, with the eleven forms pinned in a test.
+
 ## [2.0.5] — 2026-09-23
 
 ### Fixed
