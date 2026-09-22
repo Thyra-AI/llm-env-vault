@@ -573,7 +573,7 @@ def parse_env_file_with_styles(path: Path) -> tuple:
     line used ('"' or "'") or "" for an unquoted value. install_migrate
     records these so a later swap can re-emit the real value in the exact
     form the user's own tools were already parsing -- see
-    render_swap_value for why that matters more than any "correct" style."""
+    render_value_in_style for why that matters more than any "correct" style."""
     return _parse_env_file_ex(path)
 
 
@@ -1033,7 +1033,7 @@ def record_target_styles(path_key: str, styles: dict) -> None:
         _atomic_write_text(_styles_path(), json.dumps(current, indent=2, sort_keys=True) + "\n")
 
 
-def render_swap_value(value: str, style: Optional[str]) -> tuple:
+def render_value_in_style(value: str, style: Optional[str]) -> tuple:
     """(text, note) -- the real value as it should appear after `NAME=`.
 
     When the original style is known this is the exact inverse of what
@@ -1169,7 +1169,7 @@ def _terminator(line: bytes) -> bytes:
     return line[len(line.rstrip(b"\r\n")):]
 
 
-def preview_swap(path: Path, names) -> dict:
+def placeholder_state(path: Path, names) -> dict:
     """What a swap of `names` into `path` would touch, without any secret:
     {"swappable": [...], "not_in_file": [...], "not_placeholder": [...],
     "duplicates": [...]}. run_with_env shows this in the dialog and refuses
@@ -1200,78 +1200,6 @@ def preview_swap(path: Path, names) -> dict:
         "pending": sorted(pending - placeholder - other),
         "duplicates": sorted(n for n, c in seen.items() if c > 1),
     }
-
-
-def swap_target_file(path: Path, names, secrets: dict, styles: dict) -> dict:
-    """Write real values over the placeholder lines for `names`.
-
-    Returns the record unswap_target_file needs to undo it byte-for-byte:
-      {"lines": {index: {"name", "original": bytes, "rendered_line": bytes,
-                         "rendered_value": str}},
-       "swapped": [names], "skipped": {name: reason}, "notes": [str]}
-
-    Only a line whose current value IS one of our placeholders is touched;
-    a real value someone typed by hand is skipped and reported, never
-    overwritten. Every placeholder line for a name is swapped (a file with
-    the same name twice gets both, and a note). Names with no line are
-    skipped -- never appended, because there would be nothing to restore
-    them to. Untouched lines are re-emitted from their original bytes.
-    """
-    if _is_link(path):
-        raise ValueError(f"{path} is a symlink or junction -- refusing to read or rewrite "
-                         f"a managed file through a link.")
-    new_bytes, record = compute_swap_bytes(path.read_bytes(), names, secrets, styles,
-                                           label=str(path))
-    if not record["lines"]:
-        return record
-    _atomic_write_bytes(path, new_bytes, mode=stat.S_IMODE(path.stat().st_mode))
-    return record
-
-
-def compute_swap_bytes(raw: bytes, names, secrets: dict, styles: dict,
-                       label: str = "<bytes>") -> tuple:
-    """(new_bytes, record) for swap_target_file -- pure, no I/O. The
-    single-view watcher calls this with bytes it read through the exclusive
-    handle it is about to write through."""
-    names = set(names)
-    bom, lines, texts = _split_env_bytes(raw, label)
-    record = {"lines": {}, "swapped": [], "skipped": {}, "notes": []}
-    seen = {}
-    out = []
-    for i, (line, text) in enumerate(zip(lines, texts)):
-        m = ENV_LINE_RE.match(text)
-        if not m or m.group("name") not in names:
-            out.append(line)
-            continue
-        name = m.group("name")
-        seen[name] = seen.get(name, 0) + 1
-        if not PLACEHOLDER_VALUE_RE.match(m.group("value").strip()):
-            record["skipped"].setdefault(name, "current value is not a vault placeholder")
-            out.append(line)
-            continue
-        if name not in secrets:
-            record["skipped"].setdefault(name, "no value in the vault")
-            out.append(line)
-            continue
-        rendered, note = render_swap_value(secrets[name], styles.get(name))
-        if note:
-            record["notes"].append(f"{name}: {note}")
-        prefix = f'{m.group("indent")}{m.group("export") or ""}'
-        new_line = f"{prefix}{name}={rendered}".encode("utf-8") + _terminator(line)
-        record["lines"][i] = {"name": name, "original": line, "rendered_line": new_line,
-                              "rendered_value": rendered, "secret": secrets[name]}
-        out.append(new_line)
-    swapped = sorted({e["name"] for e in record["lines"].values()})
-    record["swapped"] = swapped
-    for name in swapped:
-        record["skipped"].pop(name, None)
-        if seen.get(name, 0) > 1:
-            record["notes"].append(f"{name}: appears {seen[name]} times in the file; every "
-                                   f"placeholder occurrence was swapped")
-    for name in sorted(names - set(seen)):
-        record["skipped"][name] = "no line for this name in the file"
-    record["notes"] = sorted(set(record["notes"]))
-    return bom + b"".join(out), record
 
 
 def _write_with_retries(path: Path, data: bytes, mode: int,
@@ -1313,133 +1241,6 @@ def _write_with_retries(path: Path, data: bytes, mode: int,
         return None
     except OSError as e:
         return f"{last}; in-place rewrite also failed: {e}"
-
-
-def unswap_target_file(path: Path, record: dict, index: dict) -> dict:
-    """Put the placeholders back after a swap this process performed.
-
-    Two tiers, so an editor that re-indented or re-terminated lines during
-    the run does not leave secrets behind: a line whose bytes are exactly
-    what the swap wrote gets its exact original bytes back; otherwise any
-    line still carrying the rendered value (found by name anywhere in the
-    file) gets the canonical placeholder with its current indent, prefix
-    and terminator. A line where neither holds was changed by someone
-    during the run -- it is left alone and reported as a conflict, because
-    the alternative is destroying an edit the user made on purpose.
-
-    The file is re-read after writing and any swapped name whose rendered
-    value is still present is reported in verify_failed. Returns
-    {"restored", "conflicts", "verify_failed", "error"}; error is set when
-    the write itself failed after retries, in which case the caller marks
-    the journal entry so recovery keeps trying.
-    """
-    result = {"restored": [], "conflicts": [], "verify_failed": [], "error": None}
-    if not record.get("lines"):
-        return result
-    if not path.exists():
-        result["error"] = "file disappeared during the run"
-        return result
-    try:
-        if _is_link(path):
-            raise ValueError(f"{path} is a symlink or junction -- refusing to rewrite a "
-                             f"managed file through a link.")
-        new_bytes, result, changed = compute_unswap_bytes(path.read_bytes(), record, index,
-                                                          label=str(path))
-    except (OSError, ValueError) as e:
-        result["error"] = str(e)
-        return result
-    if changed:
-        try:
-            mode = stat.S_IMODE(path.stat().st_mode)
-        except OSError:
-            mode = 0o644
-        err = _write_with_retries(path, new_bytes, mode, allow_in_place=True)
-        if err:
-            result["error"] = err
-            result["restored"] = []
-            return result
-    # Verify from disk, not from memory: the only thing that matters is
-    # what is actually in the file now.
-    try:
-        after = path.read_bytes()
-    except OSError:
-        result["verify_failed"] = list(result["restored"])
-        return result
-    return verify_unswap_bytes(after, record, result, label=str(path))
-
-
-def compute_unswap_bytes(raw: bytes, record: dict, index: dict,
-                         label: str = "<bytes>") -> tuple:
-    """(new_bytes, result, changed) -- the pure half of unswap_target_file.
-    `result` has restored/conflicts filled in; verify_unswap_bytes fills
-    the rest once the bytes are on disk."""
-    result = {"restored": [], "conflicts": [], "verify_failed": [], "error": None}
-    bom, lines, texts = _split_env_bytes(raw, label)
-    out = list(lines)
-    done = set()
-    unmatched = []
-    for i, entry in record["lines"].items():
-        if i < len(lines) and lines[i] == entry["rendered_line"]:
-            out[i] = entry["original"]
-            done.add(i)
-        else:
-            unmatched.append((i, entry))
-    for i, entry in unmatched:
-        hit = None
-        for j, text in enumerate(texts):
-            if j in done:
-                continue
-            m = ENV_LINE_RE.match(text)
-            if m and m.group("name") == entry["name"] and \
-                    _carries_value(m.group("value"), entry):
-                hit = (j, m)
-                break
-        if hit is None:
-            result["conflicts"].append(entry["name"])
-            continue
-        j, m = hit
-        prefix = f'{m.group("indent")}{m.group("export") or ""}'
-        out[j] = _placeholder_line(prefix, entry["name"], index).encode("utf-8") + \
-            _terminator(lines[j])
-        done.add(j)
-    restored_names = sorted({record["lines"][i]["name"] for i in record["lines"]
-                             if record["lines"][i]["name"] not in result["conflicts"]})
-    result["restored"] = restored_names
-    result["conflicts"] = sorted(set(result["conflicts"]))
-    return bom + b"".join(out), result, bool(done)
-
-
-def verify_unswap_bytes(after: bytes, record: dict, result: dict,
-                        label: str = "<bytes>") -> dict:
-    """Fill verify_failed / secret_seen_elsewhere from the bytes actually on
-    disk after a restore. Pure."""
-    try:
-        _b, _l, texts_after = _split_env_bytes(after, label)
-    except ValueError:
-        result["verify_failed"] = list(result["restored"])
-        return result
-    by_name = {e["name"]: e for e in record["lines"].values()}
-    result["secret_seen_elsewhere"] = []
-    for lineno, text in enumerate(texts_after, start=1):
-        m = ENV_LINE_RE.match(text)
-        if m and m.group("name") in by_name and \
-                _carries_value(m.group("value"), by_name[m.group("name")], raw_line=text):
-            if m.group("name") not in result["verify_failed"]:
-                result["verify_failed"].append(m.group("name"))
-            continue
-        # Name-agnostic: the command could have written the value under a
-        # different name, or into a comment. Report the line number only --
-        # never the line -- and leave it: it is not a line the vault wrote,
-        # so nothing here knows what it should become.
-        for entry in by_name.values():
-            secret = entry["secret"]
-            if (len(secret) >= 8 and secret in text) or \
-                    (m and _unquote(m.group("value")) == secret):
-                result["secret_seen_elsewhere"].append(
-                    {"line": lineno, "name": entry["name"]})
-                break
-    result["verify_failed"].sort()
-    return result
 
 
 def _dotenv_decode(raw_value: str) -> str:

@@ -2,7 +2,7 @@
 Quoting-style capture and faithful value rendering.
 
 These outlive `swap=`. store.parse_env_file_with_styles / record_target_styles
-record how each migrated line was originally quoted, and render_swap_value
+record how each migrated line was originally quoted, and render_value_in_style
 puts a value back in that exact form -- because no single quoting works for
 every .env parser, and a rewrite that changes one silently changes what the
 consumer reads.
@@ -99,31 +99,31 @@ def workspace(env_bytes=PLACEHOLDER_ENV, styles=None, register=True):
 def test_render_faithful_styles_are_exact_inverses_of_unquote() -> None:
     # Double-quoted: only the quote is re-escaped; a literal backslash-n the
     # user wrote stays two characters, exactly as their loader always saw.
-    assert store.render_swap_value('a"b\\n', '"') == ('"a\\"b\\n"', None)
-    assert store.render_swap_value("it's", "'") == ("'it\\'s'", None)
-    assert store.render_swap_value("p$ss word", "") == ("p$ss word", None)
+    assert store.render_value_in_style('a"b\\n', '"') == ('"a\\"b\\n"', None)
+    assert store.render_value_in_style("it's", "'") == ("'it\\'s'", None)
+    assert store.render_value_in_style("p$ss word", "") == ("p$ss word", None)
 
 
 def test_render_unquoted_style_falls_back_when_value_would_misparse() -> None:
     # A leading space or an inline-comment sequence cannot be raw.
-    text, _ = store.render_swap_value(" lead", "")
+    text, _ = store.render_value_in_style(" lead", "")
     assert text == "' lead'"
-    text, _ = store.render_swap_value("x #y", "")
+    text, _ = store.render_value_in_style("x #y", "")
     assert text == "'x #y'"
 
 
 def test_render_unknown_style_policy() -> None:
-    assert store.render_swap_value("tok-abc_123", None) == ("tok-abc_123", None)
-    text, note = store.render_swap_value("p$ss w#rd", None)
+    assert store.render_value_in_style("tok-abc_123", None) == ("tok-abc_123", None)
+    text, note = store.render_value_in_style("p$ss w#rd", None)
     assert text == "'p$ss w#rd'" and "single-quoted" in note
-    text, note = store.render_swap_value("it's \"q\"", None)
+    text, note = store.render_value_in_style("it's \"q\"", None)
     assert text == '"it\'s \\"q\\""' and "node" in note
 
 
 def test_render_refuses_newlines() -> None:
     for style in ('"', "'", "", None):
         try:
-            store.render_swap_value("a\nb", style)
+            store.render_value_in_style("a\nb", style)
         except ValueError:
             continue
         raise AssertionError(f"newline accepted for style {style!r}")

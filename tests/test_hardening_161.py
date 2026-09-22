@@ -31,8 +31,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import mcp_server  # noqa: E402
 from vault_lib import legacy_swap, procs, store, trust  # noqa: E402
-from _vault_workspace import (INDEX, PLACEHOLDER_ENV, SECRETS, TEST_PASSWORD, _read_journal,  # noqa: E402
-                              fake_dialog, stub_run, workspace)
+from _vault_workspace import (INDEX, LEGACY_SWAPPED_ENV, LEGACY_SWAPPED_NAMES,  # noqa: E402
+                              PLACEHOLDER_ENV, SECRETS, TEST_PASSWORD, _read_journal,
+                              fake_dialog, stub_run, workspace, write_legacy_journal)
+from _vault_workspace import FIXTURES, norm_env  # noqa: E402
 
 IS_WIN = os.name == "nt"
 
@@ -154,17 +156,6 @@ def test_journal_entries_off_the_registry_are_quarantined_not_acted_on() -> None
 
 
 
-def test_journal_add_validates_names_against_the_registry() -> None:
-    with workspace() as (project, env_path):
-        try:
-            legacy_swap.journal_add(str(env_path), ["NOT_REGISTERED"])
-        except ValueError as e:
-            assert "not registered" in str(e)
-        else:
-            raise AssertionError("journal_add accepted a name outside the registry")
-        assert not legacy_swap._journal_path().exists()
-
-
 # ---------------------------------------------------------------------------
 # WP2 -- restore correctness
 # ---------------------------------------------------------------------------
@@ -176,8 +167,7 @@ def test_journal_add_validates_names_against_the_registry() -> None:
 def test_restore_writes_in_place_when_replace_is_blocked() -> None:
     if not IS_WIN:
         return _skip("os.replace sharing violation is Windows-specific")
-    with workspace() as (project, env_path):
-        record = store.swap_target_file(env_path, ["PLAIN"], SECRETS, {})
+    with workspace(env_bytes=LEGACY_SWAPPED_ENV) as (project, env_path):
         # The base interpreter, not the venv launcher: the launcher's real
         # python is a grandchild, and killing the launcher would leave it
         # holding the file through the temp dir's cleanup.
@@ -187,8 +177,9 @@ def test_restore_writes_in_place_when_replace_is_blocked() -> None:
                                    str(env_path)])
         try:
             time.sleep(0.8)
-            res = store.unswap_target_file(env_path, record, INDEX)
-            assert res["error"] is None and res["restored"] == ["PLAIN"], res
+            res = legacy_swap.recover_swap_file(env_path, LEGACY_SWAPPED_NAMES, INDEX,
+                                                started=time.time())
+            assert res["error"] is None and res["restored"] == LEGACY_SWAPPED_NAMES, res
             assert b'PLAIN="value 3"' in env_path.read_bytes()
         finally:
             holder.kill()
@@ -197,11 +188,8 @@ def test_restore_writes_in_place_when_replace_is_blocked() -> None:
 
 def test_unreadable_index_during_recovery_yields_pending_marker_then_resync_numbers_it() -> None:
     with workspace() as (project, env_path):
-        store.swap_target_file(env_path, ["API_TOKEN", "PLAIN"], SECRETS, {})
-        legacy_swap.journal_add(str(env_path), ["API_TOKEN", "PLAIN"])
-        j = json.loads(legacy_swap._journal_path().read_text(encoding="utf-8"))
-        j["entries"][str(env_path)].update({"pid": 4000000, "server_id": "gone"})
-        legacy_swap._journal_path().write_text(json.dumps(j), encoding="utf-8")
+        env_path.write_bytes(LEGACY_SWAPPED_ENV)
+        write_legacy_journal(env_path, names=LEGACY_SWAPPED_NAMES)
         store.INDEX_FILE.write_text("{corrupt", encoding="utf-8")
         old_sleep = store.time.sleep
         store.time.sleep = lambda s: None  # skip the 2 s retry wait
@@ -209,13 +197,14 @@ def test_unreadable_index_during_recovery_yields_pending_marker_then_resync_numb
             reports = legacy_swap.recover_stale_swaps()
         finally:
             store.time.sleep = old_sleep
-        assert reports[0]["cleared"] == ["API_TOKEN", "PLAIN"] and "pending_index" in reports[0]
+        assert reports[0]["cleared"] == LEGACY_SWAPPED_NAMES and "pending_index" in reports[0]
         after = env_path.read_bytes()
         assert b'export API_TOKEN="value ?"\r\n' in after and b"tok-abcdefgh" not in after
         # vault_status shows the pending lines; a repaired index + resync numbers them.
         store.save_index(dict(INDEX))
         status = mcp_server._vault_status_impl()
-        assert status["targets_with_pending_placeholders"] == {str(env_path): ["API_TOKEN", "PLAIN"]}
+        assert status["targets_with_pending_placeholders"] == {
+            str(env_path): LEGACY_SWAPPED_NAMES}
         res = mcp_server._resync_targets_impl()
         assert res[str(env_path)]["status"] == "ok"
         assert b'export API_TOKEN="value 1"\r\n' in env_path.read_bytes()
@@ -223,11 +212,8 @@ def test_unreadable_index_during_recovery_yields_pending_marker_then_resync_numb
 
 def test_transient_index_lock_is_retried() -> None:
     with workspace() as (project, env_path):
-        store.swap_target_file(env_path, ["PLAIN"], SECRETS, {})
-        legacy_swap.journal_add(str(env_path), ["PLAIN"])
-        j = json.loads(legacy_swap._journal_path().read_text(encoding="utf-8"))
-        j["entries"][str(env_path)].update({"pid": 4000000, "server_id": "gone"})
-        legacy_swap._journal_path().write_text(json.dumps(j), encoding="utf-8")
+        env_path.write_bytes(LEGACY_SWAPPED_ENV)
+        write_legacy_journal(env_path, names=LEGACY_SWAPPED_NAMES)
         original = store.load_index
         calls = {"n": 0}
 
@@ -245,7 +231,7 @@ def test_transient_index_lock_is_retried() -> None:
         finally:
             store.load_index = original
             store.time.sleep = old_sleep
-        assert reports[0]["restored"] == ["PLAIN"] and "pending_index" not in reports[0]
+        assert reports[0]["restored"] == LEGACY_SWAPPED_NAMES and "pending_index" not in reports[0]
 
 
 def test_dotenv_decode_reads_single_backslash_escapes() -> None:
@@ -261,11 +247,11 @@ def test_dotenv_decode_reads_single_backslash_escapes() -> None:
 
 
 def test_trailing_backslash_never_renders_unterminated() -> None:
-    text, note = store.render_swap_value("abc\\", '"')
+    text, note = store.render_value_in_style("abc\\", '"')
     assert text == "'abc\\'" and note
-    text, note = store.render_swap_value("a'b\\", '"')
+    text, note = store.render_value_in_style("a'b\\", '"')
     assert text == '"a\'b\\\\"' and note
-    assert store.render_swap_value("abc\\\\", '"') == ('"abc\\\\"', None)
+    assert store.render_value_in_style("abc\\\\", '"') == ('"abc\\\\"', None)
 
 
 def test_temp_file_sweep_ignores_age() -> None:
@@ -279,7 +265,11 @@ def test_temp_file_sweep_ignores_age() -> None:
 
 def test_own_pid_leftover_entry_is_cleared_when_file_already_restored() -> None:
     with workspace() as (project, env_path):
-        legacy_swap.journal_add(str(env_path), ["PLAIN"])  # file still holds placeholders
+        # Our own pid and server id -> a live entry, but the file is already
+        # back to placeholders: the restore worked and only the bookkeeping
+        # after it did not.
+        write_legacy_journal(env_path, names=["PLAIN"], pid=os.getpid(),
+                             server_id=store.SERVER_ID, pid_start=procs.own_start_time())
         reports = legacy_swap.recover_stale_swaps()
         assert reports and reports[0].get("leftover_entry_removed") is True
         assert not legacy_swap._journal_path().exists()
@@ -321,19 +311,28 @@ def test_watchdog_never_touches_a_closed_job_and_ends_lingering_descendants() ->
         assert procs.process_start_time(gpid)[0] is False, "descendant outlived the command"
 
 
+# A stand-in for a 1.6-1.7 server that is mid-swap. 2.0 has no writer, so
+# the child puts the file and the journal into that state directly, from the
+# golden fixture -- the same bytes the real 1.7.1 writers produced. The
+# journal carries the CHILD's pid and start time, which is what makes the
+# parent see a genuinely live entry it must not touch.
 _CHILD_SWAPPER = r"""
-import sys, time, json
+import json, os, sys, time
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from vault_lib import legacy_swap, store
+from vault_lib import legacy_swap, procs, store
 store.ROOT = Path(sys.argv[2])
 for attr, name in (("INDEX_FILE", "vault_index.json"), ("TARGETS_FILE", "targets.json"),
                    ("TARGETS_LOCK_FILE", "targets.json.lock")):
     setattr(store, attr, store.ROOT / name)
 env_path = Path(sys.argv[3])
-secrets = json.loads(sys.argv[4])
-legacy_swap.journal_add(str(env_path), sorted(secrets))
-store.swap_target_file(env_path, sorted(secrets), secrets, {})
+swapped_bytes = Path(sys.argv[4]).read_bytes()
+names = json.loads(sys.argv[5])
+legacy_swap._journal_path().write_text(json.dumps({"version": 1, "entries": {
+    str(env_path): {"names": sorted(names), "pid": os.getpid(),
+                    "pid_start": procs.own_start_time(), "server_id": store.SERVER_ID,
+                    "started": time.time(), "state": "active"}}}), encoding="utf-8")
+env_path.write_bytes(swapped_bytes)
 print("swapped", flush=True)
 time.sleep(60)
 """
@@ -342,7 +341,8 @@ time.sleep(60)
 def _spawn_swapping_server(project, env_path):
     child = subprocess.Popen(
         [sys.executable, "-c", _CHILD_SWAPPER, str(Path(__file__).parent.parent),
-         str(store.ROOT), str(env_path), json.dumps({"PLAIN": SECRETS["PLAIN"]})],
+         str(store.ROOT), str(env_path), str(FIXTURES / "swapped.env"),
+         json.dumps(LEGACY_SWAPPED_NAMES)],
         stdout=subprocess.PIPE, text=True)
     line = child.stdout.readline()
     assert line.strip() == "swapped", line
@@ -366,8 +366,8 @@ def test_real_terminateprocess_of_a_swapping_server_is_recovered() -> None:
             if child.poll() is None:
                 child.kill()
         reports = mcp_server._recover_swaps()
-        assert reports and reports[0]["restored"] == ["PLAIN"], reports
-        assert env_path.read_bytes() == PLACEHOLDER_ENV
+        assert reports and reports[0]["restored"] == LEGACY_SWAPPED_NAMES, reports
+        assert norm_env(env_path.read_bytes()) == norm_env(PLACEHOLDER_ENV)
         assert not legacy_swap._journal_path().exists()
 
 
@@ -377,7 +377,7 @@ def test_force_recovers_a_live_entry_and_needs_no_password() -> None:
         try:
             reports = legacy_swap.recover_stale_swaps(force=True)
             assert reports and reports[0]["reason"] == "forced"
-            assert env_path.read_bytes() == PLACEHOLDER_ENV
+            assert norm_env(env_path.read_bytes()) == norm_env(PLACEHOLDER_ENV)
         finally:
             child.kill()
             child.wait()
@@ -389,9 +389,11 @@ def test_force_recovers_a_live_entry_and_needs_no_password() -> None:
 
 def test_vault_status_reports_managed_lines_holding_real_values_without_a_journal() -> None:
     with workspace() as (project, env_path):
-        store.swap_target_file(env_path, ["PLAIN"], SECRETS, {})
+        env_path.write_bytes(LEGACY_SWAPPED_ENV)
+        assert not legacy_swap._journal_path().exists()
         status = mcp_server._vault_status_impl()
-        assert status["targets_holding_non_placeholders"] == {str(env_path): ["PLAIN"]}
+        assert status["targets_holding_non_placeholders"] == {
+            str(env_path): LEGACY_SWAPPED_NAMES}
         assert "justletters123" not in json.dumps(status)
 
 

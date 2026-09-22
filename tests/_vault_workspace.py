@@ -144,3 +144,57 @@ def stub_run(observer=None, returncode=0, raise_exc=None):
 def _read_journal() -> dict:
     p = legacy_swap._journal_path()
     return json.loads(p.read_text(encoding="utf-8"))["entries"] if p.exists() else {}
+
+# ---------------------------------------------------------------------------
+# Legacy (pre-2.0) swap state, from frozen golden bytes
+# ---------------------------------------------------------------------------
+# 2.0 has no code that writes a swapped .env or a journal -- those writers are
+# deleted. Tests that need to stand a recovery scenario up therefore build it
+# from the bytes the real 1.7.1 writers produced, captured in
+# tests/fixtures/legacy_swap/ before the deletion. See that directory's README.
+
+FIXTURES = Path(__file__).parent / "fixtures" / "legacy_swap"
+LEGACY_SWAPPED_ENV = (FIXTURES / "swapped.env").read_bytes()
+LEGACY_SWAPPED_NAMES = sorted(SECRETS)
+
+DEAD_PID = 4000000  # far above any live pid; pair with server_id "gone"
+
+
+def write_legacy_journal(env_path, *, state="active", pid=DEAD_PID, server_id="gone",
+                         pid_start=None, names=None, entries=None) -> None:
+    """Install a swap.journal.json in the 1.7.1 format.
+
+    Deliberately not legacy_swap.journal_add: nothing in 2.x writes a
+    journal, and a test that needed the writer would not survive the
+    deletion it exists to guard against. The shape comes from the golden
+    fixture, so the format stays pinned as it actually shipped (including
+    the top-level "version": 1) rather than as a hand-transcribed guess.
+
+    `entries` overrides everything for the malformed/quarantine cases.
+    """
+    doc = json.loads((FIXTURES / ("journal_restore_failed.json" if state == "restore_failed"
+                                  else "journal_active.json")).read_text(encoding="utf-8"))
+    if entries is not None:
+        doc["entries"] = entries
+    else:
+        entry = dict(doc["entries"]["__ENV_PATH__"])
+        entry.update({"pid": pid, "server_id": server_id, "pid_start": pid_start})
+        if names is not None:
+            entry["names"] = sorted(names)
+        doc["entries"] = {str(env_path): entry}
+    legacy_swap._journal_path().write_text(json.dumps(doc), encoding="utf-8")
+
+
+def norm_env(blob: bytes) -> bytes:
+    """Strip trailing horizontal whitespace from every line.
+
+    Crash recovery rebuilds each managed line from the index rather than
+    from a record of what was there, so trailing spaces on a rewritten line
+    are lost -- indent, `export `, terminators, comments and unmanaged lines
+    survive byte-exactly. Compare through this when asserting a recovered
+    file, and see test_legacy_swap_recovery's
+    test_crash_recovery_normalizes_trailing_whitespace for why that is
+    pinned rather than fixed.
+    """
+    return b"\n".join(line.rstrip(b" \t")
+                      for line in blob.replace(b"\r\n", b"\n").split(b"\n"))

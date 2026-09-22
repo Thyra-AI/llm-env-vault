@@ -149,10 +149,10 @@ def _entry_is_live(entry: dict) -> bool:
 def _file_is_all_placeholders(path: Path, names) -> bool:
     """True if no line for `names` holds anything but a placeholder.
 
-    Deliberately NOT store.preview_swap, which this used to call: that is
+    Deliberately NOT store.placeholder_state, which this used to call: that is
     forward swap code and it is deleted in 2.0. The quarantine has to stand
     on its own, so this re-derives the one fact it needs from the parsing
-    primitives store keeps. Semantics match preview_swap's `not_placeholder`
+    primitives store keeps. Semantics match placeholder_state's `not_placeholder`
     being empty: a name is only a problem if it has a line that is neither a
     numbered placeholder nor the pending marker, and no placeholder line
     elsewhere in the file.
@@ -173,32 +173,6 @@ def _file_is_all_placeholders(path: Path, names) -> bool:
         else:
             other.add(m.group("name"))
     return not (other - placeholder)
-
-
-def journal_add(path_key: str, names) -> None:
-    """Record that this process is about to write real values into
-    `path_key`. Must return before the first byte lands. Raises
-    SwapInProgress if another live server already has an active entry for
-    the same file; a stale entry (dead owner) is simply replaced -- its
-    recovery already happened, or happens on the next recover call."""
-    with _journal_lock():
-        entries, rejected = _load_journal_ex()
-        path_key = store.validate_target_key(path_key, names, store.load_targets())
-        existing = entries.get(path_key)
-        if existing and existing["state"] == "active" and _entry_is_live(existing):
-            raise SwapInProgress(
-                f"{path_key} already has real values written into it by another "
-                f"llm-env-vault session (pid {existing['pid']}) -- wait for that command "
-                f"to finish, or if that session is gone, call vault_status to recover it.")
-        entries[path_key] = {
-            "names": sorted(set(names)),
-            "pid": os.getpid(),
-            "pid_start": procs.own_start_time(),
-            "server_id": store.SERVER_ID,
-            "started": time.time(),
-            "state": "active",
-        }
-        _save_journal(entries, rejected)
 
 
 def journal_remove(path_key: str) -> None:

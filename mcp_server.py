@@ -271,7 +271,7 @@ def _vault_status_core() -> dict:
         if not path.is_file():
             continue
         try:
-            preview = store.preview_swap(path, names)
+            preview = store.placeholder_state(path, names)
         except (OSError, ValueError) as e:
             holding[path_str] = {"error": str(e)}
             continue
