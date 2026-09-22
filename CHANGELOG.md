@@ -7,6 +7,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [1.7.1] — 2026-09-22
+
+No behaviour change. Test-only fix; released so existing installs move off the 1.7.0 tree,
+since `claude plugin update` compares versions rather than commits.
+
+### Fixed
+
+- `tests/test_single_view.py::test_short_write_is_refused` patched only `GetOverlappedResult`,
+  on the premise that an overlapped write always reports its byte count there. A handle opened
+  `FILE_FLAG_OVERLAPPED` may complete the write inline instead, and then `WriteFile` returns
+  TRUE and fills the count itself, so the patch never fired and a full count reached the guard.
+  The developer machine takes the async path, CI's disk does not -- every Windows job failed
+  from 61756a0 on. `WriteFile` is now patched alongside `GetOverlappedResult`, and the test
+  asserts the byte count was actually shaved so it cannot pass for the wrong reason again.
+  The `write_all` short-write guard itself was correct and is unchanged.
+
 ## [1.7.0] — 2026-09-16
 
 ### Added
