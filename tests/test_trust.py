@@ -65,7 +65,14 @@ def _isolate_store_paths(tmp_dir: Path) -> dict:
         "SECRETS_FILE": store.SECRETS_FILE,
         "INDEX_FILE": store.INDEX_FILE,
         "ENV_FILE": store.ENV_FILE,
+        "ROOT": store.ROOT,
     }
+    # ROOT too: target_styles.json, swap.journal.json and
+    # placeholder_shapes.json are derived from it at call time, so a helper
+    # that redirects only the named FILE globals leaves those three writing
+    # into the real repo. test_redaction and test_trust_hardening import
+    # this helper, so all three leaked the same way.
+    store.ROOT = tmp_dir
     store.SALT_FILE = tmp_dir / "vault.salt"
     store.SECRETS_FILE = tmp_dir / "vault.enc"
     store.INDEX_FILE = tmp_dir / "vault_index.json"

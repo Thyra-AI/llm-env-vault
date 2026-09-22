@@ -66,7 +66,8 @@ def _empty_vault_dir():
     must not already exist. .resolve() matters on Windows, where mkdtemp
     hands back the 8.3 short form for long usernames.
     """
-    originals = {name: getattr(store, name) for name in _STORE_PATHS}
+    originals = {name: getattr(store, name) for name in _STORE_PATHS}
+    originals["ROOT"] = store.ROOT
     orig_scrypt = crypto.SCRYPT_DEFAULT
     orig_show = gui.show_recovery_key_dialog
     orig_recover = gui.recover_dialog
@@ -74,6 +75,10 @@ def _empty_vault_dir():
         tmp_path = pathlib.Path(tmp).resolve()
         for name, filename in _STORE_PATHS.items():
             setattr(store, name, tmp_path / filename)
+        # ROOT too: target_styles.json, swap.journal.json and
+        # placeholder_shapes.json derive from it at call time, so redirecting
+        # only the named FILE globals leaves those writing into the real repo.
+        store.ROOT = tmp_path
         # 6ms instead of ~114ms per derivation; the header records whatever
         # params were used, so a low-param vault reads back at low params.
         crypto.SCRYPT_DEFAULT = crypto.ScryptParams(n=2 ** 12, r=8, p=1)

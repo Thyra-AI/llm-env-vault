@@ -69,7 +69,13 @@ def _isolate_store_paths(tmp_dir: Path) -> dict:
         "ENV_FILE": store.ENV_FILE,
         "BAK_FILE": store.BAK_FILE,
         "FORMAT_FILE": store.FORMAT_FILE,
+        "ROOT": store.ROOT,
     }
+    # ROOT too: target_styles.json, swap.journal.json and
+    # placeholder_shapes.json are all derived from it at call time, so a
+    # helper that redirects only the named FILE globals leaves those
+    # three writing into the real repo.
+    store.ROOT = tmp_dir
     store.SALT_FILE = tmp_dir / "vault.salt"
     store.SECRETS_FILE = tmp_dir / "vault.enc"
     store.INDEX_FILE = tmp_dir / "vault_index.json"
