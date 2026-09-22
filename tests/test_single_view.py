@@ -425,9 +425,29 @@ def test_oplock_probe_is_removed_and_never_clobbers() -> None:
         _materialize_run(project, "print('hi')")
         leftovers = [p.name for p in project.iterdir() if "oplock-probe" in p.name]
         assert leftovers == [], leftovers
-        # An existing file at the probe path is a refusal, not a clobber.
-        squatter = project / ("." + MATERIALIZED + ".oplock-probe")
-        squatter.write_bytes(b"do not lose me\n")
-        reason = singleview.self_test_for_new_file(str(project / MATERIALIZED))
-        assert reason and "probe" in reason
-        assert squatter.read_bytes() == b"do not lose me\n"
+        # An unrelated file beside the target is never touched.
+        bystander = project / "keep.env"
+        bystander.write_bytes(b"do not lose me\n")
+        assert singleview.self_test_for_new_file(str(project / MATERIALIZED)) is None
+        assert bystander.read_bytes() == b"do not lose me\n"
+
+
+def test_a_probe_left_by_a_crash_does_not_disable_max_reads_forever() -> None:
+    """The probe is unlinked in a `finally`, but a process killed before
+    reaching it leaves the file behind. With a fixed probe name that turned
+    one crash into a PERMANENT refusal of max_reads for that target: the
+    exclusive-create hit the survivor on every later run. Shipped that way
+    in 2.0.0 and caught by the push-time review. The name carries random
+    bytes now, and older ones are swept."""
+    if _need_windows():
+        return
+    with workspace() as (project, _env_path):
+        target = project / MATERIALIZED
+        for stale in ("." + MATERIALIZED + ".oplock-probe",            # the 2.0.0 shape
+                      "." + MATERIALIZED + ".deadbeef.oplock-probe"):  # a 2.0.1 survivor
+            (project / stale).write_bytes(b"# llm-env-vault oplock probe\n")
+        assert singleview.self_test_for_new_file(str(target)) is None, "a crash disabled it"
+        # And survivors are swept rather than accumulating.
+        assert [p.name for p in project.iterdir() if "oplock-probe" in p.name] == []
+        r = _materialize_run(project, "print('hi')")
+        assert "error" not in r, r

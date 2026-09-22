@@ -1223,47 +1223,36 @@ def write_materialized_env(path: Path, secrets: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# In-place swap: real values in a registered target for one command's life
+# Quoting styles of migrated lines
 # ---------------------------------------------------------------------------
 #
-# Everything above keeps real values out of every file an agent can read.
-# The swap is the deliberate, bounded exception: run_with_env(swap=[...])
-# rewrites the placeholder lines of an already-migrated .env with the real
-# values, runs one foreground command, and puts the placeholders back. It
-# exists because four whole classes of consumer cannot be reached any other
-# way -- loaders that override the environment from the file, shell
-# sourcing, tools hard-wired to read `.env` and nothing else, and test
-# harnesses that scrub the child environment before the loader runs (see
-# docs/env-consumption-research.md). It is `materialize` at the canonical
-# path, and it carries the same exposure: real values on disk for the
-# duration of the run, readable by anything that can read the file.
-#
-# Three files support it, all derived from ROOT at call time (not module
-# constants) so the test suites' ROOT isolation covers them automatically:
+# Everything above keeps real values out of every file an agent can read, and
+# as of 2.0 there is no exception in this module: run_with_env(swap=[...]),
+# which rewrote a registered .env with real values for one command, is gone
+# (docs/security-posture-2.0.0.md §3). What survives it is the record of how
+# each line was quoted, because anything that rewrites a managed line has to
+# put it back in the form the file's consumers already parse -- no single
+# quoting works for every .env parser.
 #
 #   target_styles.json   {path: {name: '"' | "'" | ""}} -- how each migrated
-#                        line was originally quoted. Agent-readable and
+#                        line was originally quoted. Derived from ROOT at
+#                        call time (not a module constant) so the suites'
+#                        ROOT isolation covers it. Agent-readable and
 #                        -writable like targets.json; validated on read; a
 #                        bad entry only changes the quoting of a line the
 #                        agent could already rewrite wholesale.
-#   swap.journal.json    {path: {names, pid, pid_start, server_id, started,
-#                        state}} -- written BEFORE the first real value
-#                        lands in a file, removed AFTER the placeholders
-#                        are back. A server that dies mid-run leaves an
-#                        entry; the next tool call in any server restores
-#                        the file from it.
-#   swap.journal.lock    serialises journal read-modify-write across
-#                        server processes.
+#
+# swap.journal.json and its lock are NOT here any more: nothing in 2.x writes
+# one, and the names live in vault_lib/legacy_swap.py, which is the only
+# thing that still reads them.
 
 STYLES_FILE_NAME = "target_styles.json"
-SWAP_JOURNAL_NAME = "swap.journal.json"
-SWAP_JOURNAL_LOCK_NAME = "swap.journal.lock"
 VALID_QUOTE_STYLES = ('"', "'", "")
 
-# Random per-process identity. A journal entry whose pid is ours but whose
-# server_id is not was written by a dead predecessor that happened to get
-# the same pid -- Windows reuses them freely -- and must not be mistaken
-# for our own live swap.
+# Random per-process identity. Read by legacy_swap: a pre-2.0 journal entry
+# whose pid is ours but whose server_id is not was written by a dead
+# predecessor that happened to get the same pid -- Windows reuses them
+# freely -- and must not be mistaken for a live run of our own.
 SERVER_ID = _token_hex(8)
 
 # Printable ASCII that every .env parser we surveyed -- quote-stripping and
@@ -1290,9 +1279,11 @@ def _looks_like_unc(text: str) -> bool:
 def validate_target_key(key, names, targets: dict) -> str:
     """The one gate between agent-writable input and the filesystem.
 
-    A path from swap.journal.json or from a swap= argument is acted on only
-    if it is a plain, absolute, LOCAL path that is already a registered
-    install_migrate target, and the names are that target's own. Returns
+    A path from a pre-2.0 swap.journal.json is acted on only if it is a
+    plain, absolute, LOCAL path that is already a registered install_migrate
+    target, and the names are that target's own. (Until 2.0 this also gated
+    run_with_env's swap= argument; that parameter is gone, and legacy_swap's
+    journal validation is the only caller left.) Returns
     the registry's own key string so every later step uses one spelling.
 
     String checks come first and touch nothing on disk: a UNC path

@@ -7,6 +7,32 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.0.1] — 2026-09-22
+
+Fixes a defect introduced by 2.0.0's own new code, plus the stale prose that
+shipped with it. All three were found by the push-time review of 2.0.0, after the tag.
+
+### Fixed
+
+- **A crash could permanently disable `max_reads` for a materialize target.**
+  `self_test_for_new_file` (new in 2.0.0) proves the filesystem grants an oplock by creating a
+  throwaway probe beside the target and removing it in a `finally`. The name was fixed, so a
+  process killed before reaching that `finally` left the file behind -- and every later
+  `max_reads` run against the same target then hit the exclusive-create and was refused. One
+  crash turned into a permanent, self-inflicted refusal of the feature.
+
+  The probe name now carries random bytes, so a survivor can never collide, and older ones are
+  swept first -- including the fixed name 2.0.0 shipped, which is the survivor most likely to
+  exist. 2.0.0's test asserted the refusal as correct behaviour, which is how the bug got
+  through; it now asserts the opposite.
+
+- **Stale swap prose in `vault_lib/store.py`.** A design-comment block still described
+  `run_with_env(swap=[...])` in the present tense as this module's "deliberate, bounded
+  exception", in the same file whose swap code 2.0.0 deleted. `SWAP_JOURNAL_NAME` and
+  `SWAP_JOURNAL_LOCK_NAME` were left behind as dead duplicates of the ones in
+  `vault_lib/legacy_swap.py`, which is where the only remaining reader lives.
+  `validate_target_key`'s docstring still gated "a swap= argument" that no longer exists.
+
 ## [2.0.0] — 2026-09-22
 
 `run_with_env(swap=)` is removed. It wrote real secret values into the project's own registered

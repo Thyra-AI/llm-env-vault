@@ -715,15 +715,41 @@ def self_test_for_new_file(path: str, timeout: float = 3.0) -> Optional[str]:
 
     Runs before the dialog, like self_test, so a run that could not honour
     max_reads is refused before a human is asked to approve it rather than
-    after. The probe name is prefixed with a dot and suffixed distinctly so
-    a stray one is obviously ours if a crash ever leaves it behind.
+    after.
+
+    The probe name carries random bytes, and any older one beside the target
+    is swept first. A fixed name would be a trap: the probe is removed in a
+    `finally`, but a process killed between creating it and reaching that
+    `finally` leaves the file behind, and then every later max_reads run
+    against the same target hits the exclusive-create and is refused --
+    turning one crash into a permanent, self-inflicted refusal of the
+    feature. Randomising means a survivor can never collide; sweeping means
+    it does not accumulate either.
     """
     if unsupported_reason():
         return unsupported_reason()
     target = Path(path)
-    probe = target.parent / f".{target.name}.oplock-probe"
+    parent = target.parent
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return f"could not create an oplock probe beside {path}: {e}"
+    # Sweep survivors of an earlier crash. Every match is ours by
+    # construction; best effort, because a probe another process is holding
+    # right now is not ours to remove.
+    # Both shapes: the randomised one, and the fixed name 2.0.0 shipped --
+    # which is the survivor most likely to actually be out there.
+    for pattern in (f".{target.name}.*.oplock-probe", f".{target.name}.oplock-probe"):
+        try:
+            for stale in parent.glob(pattern):
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    probe = parent / f".{target.name}.{os.urandom(4).hex()}.oplock-probe"
+    try:
         # x mode: never clobber something that is already there.
         with open(probe, "xb") as f:
             f.write(b"# llm-env-vault oplock probe\n")
