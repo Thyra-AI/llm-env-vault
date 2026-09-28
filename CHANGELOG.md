@@ -7,6 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.1.0] — 2026-09-28
+
+### Added
+
+- **The update dialog shows the value being replaced.** When `add_secret` updates an existing
+  variable, the Confirm Change step now has a read-only "Current value" field and pre-fills
+  "New value" with it, so a small edit doesn't mean retyping the whole secret. Both are masked
+  until "Show values" is ticked. The value is already decrypted in that window from the
+  password step and never leaves it; nothing new reaches the AI. Adding a new variable gets a
+  "Show value" toggle as well.
+
 ## [2.0.6] — 2026-09-23
 
 ### Fixed

@@ -735,9 +735,40 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
         _divider(container).grid(row=row, column=0, columnspan=2, sticky="ew", padx=pad["padx"], pady=4)
         row += 1
 
-        _label(container, f"Real value for {_var}:").grid(row=row, column=0, sticky="e", **pad)
+        # On an update, show the value being replaced (masked until the human
+        # asks) and pre-fill the new value with it so a small edit doesn't mean
+        # retyping the whole secret. This is the native dialog -- the value
+        # never leaves this window.
+        current = (state.get("secrets") or {}).get(var_name) if is_update else None
+        masked_entries = []
+        if current is not None:
+            _label(container, "Current value:").grid(row=row, column=0, sticky="e", **pad)
+            cur = _entry(container, show="*", width=30)
+            cur.insert(0, current)
+            cur.config(state="readonly", readonlybackground=FIELD_BG)
+            cur.grid(row=row, column=1, **pad)
+            masked_entries.append(cur)
+            row += 1
+
+        label = "New value:" if current is not None else f"Real value for {_var}:"
+        _label(container, label).grid(row=row, column=0, sticky="e", **pad)
         val = _entry(container, show="*", width=30)
+        if current is not None:
+            val.insert(0, current)
+            val.select_range(0, "end")
         val.grid(row=row, column=1, **pad)
+        masked_entries.append(val)
+        row += 1
+
+        show_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            container, text="Show values" if current is not None else "Show value",
+            variable=show_var,
+            command=lambda: [e.config(show="" if show_var.get() else "*") for e in masked_entries],
+            bg=WINDOW_BG, fg=FG_MUTED, font=FONT_BODY,
+            selectcolor=FIELD_BG, activebackground=WINDOW_BG, activeforeground=FG,
+            highlightthickness=0, anchor="w",
+        ).grid(row=row, column=1, sticky="w", padx=pad["padx"])
         row += 1
 
         if is_sensitive:
