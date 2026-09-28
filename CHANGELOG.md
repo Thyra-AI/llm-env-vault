@@ -7,6 +7,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.1.1] — 2026-09-28
+
+### Fixed
+
+- **The update dialog no longer shows a stale "Current value".** The value shown, and
+  pre-filled, came from the password step. If the vault changed while the dialog sat open,
+  pressing Allow on the pre-filled value would silently undo that change. Allow now compares
+  the shown value against a fresh decrypt and refuses, with a prompt to go Back, if they differ.
+
 ## [2.1.0] — 2026-09-28
 
 ### Added

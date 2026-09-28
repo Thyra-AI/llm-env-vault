@@ -808,6 +808,16 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
                     # over the real file would silently erase anything
                     # another operation saved to the vault in the meantime.
                     secrets = store.load_secrets(state["password"])
+                    # "Current value" (and the pre-filled new value) came from
+                    # step 1's snapshot. If the vault changed since, saving
+                    # would silently revert that change -- make the human
+                    # look at the real current value first.
+                    if current is not None and secrets.get(var_name) != current:
+                        _show_error(root, err,
+                                    f"{_var} changed in the vault while this dialog was "
+                                    f"open. Press Back and re-enter the password to see "
+                                    f"its current value.")
+                        return
                 secrets[var_name] = value
                 store.save_secrets(state["password"], secrets)
                 secrets_saved = True
