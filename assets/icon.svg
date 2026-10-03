@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="LLM Env Vault">
+  <rect width="128" height="128" rx="24" fill="#1f2a44"/>
+  <path d="M42 56V44a22 22 0 0 1 44 0v12" fill="none" stroke="#e8edf7" stroke-width="10" stroke-linecap="round"/>
+  <rect x="28" y="56" width="72" height="52" rx="10" fill="#4f8cff"/>
+  <circle cx="64" cy="78" r="8" fill="#1f2a44"/>
+  <rect x="60" y="82" width="8" height="14" rx="3" fill="#1f2a44"/>
+</svg>

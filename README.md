@@ -137,6 +137,28 @@ You can also run it directly with no client for local testing: `python mcp_serve
 
 ---
 
+## What this plugin runs, sends and downloads
+
+Stated plainly, so you can decide whether to install it. Everything below was checked against the code, not recalled from memory.
+
+**What runs on your machine**
+
+- **One local MCP server process**, started by Claude Code over stdio (`python plugin_launcher.py`, which hands off to `mcp_server.py`). It talks only to Claude Code through that pipe; it opens no listening port and no network connection of its own.
+- **`plugin_launcher.py`**, on first run and again after a real plugin update: creates a virtualenv under `${CLAUDE_PLUGIN_DATA}/venv` and installs `cryptography` and `mcp[cli]` (plus their dependencies) from **PyPI** with `pip` — or with `uv` if one is on your `PATH`. On Windows this uses the hash-pinned `requirements-lock.txt` with `--require-hashes`; on macOS and Linux it uses the unpinned `requirements.txt`. Its output is logged to `${CLAUDE_PLUGIN_DATA}/provision.log`.
+- **Native Tkinter dialogs** (the Python standard library) for every password prompt and confirmation. They are local windows only.
+- **Commands you approve.** `run_with_env` runs the command the agent proposes, with real values injected, only after you click Allow in a dialog. That command is yours: whatever network access *it* makes is outside this plugin's control. The plugin also runs `git` locally (read-only status queries, with hooks disabled) to tell whether a file is tracked or ignored.
+
+**What it reads and writes**
+
+- **Vault files** (see the table above) under `${CLAUDE_PLUGIN_DATA}/vault` for the plugin, or next to the repo for a manual setup — `vault.enc`, `vault.salt`, the placeholder index, and the small bookkeeping files listed there.
+- **Your `.env` files**, only the ones you migrate with `install_migrate`: read to import values, rewritten to hold placeholders. **Files you encrypt** with `encrypt_file` are replaced by a `.levault` next to them; `decrypt_file` and the `files` option of `run_with_env` write plaintext back out, behind a dialog.
+- **Your OS temp directory:** a log for each `background=True` run (`llm-env-vault-run-*.log`, redacted in place when the process exits, stale ones deleted automatically) and an empty directory used to disable git hooks. During a `materialize` run a target file holding real values exists only while the command runs.
+- **Memory only:** the master password (in a dialog, for one prompt) and the 8-hour "trusted command" cache. Neither is written to disk.
+
+**Network traffic.** The only network access in this plugin's own code is the dependency install from PyPI described above (and the install tool's own package index requests). The server code contains no HTTP, socket or URL-fetching calls, and nothing is sent to the plugin's authors or any third party. **There is no telemetry, analytics, crash reporting or update check.** Updates happen only when you run `claude plugin update`. See [PRIVACY.md](PRIVACY.md) for the data-handling statement and [SUPPORT.md](SUPPORT.md) for how to get help or report a security issue.
+
+---
+
 ## Quick start
 
 1. **Migrate an existing project:** ask your agent to call `install_migrate` on the project's `.env`. A dialog shows exactly which variable *names* will move (never values); on Allow, real values go into the vault and the file is rewritten with placeholders in place.

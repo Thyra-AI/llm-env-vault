@@ -7,6 +7,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.1.2] — 2026-10-03
+
+Preparation for the Claude plugin directory. No change to vault behavior.
+
+### Changed
+
+- **`.mcp.json` launches the server with plain arguments again.** It is now
+  `python ${CLAUDE_PLUGIN_ROOT}/plugin_launcher.py`, replacing the `python -c "import os,runpy; ..."`
+  form that 1.5.1 introduced. That form existed so a repo opened as a *project* (where Claude
+  Code does not substitute `${CLAUDE_PLUGIN_ROOT}`) still found the launcher; the plugin
+  directory's validator holds `-c` launches for manual review, and the installed-plugin case,
+  the one users actually run, substitutes the variable and needs no workaround. Verified with
+  `claude --plugin-dir <repo> mcp list` from an unrelated directory: the server resolves to the
+  real launcher path and connects. The cost is on the maintainer side only: opening this
+  repository as a project now reports `Missing environment variables: CLAUDE_PLUGIN_ROOT` for the
+  project-level copy of the server. The repo's own `.claude/settings.json` marks that copy
+  disabled (`disabledMcpjsonServers`) so it does not prompt; to run the server from a checkout, use
+  `claude --plugin-dir .` or the manual setup in the README.
+
+### Added
+
+- README section "What this plugin runs, sends and downloads", plus `PRIVACY.md` and `SUPPORT.md`.
+- `assets/icon.svg`, and `icon`, `documentationUrl`, `supportUrl` and `privacyPolicyUrl` in
+  `plugin.json`.
+
 ## [2.1.1] — 2026-09-28
 
 ### Fixed
