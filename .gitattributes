@@ -14,3 +14,7 @@
 # The v1 vault fixture is a byte-frozen tripwire for the legacy Fernet path.
 tests/fixtures/v1_vault/v1_vault.enc binary
 tests/fixtures/v1_vault/v1_vault.salt binary
+
+# The golden LEVFILE fixture is kept as base64 text so the repo carries no
+# opaque binary. Pin LF so the committed text never varies by platform.
+tests/fixtures/file_envelope/golden.levault.b64 text eol=lf

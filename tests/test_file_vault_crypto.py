@@ -577,13 +577,20 @@ _GOLDEN_PLAINTEXT = (b"-----BEGIN FIXTURE KEY-----\n"
                      b"-----END FIXTURE KEY-----\n")
 
 
+def _golden_bytes() -> bytes:
+    """The frozen envelope, decoded from its base64 text form. It is stored as
+    text (golden.levault.b64) so the repo carries no opaque binary blob; the
+    decoded bytes are identical to the original golden.levault."""
+    return base64.b64decode((FIXTURE_DIR / "golden.levault.b64").read_text("ascii"))
+
+
 def test_golden_fixture_still_opens() -> None:
     """If this fails the on-disk format changed. Every round-trip test above
     would still pass, because they all encrypt and decrypt with the same
     (changed) code. Real users' .levault files -- whose plaintext was
     deliberately destroyed -- would not open. Read the fixture README before
     touching anything here; do NOT regenerate the file to make this green."""
-    data = (FIXTURE_DIR / "golden.levault").read_bytes()
+    data = _golden_bytes()
     out, meta, header = open_file_envelope(_GOLDEN_FMK, data)
     assert out == _GOLDEN_PLAINTEXT
     assert meta["name"] == "fixture.pem"
@@ -594,7 +601,7 @@ def test_golden_fixture_still_opens() -> None:
 
 
 def test_golden_fixture_is_recognised_as_a_file_and_not_as_a_vault() -> None:
-    data = (FIXTURE_DIR / "golden.levault").read_bytes()
+    data = _golden_bytes()
     assert is_file_envelope(data) is True
     assert is_v2(data) is False
 

@@ -831,7 +831,7 @@ plus additional pytest-only files:
   whole-file encryption: the `LEVFILE` envelope and its tamper/DoS/transplant resistance, the file
   master key surviving every credential operation, the encrypt ordering and its rollback, every
   refusal rule, the registry, `run_with_env(files=)` cleanup, and key rotation and retirement.
-  `tests/fixtures/file_envelope/golden.levault` is a byte-frozen format tripwire: every other test
+  `tests/fixtures/file_envelope/golden.levault.b64` (base64 text of the frozen envelope) is a byte-frozen format tripwire: every other test
   round-trips through the current code and would stay green if the on-disk format changed, which
   would silently make real users' committed files unopenable.
 - `tests/test_single_view.py` — 1.7.0 `max_reads`: every test runs a real child in a real Job

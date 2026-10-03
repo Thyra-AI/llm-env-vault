@@ -7,6 +7,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.1.5] — 2026-10-03
+
+Fixes from the Claude plugin directory validator. No change to vault behavior.
+
+### Fixed
+
+- **`docs/env-consumption-research.md` named a credential-style variable next to remote URLs.**
+  The mechanism-A example used `DATABASE_URL`, which the validator read as the plugin consuming a
+  credential from the user's machine. The example is now `EXAMPLE_SETTING`; the point it makes
+  (a child process reads whatever the parent environment holds) is unchanged.
+- **The golden `LEVFILE` test fixture was an opaque binary the validator could not inspect.**
+  `tests/fixtures/file_envelope/golden.levault` is now `golden.levault.b64`, the same bytes as
+  base64 text, decoded in memory by the two tests that use it. The format tripwire still compares
+  against byte-frozen content.
+
 ## [2.1.4] — 2026-10-03
 
 ### Fixed

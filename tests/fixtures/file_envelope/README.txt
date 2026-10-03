@@ -1,7 +1,7 @@
 LEVFILE GOLDEN FIXTURE — DO NOT DELETE OR REGENERATE
 =====================================================
 
-golden.levault is a byte-frozen artefact of the v1 file-envelope format
+golden.levault (stored as base64 text in golden.levault.b64, so the repo holds no opaque binary; the tests decode it in memory to the identical bytes) is a byte-frozen artefact of the v1 file-envelope format
 (crypto.build_file_envelope / open_file_envelope, FILE_MAGIC = b"LEVFILE\0",
 FILE_FORMAT_VERSION = 1).
 
@@ -32,7 +32,7 @@ string, or the inner meta framing would keep every round-trip test green while
 silently making every .levault file in the world unopenable — and unlike the
 vault, the plaintext for those files was deliberately destroyed.
 
-This fixture is the tripwire for that. test_golden_fixture_still_opens reads
+This fixture is the tripwire for that. test_golden_fixture_still_opens decodes
 these exact bytes and asserts the exact expected plaintext and metadata.
 
 IF THAT TEST FAILS
