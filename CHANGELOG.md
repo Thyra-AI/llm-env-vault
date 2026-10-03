@@ -7,6 +7,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.1.3] — 2026-10-03
+
+Fixes from the Claude plugin directory validator. No change to vault behavior.
+
+### Fixed
+
+- **`/llm-env-vault:protect` `allowed-tools` named tools that do not exist.** The three MCP
+  entries used the manually-registered form `mcp__llm-env-vault__<tool>`; a plugin-shipped server
+  is exposed as `mcp__plugin_llm-env-vault_llm-env-vault__<tool>`, so the entries matched nothing.
+  They now use the plugin-scoped names. The command still omits every file-reading tool.
+
+### Changed
+
+- **`/llm-env-vault:doctor` no longer pre-approves broad shell access.** `allowed-tools` was
+  `Bash, Glob, Read`; it is now limited to the exact commands the body runs (`python --version`,
+  `python3 --version`, the `import tkinter` check), `Glob`, `vault_status`, and `Read` scoped to
+  `~/.claude/**/provision.log`. The command body states that it never reads the vault, salt, or
+  any `.env` file.
+
 ## [2.1.2] — 2026-10-03
 
 Preparation for the Claude plugin directory. No change to vault behavior.

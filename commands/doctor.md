@@ -1,6 +1,6 @@
 ---
 description: Diagnose why llm-env-vault's tools aren't showing up
-allowed-tools: Bash, Glob, Read
+allowed-tools: Glob, Read(~/.claude/**/provision.log), Bash(python --version:*), Bash(python3 --version:*), Bash(python -c "import tkinter; print('tkinter ok')"), mcp__plugin_llm-env-vault_llm-env-vault__vault_status
 ---
 
 # Diagnose llm-env-vault
@@ -32,6 +32,10 @@ under the user's `.claude` directory.
 
 If you find it, read it. It records why each provisioning attempt happened and the full stdout
 and stderr of the `venv` and `pip` commands.
+
+`Read` is pre-approved for `provision.log` only. Never read `vault.enc`, `vault.salt`,
+`llm.env`, or any `.env` file while diagnosing; none of them is needed, and the log is the only
+file this command inspects.
 
 ## 3. Is there a usable Python?
 
