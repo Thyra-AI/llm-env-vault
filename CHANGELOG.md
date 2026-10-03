@@ -7,6 +7,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.1.4] — 2026-10-03
+
+### Fixed
+
+- **`/llm-env-vault:doctor` pre-approved any `python` command.** `Bash(python --version:*)` and
+  `Bash(python3 --version:*)` are prefix rules, so they matched every command starting with
+  `python`. They are now exact-match `Bash(python --version)` and `Bash(python3 --version)`.
+
 ## [2.1.3] — 2026-10-03
 
 Fixes from the Claude plugin directory validator. No change to vault behavior.

@@ -1,6 +1,6 @@
 ---
 description: Diagnose why llm-env-vault's tools aren't showing up
-allowed-tools: Glob, Read(~/.claude/**/provision.log), Bash(python --version:*), Bash(python3 --version:*), Bash(python -c "import tkinter; print('tkinter ok')"), mcp__plugin_llm-env-vault_llm-env-vault__vault_status
+allowed-tools: Glob, Read(~/.claude/**/provision.log), Bash(python --version), Bash(python3 --version), Bash(python -c "import tkinter; print('tkinter ok')"), mcp__plugin_llm-env-vault_llm-env-vault__vault_status
 ---
 
 # Diagnose llm-env-vault
