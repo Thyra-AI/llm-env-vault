@@ -36,8 +36,9 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from vault_lib import gui, legacy_swap, procs, singleview, store, trust
-from vault_lib.crypto import (WrongPassword, WrongRecoveryKey, MalformedRecoveryKey,
-                              NoRecoverySlot, VaultCorrupted, VaultTampered)
+from vault_lib.crypto import (WrongPassword, TooManyAttempts, WrongRecoveryKey,
+                              MalformedRecoveryKey, NoRecoverySlot, VaultCorrupted,
+                              VaultTampered)
 
 # Standing policy handed to every client that connects, so it applies
 # unconditionally rather than depending on a skill trigger firing at the exact
@@ -1085,6 +1086,8 @@ def _change_password_impl() -> dict:
         return {"applied": False,
                 "error": "No vault found (vault.enc or vault.salt is missing). "
                          "Create a vault first before changing the password."}
+    except TooManyAttempts as e:
+        return {"applied": False, "error": str(e)}
     except WrongPassword:
         return {"applied": False, "error": "Incorrect current password."}
     except (RuntimeError, VaultCorrupted, VaultTampered):
@@ -1183,6 +1186,8 @@ def _manage_vault_impl() -> dict:
         except FileNotFoundError:
             return {"applied": False,
                     "error": "No vault found. Create a vault first before changing the password."}
+        except TooManyAttempts as e:
+            return {"applied": False, "error": str(e)}
         except WrongPassword:
             return {"applied": False, "error": "Incorrect current password."}
         except (RuntimeError, VaultCorrupted, VaultTampered):
@@ -1219,6 +1224,8 @@ def _manage_vault_impl() -> dict:
             return {"applied": False, "message": "Cancelled by user."}
         try:
             report = store.rotate_file_key(password)
+        except TooManyAttempts as e:
+            return {"applied": False, "error": str(e)}
         except WrongPassword:
             return {"applied": False, "error": "Incorrect master password."}
         except (OSError, ValueError, RuntimeError, VaultCorrupted, VaultTampered) as e:
@@ -1249,6 +1256,8 @@ def _manage_vault_impl() -> dict:
             return {"applied": False, "message": "Cancelled by user."}
         try:
             report = store.retire_file_keys(password)
+        except TooManyAttempts as e:
+            return {"applied": False, "error": str(e)}
         except WrongPassword:
             return {"applied": False, "error": "Incorrect master password."}
         except (OSError, RuntimeError, VaultCorrupted, VaultTampered) as e:
@@ -1277,6 +1286,8 @@ def _manage_vault_impl() -> dict:
                 return {"applied": False, "message": "Cancelled by user."}
             try:
                 report = store.retire_file_keys(password, abandon=abandon)
+            except TooManyAttempts as e:
+                return {"applied": False, "error": str(e)}
             except WrongPassword:
                 return {"applied": False, "error": "Incorrect master password."}
             except (OSError, ValueError, RuntimeError,
@@ -1303,6 +1314,8 @@ def _manage_vault_impl() -> dict:
             new_key = store.reissue_recovery_key(password)
         except FileNotFoundError:
             return {"applied": False, "error": "No vault found."}
+        except TooManyAttempts as e:
+            return {"applied": False, "error": str(e)}
         except WrongPassword:
             return {"applied": False, "error": "Incorrect password."}
         except (RuntimeError, VaultCorrupted, VaultTampered):
@@ -1335,6 +1348,8 @@ def _manage_vault_impl() -> dict:
             new_key = store.upgrade_to_v2(password, recovery=recovery)
         except FileNotFoundError:
             return {"applied": False, "error": "No vault found."}
+        except TooManyAttempts as e:
+            return {"applied": False, "error": str(e)}
         except WrongPassword:
             return {"applied": False, "error": "Incorrect password."}
         except (RuntimeError, VaultCorrupted, VaultTampered):
@@ -1407,6 +1422,8 @@ def _recover_vault_impl() -> dict:
         return {"applied": False, "message": "Cancelled by user."}
     try:
         new_key = store.recover_with_recovery_key(rk_text, new_password)
+    except TooManyAttempts as e:
+        return {"applied": False, "error": str(e)}
     except MalformedRecoveryKey:
         # Checksum caught it before any unwrap -- almost always a typo.
         return {"applied": False,

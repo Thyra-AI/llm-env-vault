@@ -657,6 +657,12 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
   (`admin`, `root`, `changeme`, `docker`, `postgres`) are refused outright at any length. Length
   and dictionary rank are separate problems: a short random password needs millions of guesses,
   while a top-of-wordlist one needs a handful no matter how expensive the KDF is.
+- **Repeated wrong passwords trigger a cool-down.** After 5 failed unlocks, every dialog refuses
+  to even try the password for 30 seconds, doubling with each further failure up to 15 minutes.
+  The count survives server restarts, resets on a successful unlock, and is forgotten after a day
+  with no failures. Recovery-key attempts have their own separate count, so a locked-out password
+  never blocks the paper key. This only slows guessing *through the dialog* — it does nothing
+  against a copied `vault.enc` attacked offline (see above).
 - **The recovery key is a real increase in attack surface.** It converts "compromise requires
   something in a human's head" into "compromise requires a piece of paper" — screenshots, phone
   photos, a filing cabinet. It is opt-in for exactly that reason; a password-only vault is fully

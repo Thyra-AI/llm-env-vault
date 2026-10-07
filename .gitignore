@@ -6,6 +6,8 @@ targets.json
 targets.json.lock
 files.json
 vault.enc.lock
+vault.attempts.json
+vault.attempts.json.lock
 files.json.lock
 target_styles.json
 placeholder_shapes.json

@@ -47,6 +47,31 @@ class WrongPassword(Exception):
     pass
 
 
+class TooManyAttempts(WrongPassword):
+    """Raised BEFORE any key derivation when recent failed unlocks have put
+    the vault in a cool-down. The credential was never tested, so this says
+    nothing about whether it was right.
+
+    Subclasses WrongPassword so every existing ``except WrongPassword`` site
+    refuses the unlock and shows ``str(e)`` -- a handler that forgot about
+    this class still fails closed. ``retry_after`` is whole seconds.
+    """
+
+    def __init__(self, retry_after: int):
+        self.retry_after = retry_after
+        super().__init__(
+            f"Too many incorrect attempts. Try again in "
+            f"{_format_wait(retry_after)}."
+        )
+
+
+def _format_wait(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds} second{'s' if seconds != 1 else ''}"
+    minutes = -(-seconds // 60)  # round up: never promise less than the real wait
+    return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+
 def new_salt() -> bytes:
     """Return 16 fresh random bytes for use as a v1 KDF salt. FROZEN LEGACY."""
     return os.urandom(16)

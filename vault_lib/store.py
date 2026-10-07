@@ -1854,10 +1854,165 @@ def _verify_v2_slots(
             )
 
 
+# ---------------------------------------------------------------------------
+# Failed-unlock throttle
+# ---------------------------------------------------------------------------
+#
+# Every place a human-supplied credential is tested against vault.enc goes
+# through _unlock_attempt. The first _FREE_ATTEMPTS failures cost nothing --
+# typos are normal -- and each failure after that imposes a cool-down that
+# doubles, up to _MAX_LOCKOUT_SECONDS. During a cool-down the credential is
+# not even tried, so guessing through the dialog is capped at a handful of
+# attempts per quarter hour instead of one per scrypt derivation.
+#
+# What this does NOT defend: an attacker holding a copy of vault.enc attacks
+# it offline, where none of this code runs. Nor does it resist someone who
+# can delete vault.attempts.json -- but write access to this directory means
+# read access to vault.enc too, which is the offline case anyway. The state
+# lives on disk rather than in memory because every dialog is a fresh
+# unlock, and a server restart must not hand out a fresh budget.
+#
+# Password and recovery-key failures are counted separately, so a human who
+# burned their password budget can still reach for the paper key at once.
+
+_FREE_ATTEMPTS = 5
+_BASE_LOCKOUT_SECONDS = 30
+_MAX_LOCKOUT_SECONDS = 15 * 60
+# A quiet day forgets old failures, so a few typos a week never add up to a
+# lockout.
+_FORGET_FAILURES_SECONDS = 24 * 3600
+
+
+def _attempts_file() -> Path:
+    # Derived from SECRETS_FILE at call time so it always sits beside the
+    # vault it protects, including in test workspaces that repoint it.
+    return SECRETS_FILE.parent / "vault.attempts.json"
+
+
+def _lockout_seconds(failures: int) -> int:
+    if failures < _FREE_ATTEMPTS:
+        return 0
+    return min(_BASE_LOCKOUT_SECONDS * 2 ** (failures - _FREE_ATTEMPTS),
+               _MAX_LOCKOUT_SECONDS)
+
+
+def _read_attempts() -> dict:
+    """Return ``{kind: {"failures": int, "last": float}}``; junk reads as empty.
+
+    The file is plain JSON in an agent-writable directory, so nothing in it is
+    trusted beyond its types.
+    """
+    try:
+        raw = json.loads(_attempts_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    if isinstance(raw, dict):
+        for kind, rec in raw.items():
+            if (isinstance(rec, dict)
+                    and isinstance(rec.get("failures"), int)
+                    and isinstance(rec.get("last"), (int, float))):
+                out[kind] = {"failures": max(rec["failures"], 0),
+                             "last": float(rec["last"])}
+    return out
+
+
+def _write_attempts(state: dict) -> None:
+    path = _attempts_file()
+    if not state:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    _atomic_write_text(path, json.dumps(state), mode=0o600)
+
+
+def _attempts_lock():
+    return _json_lock(_attempts_file().with_name("vault.attempts.json.lock"),
+                      "vault.attempts.json")
+
+
+def _begin_unlock_attempt(kind: str) -> None:
+    """Refuse during a cool-down; otherwise count this attempt as a failure
+    NOW, before the credential is tested.
+
+    Counting up front is what makes the limit hold under concurrency: if the
+    failure were only recorded after the slow KDF, any number of attempts
+    started together would all pass the check before the first one landed.
+    The caller clears or rolls back the count once the outcome is known.
+    """
+    with _attempts_lock():
+        state = _read_attempts()
+        now = time.time()
+        rec = state.get(kind)
+        if rec is not None and rec["last"] > now:
+            # The clock went backwards. Restart the cool-down from now rather
+            # than wait for the clock to catch up -- that could be days.
+            rec["last"] = now
+        if rec is None or now - rec["last"] > _FORGET_FAILURES_SECONDS:
+            rec = {"failures": 0, "last": now}
+        remaining = rec["last"] + _lockout_seconds(rec["failures"]) - now
+        if remaining > 0:
+            _write_attempts(state)  # persist a clock-skew fix-up, if any
+            raise crypto.TooManyAttempts(int(-(-remaining // 1)))
+        state[kind] = {"failures": rec["failures"] + 1, "last": now}
+        _write_attempts(state)
+
+
+def _finish_unlock_attempt(kind: str, outcome: str) -> None:
+    """Settle an attempt begun by _begin_unlock_attempt.
+
+    outcome is "ok" (clear the count), or "void" (the attempt failed for a
+    reason that says nothing about the credential, so take it back off).
+    A wrong credential needs no call: it was already counted.
+    """
+    with _attempts_lock():
+        state = _read_attempts()
+        if outcome == "ok":
+            if kind == "recovery":
+                # A recovery sets a brand-new password, so failures against
+                # the old one must not lock the human out of the one they
+                # just chose.
+                state = {}
+            else:
+                state.pop(kind, None)
+        else:
+            rec = state.get(kind)
+            if rec is None:
+                return
+            if rec["failures"] > 1:
+                rec["failures"] -= 1
+            else:
+                del state[kind]
+        _write_attempts(state)
+
+
+@contextlib.contextmanager
+def _unlock_attempt(kind: str = "password"):
+    """Wrap one test of a human-supplied credential against the vault.
+
+    Refuses up front during a cool-down. A WrongPassword / WrongRecoveryKey
+    stays counted as a failure and a clean exit clears the count. Any other
+    exception (corruption, I/O) says nothing about the credential, so that
+    attempt is taken back off the count.
+    """
+    _begin_unlock_attempt(kind)
+    try:
+        yield
+    except (crypto.WrongPassword, crypto.WrongRecoveryKey):
+        raise
+    except BaseException:
+        _finish_unlock_attempt(kind, "void")
+        raise
+    _finish_unlock_attempt(kind, "ok")
+
+
 def _load_secrets_v1(password: str, token: bytes) -> dict:
     """Decrypt a v1 (Fernet/PBKDF2) vault.  Internal use only."""
     salt = SALT_FILE.read_bytes()
-    plaintext = crypto.decrypt(password, salt, token)
+    with _unlock_attempt():
+        plaintext = crypto.decrypt(password, salt, token)
     # Padding was added after vaults already existed in the wild (including
     # this repo's own), so decryption has to accept both shapes: try the
     # raw bytes first (an older, unpadded vault is exactly valid JSON as-is
@@ -1982,7 +2137,8 @@ def load_vault_body_ex(password: str) -> tuple:
     data = SECRETS_FILE.read_bytes()
     fingerprint = hashlib.sha256(data).hexdigest()
     if crypto.is_v2(data):
-        plaintext, _dek, _header = crypto.open_v2_with_password(data, password)
+        with _unlock_attempt():
+            plaintext, _dek, _header = crypto.open_v2_with_password(data, password)
         return _decode_body(plaintext, "v2 vault"), data, fingerprint
     return _load_secrets_v1(password, data), None, fingerprint
 
@@ -2240,7 +2396,8 @@ def _write_body_locked(
             )
 
     if crypto.is_v2(data):
-        _pt, dek, header = crypto.open_v2_with_password(data, password)
+        with _unlock_attempt():
+            _pt, dek, header = crypto.open_v2_with_password(data, password)
         if merge_reserved:
             body = _merge_reserved(_decode_body(_pt, "v2 vault"), body)
         padded = _pkcs7_pad(json.dumps(body).encode("utf-8"))
@@ -2367,7 +2524,8 @@ def _change_password_locked(old_password: str,
 
     # ---- v2 path ----
     # open_v2_with_password raises WrongPassword if old_password is wrong.
-    plaintext_bytes, old_dek, header = crypto.open_v2_with_password(data, old_password)
+    with _unlock_attempt():
+        plaintext_bytes, old_dek, header = crypto.open_v2_with_password(data, old_password)
 
     vault_id = _vault_id_from_header(header)
     params = _params_from_header(header)  # floor-corrected
@@ -2577,7 +2735,8 @@ def _reissue_recovery_key_locked(password: str):
             "Recovery keys require a v2 vault. Call upgrade_to_v2 first."
         )
 
-    plaintext_bytes, dek, header = crypto.open_v2_with_password(data, password)
+    with _unlock_attempt():
+        plaintext_bytes, dek, header = crypto.open_v2_with_password(data, password)
     vault_id = _vault_id_from_header(header)
 
     new_recovery_raw = crypto.new_recovery_key()
@@ -2655,9 +2814,10 @@ def _recover_with_recovery_key_locked(recovery_key_text: str,
         )
 
     # open_v2_with_recovery validates checksum, finds slot, unwraps DEK.
-    plaintext_bytes, old_dek, header = crypto.open_v2_with_recovery(
-        data, recovery_key_text
-    )
+    with _unlock_attempt("recovery"):
+        plaintext_bytes, old_dek, header = crypto.open_v2_with_recovery(
+            data, recovery_key_text
+        )
     vault_id = _vault_id_from_header(header)
     params = _params_from_header(header)
 

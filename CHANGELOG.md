@@ -7,6 +7,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.2.0] — 2026-10-07
+
+### Added
+
+- **Repeated wrong passwords now trigger a cool-down.** After 5 failed unlocks, every
+  credential check refuses to test the password at all for 30 seconds, doubling with each
+  further failure up to 15 minutes. Previously the dialog accepted guesses as fast as scrypt
+  could run them. The count is kept in `vault.attempts.json` beside the vault, so a server
+  restart or a fresh dialog does not reset it; a successful unlock clears it, and a day with no
+  failures forgets it. Every unlock path is covered (unlock, change password, recovery-key
+  reissue, upgrade to v2, file encrypt/decrypt, `run_with_env`), via one gate in `store.py`.
+- **Recovery-key attempts have their own, separate count**, so a locked-out password never
+  blocks the paper key. A successful recovery clears both counts, so failures against the old
+  password cannot lock the human out of the new one.
+- New `crypto.TooManyAttempts` exception, carrying `retry_after` in seconds. It subclasses
+  `WrongPassword`, so any handler that does not know about it still refuses the unlock.
+
+This only slows guessing through the dialog. It does nothing against a copy of `vault.enc`
+attacked offline; the README's security notes say so.
+
 ## [2.1.5] — 2026-10-03
 
 Fixes from the Claude plugin directory validator. No change to vault behavior.
