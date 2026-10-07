@@ -161,3 +161,19 @@ def test_non_credential_errors_are_not_counted(clock):
                     raise OSError("disk went away")
         assert not store._attempts_file().exists()
         assert store.load_secrets(TEST_PASSWORD) == SECRETS
+
+
+def test_refused_attempts_do_not_rewrite_the_file(clock):
+    with workspace(register=False):
+        _fail(store._FREE_ATTEMPTS)
+        stamp = store._attempts_file().stat().st_mtime_ns
+        for _ in range(3):
+            with pytest.raises(crypto.TooManyAttempts):
+                store.load_secrets(TEST_PASSWORD)
+        assert store._attempts_file().stat().st_mtime_ns == stamp
+
+
+def test_unknown_outcome_is_rejected(clock):
+    with workspace(register=False):
+        with pytest.raises(ValueError):
+            store._finish_unlock_attempt("password", "okay")

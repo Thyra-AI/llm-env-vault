@@ -1946,7 +1946,8 @@ def _begin_unlock_attempt(kind: str) -> None:
         state = _read_attempts()
         now = time.time()
         rec = state.get(kind)
-        if rec is not None and rec["last"] > now:
+        skewed = rec is not None and rec["last"] > now
+        if skewed:
             # The clock went backwards. Restart the cool-down from now rather
             # than wait for the clock to catch up -- that could be days.
             rec["last"] = now
@@ -1954,7 +1955,8 @@ def _begin_unlock_attempt(kind: str) -> None:
             rec = {"failures": 0, "last": now}
         remaining = rec["last"] + _lockout_seconds(rec["failures"]) - now
         if remaining > 0:
-            _write_attempts(state)  # persist a clock-skew fix-up, if any
+            if skewed:
+                _write_attempts(state)
             raise crypto.TooManyAttempts(int(-(-remaining // 1)))
         state[kind] = {"failures": rec["failures"] + 1, "last": now}
         _write_attempts(state)
@@ -1969,6 +1971,8 @@ def _finish_unlock_attempt(kind: str, outcome: str) -> None:
     """
     with _attempts_lock():
         state = _read_attempts()
+        if outcome not in ("ok", "void"):
+            raise ValueError(f"unknown unlock outcome {outcome!r}")
         if outcome == "ok":
             if kind == "recovery":
                 # A recovery sets a brand-new password, so failures against

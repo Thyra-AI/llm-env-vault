@@ -7,6 +7,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.2.1] — 2026-10-07
+
+Tidy-ups to the 2.2.0 unlock throttle. No change to the limits or what users see.
+
+### Fixed
+
+- **Every refused attempt during a cool-down rewrote `vault.attempts.json`**, though nothing had
+  changed. It is now written only when a backwards clock jump had to be corrected.
+- **Settling an unlock attempt treated any unrecognized outcome as "void"**, so a typo in a
+  future caller would have quietly taken a failure back off the count. It now raises
+  `ValueError`.
+
 ## [2.2.0] — 2026-10-07
 
 ### Added
