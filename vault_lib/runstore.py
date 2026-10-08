@@ -24,10 +24,15 @@ so a single rx.search call on a pathological pattern could hang the server.
 validate_pattern therefore DELIBERATELY RESTRICTS what a pattern may contain,
 rather than trying to time it out: no repeat of any kind inside a repeat that
 can match more than once, no alternation inside such a repeat, at most
-MAX_UNBOUNDED_REPEATS unbounded repeats, and a length cap. Literals, classes,
+MAX_VARIABLE_REPEATS variable-width repeats in total (any repeat whose minimum and
+maximum differ: `*`, `+`, `?`, `{n,m}`), and a length cap. Literals, classes,
 `.*`, anchors, single-level repeats like \\d+, and top-level alternation
 (`FAILED|ERROR`) all still work. The search matches each line against only its
-first MATCH_LINE_CAP characters and stops at a deadline between lines.
+first MATCH_LINE_CAP characters, in overlapping windows of MATCH_WINDOW characters
+stepping MATCH_STEP (so a long line costs a handful of cheap searches rather than
+one expensive one), and stops at a deadline between windows. Known limit: a
+match spanning more than ~MATCH_STEP characters across a window boundary may be
+missed on a line longer than MATCH_WINDOW characters.
 """
 import re
 import secrets
@@ -49,12 +54,17 @@ MAX_STREAM_CHARS = 10_000_000
 # are refused, a line is matched on a bounded prefix, and the whole scan has
 # a deadline.
 MAX_PATTERN_LEN = 200
-MAX_UNBOUNDED_REPEATS = 3
+# Every repeat that can match a varying number of characters (min != max) counts
+# toward this one budget, however small its bound: sibling bounded repeats chain
+# into polynomial backtracking (25 x .{0,100} then a char that cannot match).
+# Fixed counts such as \d{4} are free.
+MAX_VARIABLE_REPEATS = 3
 MATCH_LINE_CAP = 1000
+# Even with the repeat budget, k overlapping repeats cost about n^(k+1) on an
+# n-character line, so each line is searched in small overlapping windows.
+MATCH_WINDOW = 200
+MATCH_STEP = 100
 SEARCH_TIME_BUDGET = 5.0
-# A counted repeat above this (x{1,5000}) is as unbounded as * for the purpose
-# of blow-up, so it is treated that way.
-_BIG_REPEAT = 100
 
 STREAMS = ("stdout", "stderr")
 
@@ -224,13 +234,9 @@ def _sre_parse():
         return None
 
 
-def _is_unbounded(max_count, maxrepeat) -> bool:
-    return max_count >= maxrepeat or max_count > _BIG_REPEAT
-
-
 def _walk(node, parser, in_multi: bool, counter: list) -> Optional[str]:
-    """Returns a problem description, or None. counter[0] counts unbounded
-    repeats. in_multi is true inside a repeat whose max is more than 1 (the
+    """Returns a problem description, or None. counter[0] counts variable-width
+    repeats (min != max) at any nesting level. in_multi is true inside a repeat whose max is more than 1 (the
     only kind that can re-enter its body and so multiply the ways to match).
 
     Deliberately strict: inside such a repeat NO other repeat is allowed,
@@ -252,7 +258,7 @@ def _walk(node, parser, in_multi: bool, counter: list) -> Optional[str]:
             lo, hi, body = av
             if in_multi:
                 return "a repeat nested inside another repeat"
-            if _is_unbounded(hi, parser.MAXREPEAT):
+            if lo != hi:
                 counter[0] += 1
             problem = _walk(body, parser, hi > 1, counter)
             if problem:
@@ -305,10 +311,11 @@ def validate_pattern(pattern: str) -> "re.Pattern":
                 f"on a long line, so read_run_output deliberately restricts patterns. Use a "
                 f"simpler one (a literal, a character class, `.*`, a single-level repeat such "
                 f"as \\d+, or an alternation that is not inside a repeat, e.g. FAILED|ERROR).")
-        if counter[0] > MAX_UNBOUNDED_REPEATS:
+        if counter[0] > MAX_VARIABLE_REPEATS:
             raise ValueError(
-                f"pattern rejected: it has {counter[0]} unbounded repeats (*, +, or a large "
-                f"{{n,m}}); the limit is {MAX_UNBOUNDED_REPEATS}.")
+                f"pattern rejected: it has {counter[0]} variable-width repeats (*, +, ?, or "
+                f"{{n,m}}, bounded or not), which chain into slow backtracking; the limit is "
+                f"{MAX_VARIABLE_REPEATS}. Fixed counts like \\d{{4}} do not count.")
     return rx
 
 
@@ -387,6 +394,23 @@ def read_window(stream: _Stream, offset: int, limit: int, max_chars: int) -> dic
     return out
 
 
+def _line_matches(rx: "re.Pattern", line: str, deadline: float) -> tuple:
+    """(matched, ran_out_of_time). A line longer than MATCH_WINDOW is searched in
+    overlapping windows (pos/endpos, so `^` still means the real line start);
+    the deadline is checked between windows."""
+    n = len(line)
+    pos = 0
+    while True:
+        end = min(pos + MATCH_WINDOW, n)
+        if rx.search(line, pos, end):
+            return True, False
+        if end >= n:
+            return False, False
+        pos += MATCH_STEP
+        if time.monotonic() > deadline:
+            return False, True
+
+
 def search(stream: _Stream, rx: "re.Pattern", context: int, offset: int, limit: int,
            max_chars: int, time_budget: float = SEARCH_TIME_BUDGET) -> dict:
     """Matching lines (at most `limit`) from absolute 0-based line `offset`,
@@ -410,7 +434,11 @@ def search(stream: _Stream, rx: "re.Pattern", context: int, offset: int, limit: 
         if len(line) > MATCH_LINE_CAP:
             long_lines = True
             line = line[:MATCH_LINE_CAP]
-        if rx.search(line):
+        hit, ran_out = _line_matches(rx, line, deadline)
+        if ran_out:
+            timed_out = True
+            break
+        if hit:
             matches.append(i)
         scanned_to = i + 1
     budget = _Budget(max_chars)
@@ -462,5 +490,8 @@ def search(stream: _Stream, rx: "re.Pattern", context: int, offset: int, limit: 
         out["search_timed_out"] = True
     if long_lines:
         out["long_lines_note"] = (f"Lines longer than {MATCH_LINE_CAP} characters were "
-                                  f"matched on their first {MATCH_LINE_CAP} only.")
+                                  f"matched on their first {MATCH_LINE_CAP} only, in overlapping "
+                                  f"{MATCH_WINDOW}-character windows (a match spanning more "
+                                  f"than ~{MATCH_STEP} characters across a window edge may be "
+                                  f"missed).")
     return out

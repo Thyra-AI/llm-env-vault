@@ -2550,8 +2550,10 @@ def read_run_output(run_id: str, stream: str = "both", pattern: Optional[str] = 
     characters, NO repeat of any kind inside a repeat that can match more
     than once (so not (a+)+, and not (a{0,5})+ either), NO alternation inside
     such a repeat (so not (a|b)* with multi-character branches; [ab]* is
-    fine), at most 3 unbounded repeats, only the first 1000 characters of a
-    line are matched, and a scan stops after 5 seconds. Literals, classes,
+    fine), at most 3 variable-width repeats in total (*, +, ?, {n,m}; fixed counts like
+    \\d{4} are free), only the first 1000 characters of a
+    line are matched (in overlapping 200-character windows; a match spanning
+    more than ~100 characters across a window edge may be missed), and a scan stops after 5 seconds. Literals, classes,
     `.*`, anchors, a single-level `\\d+` and top-level alternation such as
     FAILED|ERROR all work. Invalid or refused patterns return an error. A
     line longer than max_chars is cut and marked, so paging always advances.

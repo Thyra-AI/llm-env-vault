@@ -52,9 +52,9 @@ pinning what a user installs.
   so is one that could run away. Python's regex engine cannot be interrupted, so patterns are
   **deliberately restricted**: over 200 characters, any repeat nested inside a repeat that can
   match more than once (`(a+)+`, and `(a{0,50})+` too), any alternation inside such a repeat
-  (`(a|aa)*`, `(a|a){0,99}`), or more than three unbounded repeats is refused. Literals, classes,
+  (`(a|aa)*`, `(a|a){0,99}`), or more than three variable-width repeats in total (`*`, `+`, `?`, `{n,m}`, bounded or not; fixed counts like `\d{4}` are free) is refused. Literals, classes,
   `.*`, anchors, a single-level `\d+` and top-level alternation (`FAILED|ERROR`) still work.
-  Lines are matched on their first 1000 characters and a scan stops after 5 seconds. A line (or
+  Lines are matched on their first 1000 characters, in overlapping 200-character windows stepping 100 (a match spanning more than ~100 characters across a window edge on a line over 200 characters may be missed), and a scan stops after 5 seconds. A line (or
   match) longer than `max_chars` is cut with a `…[line truncated]` marker, so paging always
   advances. Reservations for running background commands are not evicted by finished runs
   (they are capped separately at 20).

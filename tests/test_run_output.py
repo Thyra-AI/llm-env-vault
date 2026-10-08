@@ -28,6 +28,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
@@ -393,6 +395,40 @@ def test_common_legit_patterns_still_work() -> None:
             got = res["streams"]["stdout"]["text"]
             for e in expect:
                 assert e in got, (pat, e, got)
+
+
+def test_variable_width_repeats_are_capped_at_three_in_total() -> None:
+    for bad in (".{0,100}" * 25, ".{0,100}" * 24 + "!", ".*.*.*.*!", r"\w+ \d+ \w+ \d+", "a?b?c?d?",
+                "a{1,2}b{1,2}c{1,2}d{1,2}"):
+        with pytest.raises(ValueError, match="variable-width"):
+            runstore.validate_pattern(bad)
+    # Fixed counts are free; three variable ones are fine.
+    for ok in (r"FAILED|ERROR", r"test_\w+", r"^E\s+.*", r"\d+ passed", r"\w+ \d+ \w+",
+               r"\d{4}-\d{2}-\d{2} \w+ .*", r"a{0,100}b{0,100}c{0,100}!"):
+        runstore.validate_pattern(ok)
+
+
+def test_slowest_accepted_pattern_on_a_long_line_is_fast() -> None:
+    line = "a" * 1000
+    s = runstore.RunOutput("r", {"stdout": line + "\n", "stderr": ""},
+                           10_000_000).streams["stdout"]
+    for pat in ("a*a*a*b", "a+a+a+b"):
+        rx = runstore.validate_pattern(pat)
+        t0 = time.monotonic()
+        res = runstore.search(s, rx, 0, 0, 10, 1000)
+        assert time.monotonic() - t0 < 2.0, pat
+        assert res["matches_returned"] == 0 and not res.get("search_timed_out"), pat
+
+
+def test_match_deep_in_a_long_line_is_found() -> None:
+    line = "x" * 700 + "NEEDLE42" + "y" * 400
+    s = runstore.RunOutput("r", {"stdout": "short\n" + line + "\nend\n", "stderr": ""},
+                           10_000_000).streams["stdout"]
+    res = runstore.search(s, runstore.validate_pattern(r"NEEDLE\d+"), 0, 0, 10, 5000)
+    assert res["matches_returned"] == 1 and "NEEDLE42" in res["text"] and "2:" in res["text"]
+    # `^` still means the start of the line, not the start of a window.
+    res = runstore.search(s, runstore.validate_pattern(r"^NEEDLE"), 0, 0, 10, 5000)
+    assert res["matches_returned"] == 0
 
 
 def test_search_has_a_deadline() -> None:
