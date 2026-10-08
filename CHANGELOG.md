@@ -7,6 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.3.2] — 2026-10-08
+
+### Fixed
+
+- **`long_lines_note` understated what a long line costs a search.** The note that
+  `read_run_output` attaches when a searched line exceeds the 1000-character cap only named the
+  end anchors (`$`, `\Z`). On such a line a match ending exactly at the cut is discarded for every
+  pattern that looks at what follows the match, so `\b`, `\B` and lookaheads (`(?=`, `(?!`) are
+  affected too. The note, and the matching docstrings, now list all of them. Wording only; no
+  matching behaviour changed.
+
 ## [2.3.1] — 2026-10-08
 
 Fixes a matching bug in the `read_run_output` search added in 2.3.0.

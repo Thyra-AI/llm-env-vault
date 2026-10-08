@@ -32,9 +32,10 @@ first MATCH_LINE_CAP characters, in overlapping windows of MATCH_WINDOW characte
 stepping MATCH_STEP (so a long line costs a handful of cheap searches rather than
 one expensive one), and stops at a deadline between windows. Known limit: a
 match spanning more than ~MATCH_STEP characters across a window boundary may be
-missed on a line longer than MATCH_WINDOW characters. End anchors (`$`, `\\Z`) and
-`\\b` match only at their real position in the line, not at a window edge (see
-_line_matches).
+missed on a line longer than MATCH_WINDOW characters. Constructs that look at what
+follows the match (`$`, `\\Z`, `\\b`, `\\B`, lookahead) match only at their real
+position in the line, not at a window edge, and on a line cut at MATCH_LINE_CAP not
+at the cut either (see _line_matches).
 """
 import re
 import secrets
@@ -418,8 +419,10 @@ def _line_matches(rx: "re.Pattern", line: str, deadline: float,
     window, which starts MATCH_STEP later, sees the real next character and finds
     the match if it is genuine. Limits: a lookahead longer than one character that
     straddles an edge can still misjudge; a match longer than ~MATCH_STEP
-    characters ending at an edge can be missed; and on a truncated line a `$`
-    match at the real end (beyond the cap) is not seen at all."""
+    characters ending at an edge can be missed; and on a truncated line the cut is
+    not the real end, so a match ending exactly at the cut is discarded for these
+    patterns (`$` and `\\Z` can never match there, since the real end was not
+    searched; `\\b`, `\\B` and a lookahead cannot see the character after the cut)."""
     n = len(line)
     edge_sensitive = _LOOKS_AHEAD.search(rx.pattern) is not None
     pos = 0
@@ -519,6 +522,9 @@ def search(stream: _Stream, rx: "re.Pattern", context: int, offset: int, limit: 
                                   f"matched on their first {MATCH_LINE_CAP} only, in overlapping "
                                   f"{MATCH_WINDOW}-character windows (a match spanning more "
                                   f"than ~{MATCH_STEP} characters across a window edge may be "
-                                  f"missed; an end anchor (`$`, `\\Z`) cannot match "
-                                  f"on such a line, as its real end was not searched).")
+                                  f"missed; on such a line a match ending exactly at the "
+                                  f"{MATCH_LINE_CAP}-character cut is discarded for patterns "
+                                  f"using `$`, `\\Z`, `\\b`, `\\B` or a lookahead "
+                                  f"(`(?=`, `(?!`), because the character after the cut was "
+                                  f"not searched; `$` and `\\Z` therefore cannot match).")
     return out
