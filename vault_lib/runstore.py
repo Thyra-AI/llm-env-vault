@@ -32,7 +32,9 @@ first MATCH_LINE_CAP characters, in overlapping windows of MATCH_WINDOW characte
 stepping MATCH_STEP (so a long line costs a handful of cheap searches rather than
 one expensive one), and stops at a deadline between windows. Known limit: a
 match spanning more than ~MATCH_STEP characters across a window boundary may be
-missed on a line longer than MATCH_WINDOW characters.
+missed on a line longer than MATCH_WINDOW characters. End anchors (`$`, `\\Z`) and
+`\\b` match only at their real position in the line, not at a window edge (see
+_line_matches).
 """
 import re
 import secrets
@@ -394,15 +396,38 @@ def read_window(stream: _Stream, offset: int, limit: int, max_chars: int) -> dic
     return out
 
 
-def _line_matches(rx: "re.Pattern", line: str, deadline: float) -> tuple:
+# Constructs that look at what follows the match: `$`, `\Z`, `\b`, `\B`, lookahead.
+# Textual and deliberately over-inclusive (an escaped `\$` also counts); being
+# wrongly flagged only makes the window edge a little stricter.
+_LOOKS_AHEAD = re.compile(r"\$|\\[ZbB]|\(\?[=!]")
+
+
+def _line_matches(rx: "re.Pattern", line: str, deadline: float,
+                  truncated: bool = False) -> tuple:
     """(matched, ran_out_of_time). A line longer than MATCH_WINDOW is searched in
-    overlapping windows (pos/endpos, so `^` still means the real line start);
-    the deadline is checked between windows."""
+    overlapping windows (pos/endpos, so `^` and a leading `\\b` still see the real
+    line start and the real previous character); the deadline is checked between
+    windows. `truncated` says `line` is only the first MATCH_LINE_CAP characters
+    of a longer one, so its last character is not the real end either.
+
+    endpos makes Python treat the window's right edge as the end of the string,
+    so a pattern that looks at what follows the match (`$`, `\\Z`, `\\b`, `\\B`,
+    a lookahead) could match there while the line carries on. Any such match
+    ends exactly at the window edge, so for those patterns a match ending at the
+    edge of a window that is not the real end of the line is discarded; the next
+    window, which starts MATCH_STEP later, sees the real next character and finds
+    the match if it is genuine. Limits: a lookahead longer than one character that
+    straddles an edge can still misjudge; a match longer than ~MATCH_STEP
+    characters ending at an edge can be missed; and on a truncated line a `$`
+    match at the real end (beyond the cap) is not seen at all."""
     n = len(line)
+    edge_sensitive = _LOOKS_AHEAD.search(rx.pattern) is not None
     pos = 0
     while True:
         end = min(pos + MATCH_WINDOW, n)
-        if rx.search(line, pos, end):
+        real_end = end >= n and not truncated
+        m = rx.search(line, pos, end)
+        if m is not None and not (edge_sensitive and not real_end and m.end() == end):
             return True, False
         if end >= n:
             return False, False
@@ -431,10 +456,11 @@ def search(stream: _Stream, rx: "re.Pattern", context: int, offset: int, limit: 
             timed_out = True
             break
         line = lines[i]
-        if len(line) > MATCH_LINE_CAP:
+        cut = len(line) > MATCH_LINE_CAP
+        if cut:
             long_lines = True
             line = line[:MATCH_LINE_CAP]
-        hit, ran_out = _line_matches(rx, line, deadline)
+        hit, ran_out = _line_matches(rx, line, deadline, cut)
         if ran_out:
             timed_out = True
             break
@@ -493,5 +519,6 @@ def search(stream: _Stream, rx: "re.Pattern", context: int, offset: int, limit: 
                                   f"matched on their first {MATCH_LINE_CAP} only, in overlapping "
                                   f"{MATCH_WINDOW}-character windows (a match spanning more "
                                   f"than ~{MATCH_STEP} characters across a window edge may be "
-                                  f"missed).")
+                                  f"missed; an end anchor (`$`, `\\Z`) cannot match "
+                                  f"on such a line, as its real end was not searched).")
     return out

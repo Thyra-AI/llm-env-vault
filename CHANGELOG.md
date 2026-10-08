@@ -7,6 +7,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.3.1] — 2026-10-08
+
+Fixes a matching bug in the `read_run_output` search added in 2.3.0.
+
+### Fixed
+
+- **`$`, `\Z` and `\b` could match in the middle of a long line.** A line over 200 characters is
+  searched in overlapping 200-character windows, and Python treats a window's right edge as the
+  end of the string, so `END$` falsely hit a line where `END` merely sat at a window edge, and
+  `foo\b` hit `foobar`. A match that ends at the edge of a window which is not the real end of
+  the line is now discarded for patterns that look at what follows (`$`, `\Z`, `\b`, `\B`,
+  lookahead); the next window decides it with the real next character. `^` and a leading `\b`
+  were already correct. Known limits, noted in the code: on a line longer than 1000 characters
+  (searched only up to there) an end anchor cannot match, and a lookahead of more than one
+  character straddling a window edge can still misjudge.
+
 ## [2.3.0] — 2026-10-08
 
 ### Changed (breaking)

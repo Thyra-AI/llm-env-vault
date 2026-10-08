@@ -431,6 +431,59 @@ def test_match_deep_in_a_long_line_is_found() -> None:
     assert res["matches_returned"] == 0
 
 
+def _one_line_stream(line: str):
+    return runstore.RunOutput("r", {"stdout": line + "\n", "stderr": ""},
+                              10_000_000).streams["stdout"]
+
+
+def _hits(line: str, pattern: str) -> int:
+    s = _one_line_stream(line)
+    return runstore.search(s, runstore.validate_pattern(pattern), 0, 0, 10, 5000)["matches_returned"]
+
+
+def test_end_anchor_does_not_match_at_a_window_edge_mid_line() -> None:
+    # END finishes exactly at char 200, the right edge of the first window.
+    line = "x" * 197 + "END" + "y" * 500
+    assert _hits(line, r"END$") == 0
+    assert _hits(line, r"END\Z") == 0
+    assert _hits("x" * 500, r"x$") == 1 and _hits("x" * 500 + "y", r"x$") == 0
+    # ... and at the edge of a later window (300, 400).
+    assert _hits("x" * 297 + "END" + "y" * 500, r"END$") == 0
+    # Other edges of the line: not at 200, and END ends the line elsewhere.
+    assert _hits("x" * 250 + "END" + "y" * 400, r"END$") == 0
+
+
+def test_end_anchor_matches_at_the_real_end_of_a_long_line() -> None:
+    assert _hits("x" * 500 + "END", r"END$") == 1
+    assert _hits("x" * 500 + "END", r"END\Z") == 1
+    assert _hits("x" * 197 + "END", r"END$") == 1       # first window, which is also the last
+    assert _hits("x" * 650 + "END", r"x+END$") == 1
+    # Still found when the real end is not on a window boundary.
+    assert _hits("x" * 777 + "END", r"END$") == 1
+    # The other branch of an alternation is unaffected.
+    assert _hits("x" * 197 + "ENDyyyy" + "z" * 500, r"END$|yyyy") == 1
+
+
+def test_word_boundary_does_not_match_at_a_window_edge() -> None:
+    # "foo" ends at char 200 but the word goes on ("foobar").
+    line = "." + "x" * 196 + "foo" + "bar" + "." * 300
+    assert _hits(line, r"foo\b") == 0
+    # A real boundary right at the edge still matches (via the next window).
+    assert _hits("." + "x" * 196 + "foo" + "." * 300, r"foo\b") == 1
+    # A leading \b at a window start sees the real previous character.
+    assert _hits("." * 99 + "xfoo" + "." * 400, r"\bfoo") == 0
+    assert _hits("." * 99 + " foo" + "." * 400, r"\bfoo") == 1
+
+
+def test_end_anchor_not_matched_at_the_search_cap() -> None:
+    # The line is cut at 1000 characters, so its last searched char is not its end.
+    line = "x" * 997 + "END" + "y" * 500
+    s = _one_line_stream(line)
+    res = runstore.search(s, runstore.validate_pattern(r"END$"), 0, 0, 10, 5000)
+    assert res["matches_returned"] == 0
+    assert "long_lines_note" in res
+
+
 def test_search_has_a_deadline() -> None:
     rx = runstore.validate_pattern("a.*b.*c")
     s = runstore.RunOutput("r", {"stdout": ("a" * 900 + "\n") * 2000, "stderr": ""},
