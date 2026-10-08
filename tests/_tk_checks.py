@@ -46,6 +46,10 @@ def check(name):
 # instead of leaving the previous step's handler live.
 LAST_BINDINGS = {}
 
+# Likewise the text left in every Entry at snapshot time, in widget order, so a
+# check can assert that a refused password is no longer sitting in its box.
+LAST_ENTRIES = []
+
 
 def build_dialog(call, typed=None, click=None):
     """Run a dialog far enough to build its widgets, then tear it down.
@@ -101,6 +105,7 @@ def build_dialog(call, typed=None, click=None):
             nodes = []
             _walk_into(self, nodes)
             captured.extend((cls, text) for cls, text, _w in nodes)
+            LAST_ENTRIES[:] = [w.get() for cls, _t, w in nodes if cls == "Entry"]
             LAST_BINDINGS.clear()
             for seq in ("<Return>", "<Escape>"):
                 try:
@@ -341,6 +346,85 @@ def _():
             assert widgets, f"{name} built no widgets at all"
     finally:
         store.vault_info, store.vault_format_version = orig_info, orig_ver
+
+
+@contextlib.contextmanager
+def _refusing_vault(exc):
+    """Make every password test fail with *exc* (WrongPassword, or the 2.2.0
+    cool-down's TooManyAttempts), leaving the rest of the dialog's store calls
+    harmless so the failed attempt is the only thing that can go wrong."""
+    names = ["load_secrets", "vault_exists", "load_index", "precheck_encrypt",
+             "precheck_decrypt", "read_encrypted_file"]
+    originals = {n: getattr(store, n) for n in names}
+
+    def _refuse(*a, **k):
+        raise exc
+
+    store.load_secrets = _refuse
+    store.vault_exists = lambda: True
+    store.load_index = lambda: {"A": 1}
+    store.precheck_encrypt = lambda p: {
+        "path": pathlib.Path(_FAKE_PLAINTEXT),
+        "vault_path": pathlib.Path(_FAKE_SIDECAR),
+        "size": 4096, "mode": "0600", "sidecar_exists": False}
+    store.precheck_decrypt = lambda vp, op=None: {
+        "vault_path": pathlib.Path(_FAKE_SIDECAR),
+        "output_path": pathlib.Path(_FAKE_PLAINTEXT),
+        "envelope_size": 4200}
+    store.read_encrypted_file = _refuse
+    try:
+        yield
+    finally:
+        for n, fn in originals.items():
+            setattr(store, n, fn)
+
+
+@check("a_refused_password_is_cleared_and_the_field_refocused")
+def _():
+    """Every dialog that tests the typed master password in place must empty
+    the box when the attempt is refused -- wrong password, or turned away by
+    the unlock cool-down (TooManyAttempts, a WrongPassword subclass) -- keep
+    the error message, and put the cursor back in the field. Leaving the
+    wrong text there makes the human delete it by hand and leaves a wrong
+    secret on screen."""
+    cases = {
+        "unlock_for_run_dialog": (
+            lambda: gui.unlock_for_run_dialog("echo hello", only_vars=["A"]),
+            "Unlock && Run"),
+        "add_secret_dialog": (
+            lambda: gui.add_secret_dialog("A", False, 1), "Continue"),
+        "remove_secret_dialog": (
+            lambda: gui.remove_secret_dialog("A", 1), "Continue"),
+        "retype_placeholders_dialog": (
+            lambda: gui.retype_placeholders_dialog(["A"]), "Continue"),
+        "install_dialog": (
+            lambda: gui.install_dialog(pathlib.Path(_FAKE_PLAINTEXT), [("A", "a")]),
+            "Continue"),
+        "encrypt_file_dialog": (
+            lambda: gui.encrypt_file_dialog(_FAKE_PLAINTEXT), "Continue"),
+        "decrypt_file_dialog": (
+            lambda: gui.decrypt_file_dialog(_FAKE_SIDECAR), "Continue"),
+    }
+    for exc in (crypto.WrongPassword("Wrong password."),
+                crypto.TooManyAttempts(30)):
+        for name, (call, click) in cases.items():
+            focused = []
+            real_focus = tk.Entry.focus_force
+            tk.Entry.focus_force = lambda self: focused.append(self.winfo_class())
+            try:
+                with _refusing_vault(exc):
+                    widgets = build_dialog(call, typed="not-the-password", click=click)
+            finally:
+                tk.Entry.focus_force = real_focus
+            where = f"{name} after {type(exc).__name__}"
+            assert LAST_ENTRIES == [""], (
+                f"{where}: the refused password is still in the entry box "
+                f"(entries hold {LAST_ENTRIES!r})")
+            assert str(exc) in [t for _c, t in widgets], (
+                f"{where}: the error message {str(exc)!r} is no longer shown")
+            assert len(focused) >= 2 and focused[-1] == "Entry", (
+                f"{where}: focus was not put back in the password field "
+                f"(focus_force calls: {focused!r}; the first is the dialog opening)")
 
 
 @check("encrypt_dialog_says_the_original_will_be_destroyed")

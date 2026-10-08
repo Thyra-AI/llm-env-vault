@@ -549,6 +549,17 @@ def _show_error(root, err_label, text):
     _center(root)
 
 
+def _clear_entry(entry):
+    # A refused password (wrong, or turned away by the unlock cool-down) must
+    # not stay in the box: the human would have to select-all and delete it
+    # before typing again, and a wrong secret left sitting on screen is a
+    # needless copy of it. Empty the field and put the cursor back in it so
+    # the next keystroke starts the retry. The error text is set separately by
+    # the caller via _show_error.
+    entry.delete(0, "end")
+    entry.focus_force()
+
+
 def run_recovery_drill():
     """Generate a recovery key and make the human write it down. Returns the
     raw key bytes if they confirmed, or None if they declined or bailed out.
@@ -694,6 +705,7 @@ def add_secret_dialog(var_name: str, is_update: bool, placeholder: int,
                 state["secrets"] = store.load_secrets(password)
             except WrongPassword as e:
                 _show_error(root, err, str(e))
+                _clear_entry(pw1)
                 return
             except (FileNotFoundError, ValueError) as e:
                 _show_error(root, err, f"Vault error: {e}")
@@ -908,6 +920,7 @@ def remove_secret_dialog(var_name: str, placeholder: int):
                 state["secrets"] = store.load_secrets(password)
             except WrongPassword as e:
                 _show_error(root, err, str(e))
+                _clear_entry(pw)
                 return
             except (FileNotFoundError, ValueError) as e:
                 _show_error(root, err, f"Vault error: {e}")
@@ -1071,6 +1084,7 @@ def retype_placeholders_dialog(names):
                 secrets = store.load_secrets(password)
             except WrongPassword as e:
                 _show_error(root, err, str(e))
+                _clear_entry(pw)
                 return
             except (FileNotFoundError, ValueError) as e:
                 _show_error(root, err, f"Vault error: {e}")
@@ -1316,6 +1330,7 @@ def install_dialog(target, to_migrate, other_owner=None, also_register=None,
                 state["secrets"] = store.load_secrets(password)
             except WrongPassword as e:
                 _show_error(root, err, str(e))
+                _clear_entry(pw1)
                 return
             except (FileNotFoundError, ValueError) as e:
                 _show_error(root, err, f"Vault error: {e}")
@@ -1657,6 +1672,7 @@ def encrypt_file_dialog(path):
                 info = store.precheck_encrypt(path)
             except WrongPassword as e:
                 _show_error(root, err, str(e))
+                _clear_entry(pw)
                 return
             except (FileNotFoundError, ValueError, OSError) as e:
                 _show_error(root, err, str(e))
@@ -1886,6 +1902,7 @@ def decrypt_file_dialog(vault_path, output_path=None):
                 file_bytes, meta = store.read_encrypted_file(info["vault_path"], password)
             except WrongPassword as e:
                 _show_error(root, err, str(e))
+                _clear_entry(pw)
                 return
             except (FileNotFoundError, ValueError, OSError, VaultCorrupted) as e:
                 _show_error(root, err, str(e))
@@ -2472,6 +2489,7 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
             secrets = store.load_secrets(password)
         except WrongPassword as e:
             _show_error(root, err, str(e))
+            _clear_entry(pw)
             return
         except (FileNotFoundError, ValueError) as e:
             _show_error(root, err, f"Vault error: {e}")
