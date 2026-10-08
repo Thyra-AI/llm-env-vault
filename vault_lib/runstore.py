@@ -18,11 +18,16 @@ What lives here is deliberately narrow:
     cap of MAX_STREAM_CHARS characters (the TAIL is kept, and the stream is
     marked so a reader knows the start is missing).
 
-The regular-expression search is bounded too. Python's `re` has no timeout, so
-a pattern like (a+)+$ on a long line can pin the server for hours. validate_pattern
-refuses the shapes that cause exponential blow-up, caps how many unbounded
-repeats a pattern may carry, and the search itself matches each line against
-only its first MATCH_LINE_CAP characters and stops at a wall-clock deadline.
+The regular-expression search is bounded too. Python's `re` cannot be
+interrupted, and the wall-clock deadline below is only checked between lines,
+so a single rx.search call on a pathological pattern could hang the server.
+validate_pattern therefore DELIBERATELY RESTRICTS what a pattern may contain,
+rather than trying to time it out: no repeat of any kind inside a repeat that
+can match more than once, no alternation inside such a repeat, at most
+MAX_UNBOUNDED_REPEATS unbounded repeats, and a length cap. Literals, classes,
+`.*`, anchors, single-level repeats like \\d+, and top-level alternation
+(`FAILED|ERROR`) all still work. The search matches each line against only its
+first MATCH_LINE_CAP characters and stops at a deadline between lines.
 """
 import re
 import secrets
@@ -32,6 +37,11 @@ from collections import OrderedDict
 from typing import Optional
 
 MAX_RUNS = 20
+# Reservations for background runs that have not exited yet. Bounded on their
+# own so a burst of long-running background commands cannot crowd every
+# finished run out of the ring (and finished runs cannot evict a reservation
+# whose output is still to come).
+MAX_PENDING = 20
 MAX_STREAM_CHARS = 10_000_000
 
 # Bounds for the search tool. Together they keep a hostile or careless pattern
@@ -112,8 +122,10 @@ class RunOutput:
 
 
 class RunOutputStore:
-    def __init__(self, max_runs: int = MAX_RUNS, max_stream_chars: int = MAX_STREAM_CHARS):
+    def __init__(self, max_runs: int = MAX_RUNS, max_stream_chars: int = MAX_STREAM_CHARS,
+                 max_pending: int = MAX_PENDING):
         self.max_runs = max_runs
+        self.max_pending = max_pending
         self.max_stream_chars = max_stream_chars
         self._runs: "OrderedDict[str, RunOutput]" = OrderedDict()
         self._lock = threading.Lock()
@@ -122,10 +134,33 @@ class RunOutputStore:
     def new_id() -> str:
         return "run-" + secrets.token_hex(6)
 
+    def _oldest(self, pending: bool, skip: Optional[str] = None) -> Optional[str]:
+        for rid, r in self._runs.items():
+            if r.pending == pending and rid != skip:
+                return rid
+        return None
+
     def _insert(self, run: RunOutput) -> None:
+        """Add a run (lock held). The ring evicts the oldest FINISHED run first,
+        so the reservation of a still-running background command survives
+        finished runs coming and going. Pending entries have their own cap; one
+        pushed out by it is gone, and its fulfil() then returns False. Only when
+        nothing else can go (the ring is all pending) does a pending one yield
+        to the ring size -- never the entry being inserted."""
         self._runs[run.run_id] = run
+        if run.pending:
+            while sum(1 for r in self._runs.values() if r.pending) > self.max_pending:
+                victim = self._oldest(True, skip=run.run_id) or run.run_id
+                del self._runs[victim]
+                if victim == run.run_id:
+                    return
         while len(self._runs) > self.max_runs:
-            self._runs.popitem(last=False)
+            victim = (self._oldest(False, skip=run.run_id)
+                      or self._oldest(True, skip=run.run_id)
+                      or run.run_id)
+            del self._runs[victim]
+            if victim == run.run_id:
+                return
 
     def put(self, streams: dict, run_id: Optional[str] = None) -> str:
         """Register a finished run's redacted streams. Returns its run_id."""
@@ -193,27 +228,37 @@ def _is_unbounded(max_count, maxrepeat) -> bool:
     return max_count >= maxrepeat or max_count > _BIG_REPEAT
 
 
-def _walk(node, parser, in_unbounded: bool, counter: list) -> Optional[str]:
+def _walk(node, parser, in_multi: bool, counter: list) -> Optional[str]:
     """Returns a problem description, or None. counter[0] counts unbounded
-    repeats."""
+    repeats. in_multi is true inside a repeat whose max is more than 1 (the
+    only kind that can re-enter its body and so multiply the ways to match).
+
+    Deliberately strict: inside such a repeat NO other repeat is allowed,
+    whatever its bound ((a{0,50})+ is as bad as (a+)+ for the price of being
+    harder to spot), and no alternation ((a|a){0,99} backtracks exponentially
+    despite the small bound). A character set like [ab] is not an alternation
+    and stays fine."""
     SubPattern = parser.SubPattern
     repeat_ops = {parser.MAX_REPEAT, parser.MIN_REPEAT}
     possessive = getattr(parser, "POSSESSIVE_REPEAT", None)
     if possessive is not None:
         repeat_ops.add(possessive)
+    branch_ops = {parser.BRANCH}
+    conditional = getattr(parser, "GROUPREF_EXISTS", None)
+    if conditional is not None:
+        branch_ops.add(conditional)     # (?(1)a|b) is an alternation in all but name
     for op, av in node:
         if op in repeat_ops:
             lo, hi, body = av
-            unbounded = _is_unbounded(hi, parser.MAXREPEAT)
-            if unbounded:
+            if in_multi:
+                return "a repeat nested inside another repeat"
+            if _is_unbounded(hi, parser.MAXREPEAT):
                 counter[0] += 1
-                if in_unbounded:
-                    return "a repeat nested inside another repeat"
-            problem = _walk(body, parser, in_unbounded or unbounded, counter)
+            problem = _walk(body, parser, hi > 1, counter)
             if problem:
                 return problem
             continue
-        if op == parser.BRANCH and in_unbounded:
+        if op in branch_ops and in_multi:
             return "an alternation inside a repeat"
         # Descend into anything else that carries sub-patterns (groups,
         # lookarounds, branches, conditionals, atomic groups).
@@ -221,7 +266,7 @@ def _walk(node, parser, in_unbounded: bool, counter: list) -> Optional[str]:
         while stack:
             item = stack.pop()
             if isinstance(item, SubPattern):
-                problem = _walk(item, parser, in_unbounded, counter)
+                problem = _walk(item, parser, in_multi, counter)
                 if problem:
                     return problem
             elif isinstance(item, (list, tuple)):
@@ -230,7 +275,10 @@ def _walk(node, parser, in_unbounded: bool, counter: list) -> Optional[str]:
 
 
 def validate_pattern(pattern: str) -> "re.Pattern":
-    """Compile a search pattern, refusing the shapes that can run away.
+    """Compile a search pattern, refusing the shapes that can run away. Python's
+    `re` cannot be interrupted, so this static check is the only protection
+    against a single rx.search call hanging, and it is deliberately strict:
+    patterns are RESTRICTED, not merely screened for known-bad shapes.
     Raises ValueError with a message meant for the agent."""
     if not isinstance(pattern, str) or not pattern:
         raise ValueError("pattern must be a non-empty string.")
@@ -254,8 +302,9 @@ def validate_pattern(pattern: str) -> "re.Pattern":
         if problem:
             raise ValueError(
                 f"pattern rejected: it contains {problem}, which can take exponential time "
-                f"on a long line. Use a simpler pattern (e.g. a literal, or an alternation "
-                f"that is not repeated).")
+                f"on a long line, so read_run_output deliberately restricts patterns. Use a "
+                f"simpler one (a literal, a character class, `.*`, a single-level repeat such "
+                f"as \\d+, or an alternation that is not inside a repeat, e.g. FAILED|ERROR).")
         if counter[0] > MAX_UNBOUNDED_REPEATS:
             raise ValueError(
                 f"pattern rejected: it has {counter[0]} unbounded repeats (*, +, or a large "
@@ -265,20 +314,35 @@ def validate_pattern(pattern: str) -> "re.Pattern":
 
 # -- rendering ---------------------------------------------------------------
 
+TRUNCATION_MARK = "…[line truncated]"
+
+
 class _Budget:
     def __init__(self, chars: int):
         self.left = chars
         self.exhausted = False
+        self.truncated_line = False
         self.parts: list = []
 
-    def add(self, line: str) -> bool:
-        """Append a rendered line (a newline is added). False once full."""
+    def add(self, line: str, force: bool = False) -> bool:
+        """Append a rendered line (a newline is added). False once full.
+
+        A line that does not fit is cut to the budget and ends in a truncation
+        marker. With force=True something is appended even when the budget is
+        down to its last character or two -- used for the first line of a
+        page, which must always be shown so that paging can advance past it.
+        """
         if self.exhausted:
             return False
         need = len(line) + 1
         if need > self.left:
-            if self.left > 1:
-                self.parts.append(line[:self.left - 2] + "…")
+            if force or self.left > 1:
+                room = max(self.left - 1, 0)
+                if room >= len(TRUNCATION_MARK) + 20:
+                    self.parts.append(line[:room - len(TRUNCATION_MARK)] + TRUNCATION_MARK)
+                else:
+                    self.parts.append(line[:max(room - 1, 0)] + "…")
+                self.truncated_line = True
             self.exhausted = True
             self.left = 0
             return False
@@ -302,11 +366,15 @@ def read_window(stream: _Stream, offset: int, limit: int, max_chars: int) -> dic
     budget = _Budget(max_chars)
     emitted = 0
     for i in range(start, min(start + limit, len(lines))):
-        if not budget.add(_fmt(first + i, lines[i], True)):
+        # The first line is always emitted (cut to the budget if it is longer),
+        # so a line longer than max_chars cannot leave paging stuck on it.
+        if not budget.add(_fmt(first + i, lines[i], True), force=(emitted == 0)):
+            if emitted == 0:
+                emitted = 1
             break
         emitted += 1
     end = start + emitted
-    return {
+    out = {
         "mode": "window",
         "total_lines": first - 1 + len(lines),
         "lines_returned": emitted,
@@ -314,6 +382,9 @@ def read_window(stream: _Stream, offset: int, limit: int, max_chars: int) -> dic
         "next_offset": (first - 1 + end) if end < len(lines) else None,
         "first_line_available": first,
     }
+    if budget.truncated_line and emitted == 1:
+        out["line_truncated"] = True
+    return out
 
 
 def search(stream: _Stream, rx: "re.Pattern", context: int, offset: int, limit: int,
@@ -362,6 +433,15 @@ def search(stream: _Stream, rx: "re.Pattern", context: int, offset: int, limit: 
         if budget.exhausted:
             break
         emitted_matches += 1
+    forced_cut = False
+    if matches and emitted_matches == 0:
+        # The first match's block does not fit in max_chars. Show the match
+        # line alone, cut to the budget, and move past it -- otherwise the
+        # caller would be handed the same next_offset forever.
+        budget = _Budget(max_chars)
+        budget.add(_fmt(first + matches[0], lines[matches[0]], True), force=True)
+        forced_cut = budget.truncated_line
+        emitted_matches = 1
     out = {
         "mode": "search",
         "total_lines": first - 1 + len(lines),
@@ -376,6 +456,8 @@ def search(stream: _Stream, rx: "re.Pattern", context: int, offset: int, limit: 
         out["next_offset"] = first - 1 + matches[emitted_matches]
     elif timed_out or (len(matches) >= limit and scanned_to < len(lines)):
         out["next_offset"] = first - 1 + scanned_to
+    if forced_cut:
+        out["line_truncated"] = True
     if timed_out:
         out["search_timed_out"] = True
     if long_lines:

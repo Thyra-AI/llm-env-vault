@@ -1761,6 +1761,10 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         return {"error": "run_with_env now requires a scope: pass only_vars=[...] naming the "
                          "variables this command needs (see vault_status for the names), or "
                          "all_vars=True to inject the whole vault. Prefer only_vars."}
+    if isinstance(only_vars, list) and not only_vars:
+        return {"error": "only_vars is empty: that would inject nothing and still cost a "
+                         "password prompt. Name the variables the command needs (see "
+                         "vault_status for the names), or run it without the vault."}
     if isinstance(tail_chars, bool) or not isinstance(tail_chars, int) or \
             not 0 <= tail_chars <= MAX_TAIL_CHARS:
         return {"error": f"tail_chars must be an integer between 0 and {MAX_TAIL_CHARS}."}
@@ -2149,7 +2153,13 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                 return
             # The child's stderr was redirected into the same log, so a
             # background run has one merged stream, reported as stdout.
-            _RUN_OUTPUT.fulfil(bg_run_id, {"stdout": _redacted, "stderr": ""})
+            if not _RUN_OUTPUT.fulfil(bg_run_id, {"stdout": _redacted, "stderr": ""}):
+                # The reservation was pushed out of the store while the process
+                # ran (too many background runs pending at once). The redacted
+                # text is simply dropped -- read_run_output reports the run as
+                # unknown -- and only the run_id is logged, never any output.
+                print(f"llm-env-vault: background run {bg_run_id} output not kept "
+                      f"for read_run_output (its slot was evicted).", file=sys.stderr)
 
         threading.Thread(target=_log_redactor_thread, daemon=True).start()
         return _finish({"applied": True, "started": True, "pid": proc.pid, "log_file": log_path,
@@ -2353,7 +2363,8 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     inject, by name (e.g. ["DATABASE_URL"]); nothing else is exposed to
     the command or anything it spawns. Unknown names are rejected before
     the password prompt opens. A call with neither only_vars nor
-    all_vars=True is refused with an error naming both options.
+    all_vars=True is refused with an error naming both options. An empty
+    list is refused too (it would inject nothing and still prompt).
 
     all_vars: pass True to inject the WHOLE vault (what omitting
     only_vars used to do). Mutually exclusive with only_vars. Use it only
@@ -2534,11 +2545,16 @@ def read_run_output(run_id: str, stream: str = "both", pattern: Optional[str] = 
     (use (?i) at the start for case-insensitive). With it, the result is the
     matching lines with their 1-based line numbers (`N: matching line`) and
     context_lines lines either side (`N- context line`), grep-style. Without
-    it, the result is a window of lines. Patterns are bounded: at most 200
-    characters, no repeat nested in a repeat or alternation inside a repeat,
-    at most 3 unbounded repeats, only the first 1000 characters of a line are
-    matched, and a scan stops after 5 seconds. Invalid or refused patterns
-    return an error.
+    it, the result is a window of lines. Patterns are deliberately
+    restricted (Python's regex engine cannot be interrupted): at most 200
+    characters, NO repeat of any kind inside a repeat that can match more
+    than once (so not (a+)+, and not (a{0,5})+ either), NO alternation inside
+    such a repeat (so not (a|b)* with multi-character branches; [ab]* is
+    fine), at most 3 unbounded repeats, only the first 1000 characters of a
+    line are matched, and a scan stops after 5 seconds. Literals, classes,
+    `.*`, anchors, a single-level `\\d+` and top-level alternation such as
+    FAILED|ERROR all work. Invalid or refused patterns return an error. A
+    line longer than max_chars is cut and marked, so paging always advances.
 
     context_lines: 0 to 20 (default 0). Only used with pattern.
     offset: the 0-based line to start from (default 0). In a search it is

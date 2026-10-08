@@ -271,7 +271,7 @@ run_with_env(command=["python", "manage.py", "migrate"], only_vars=["DATABASE_UR
 run_with_env(command=["docker", "compose", "up"], background=True, all_vars=True)
 ```
 
-**`only_vars` or `all_vars=True` — one of the two is required.** Every call states its scope; a call with neither is refused with an error that names both options. (This changed in 2.3.0 — see the [changelog](CHANGELOG.md) for migrating.)
+**`only_vars` or `all_vars=True` — one of the two is required.** Every call states its scope; a call with neither is refused with an error that names both options, and an empty `only_vars=[]` is refused too (it would inject nothing and still cost a password prompt). (This changed in 2.3.0 — see the [changelog](CHANGELOG.md) for migrating.)
 
 **`only_vars`** — the vault variables to inject; nothing else reaches the command:
 
@@ -306,7 +306,8 @@ Searches or pages through the redacted output of an earlier `run_with_env`. No p
 - `stream`: `stdout`, `stderr` or `both` (the `max_chars` budget is split between them).
 - `pattern`: a Python regular expression, matched per line. With it you get the matching lines as `N: line` and `context_lines` (0–20) neighbours as `N- line`, grep-style, 1-based. Without it you get a window of `limit` lines from 0-based line `offset`. In a search, `offset` is where scanning starts and `limit` caps the matches returned.
 - `max_chars` (1–200000) caps the text returned. Each stream's entry has `total_lines`, `total_chars` and `next_offset` (what to pass to continue, or `null` when done).
-- An unknown or evicted `run_id` is an error that says so. An invalid regex is rejected, and so is one that can run away: more than 200 characters, a repeat inside a repeat or an alternation inside a repeat (`(a+)+`, `(a|aa)*`), more than three unbounded repeats. Only the first 1000 characters of each line are matched, and a scan stops after 5 seconds.
+- An unknown or evicted `run_id` is an error that says so. An invalid regex is rejected, and so is one that can run away. Python's regex engine cannot be interrupted, so patterns are **deliberately restricted**: more than 200 characters is refused, and so is any repeat inside a repeat that can match more than once (`(a+)+`, and also `(a{0,50})+`) or any alternation inside such a repeat (`(a|aa)*`, `(a|a){0,99}`), and more than three unbounded repeats. Literals, character classes, `.*`, anchors, a single-level `\d+` and top-level alternation (`FAILED|ERROR`, `test_\w+`, `^E\s+.*`, `\d+ passed`) all work. Only the first 1000 characters of each line are matched, and a scan stops after 5 seconds.
+- A line longer than `max_chars` is cut with a `…[line truncated]` marker instead of stalling: every page shows at least one line (or match) and `next_offset` always moves forward.
 - **Background runs** are registered too, once the process has exited and the server has redacted its log in place; before that the call says the run is still in progress. Their stdout and stderr are one merged stream, shown as `stdout`.
 
 **`files`** — decrypts whole encrypted files into the command's working directory for the lifetime

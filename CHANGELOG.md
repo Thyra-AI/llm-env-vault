@@ -16,7 +16,8 @@ pinning what a user installs.
   was the easiest thing to do and the widest exposure, so it is no longer the default: a call
   with neither is refused, before any dialog opens, with an error that names both options.
   `all_vars=True` does exactly what omitting `only_vars` used to do. Passing both is an error.
-  `only_vars=[]` (inject nothing) is unchanged.
+  An empty `only_vars=[]` is refused as well, before any dialog: it would inject nothing and
+  still cost a password prompt.
 
   **Migrating.** Wherever you (or an agent, a script, a saved prompt) called `run_with_env`
   without `only_vars`, either list the variables the command needs —
@@ -48,9 +49,15 @@ pinning what a user installs.
   **in server memory only** — never written to disk, bounded to the last 20 runs and about
   10 MB per stream (a longer stream keeps its tail and says so), and gone when the server
   restarts. An unknown or evicted `run_id` is a clear error; an invalid regex is rejected, and
-  so is one that could run away (over 200 characters, a repeat inside a repeat, an alternation
-  inside a repeat, more than three unbounded repeats). Lines are matched on their first 1000
-  characters and a scan stops after 5 seconds.
+  so is one that could run away. Python's regex engine cannot be interrupted, so patterns are
+  **deliberately restricted**: over 200 characters, any repeat nested inside a repeat that can
+  match more than once (`(a+)+`, and `(a{0,50})+` too), any alternation inside such a repeat
+  (`(a|aa)*`, `(a|a){0,99}`), or more than three unbounded repeats is refused. Literals, classes,
+  `.*`, anchors, a single-level `\d+` and top-level alternation (`FAILED|ERROR`) still work.
+  Lines are matched on their first 1000 characters and a scan stops after 5 seconds. A line (or
+  match) longer than `max_chars` is cut with a `…[line truncated]` marker, so paging always
+  advances. Reservations for running background commands are not evicted by finished runs
+  (they are capped separately at 20).
 - **Background runs are searchable too**, once the process has exited and the server has
   redacted its log in place; until then `read_run_output` says the run is still in progress.
   Their stdout and stderr are one merged stream, shown as `stdout`. The log file itself is

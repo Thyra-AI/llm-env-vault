@@ -327,17 +327,24 @@ def test_b1_signature_level_empty_list_differs_from_none() -> None:
     assert sig_none != sig_empty
 
 
-def test_b1_integration_zero_secret_grant_does_not_auto_allow_full_vault_run() -> None:
+def test_b1_integration_narrow_grant_does_not_auto_allow_full_vault_run() -> None:
+    # Since 2.3.0 only_vars=[] is refused before any dialog (see
+    # test_run_output.py), so the narrowest grant that can exist is a one-
+    # variable scope. It still must not auto-allow the whole-vault call.
     with isolated_vault():
         cmd = _py()
         with fake_dialog(_allow(trust_it=True)) as calls:
             r_empty = mcp_server._run_with_env_impl(list(cmd), None, False, None, [])
-            assert r_empty.get("applied") is True
+            assert "error" in r_empty and len(calls) == 0
+
+            r_one = mcp_server._run_with_env_impl(list(cmd), None, False, None,
+                                                  ["DOCKER_TEST_TOKEN"])
+            assert r_one.get("applied") is True
             assert len(calls) == 1
 
             r_full = mcp_server._run_with_env_impl(list(cmd), None, False, None, None, all_vars=True)
             assert len(calls) == 2, (
-                "REGRESSION (B1): only_vars=None auto-allowed off an only_vars=[] "
+                "REGRESSION (B1): only_vars=None auto-allowed off a narrower "
                 "grant without re-prompting")
             assert not r_full.get("auto_allowed")
 

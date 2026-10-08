@@ -98,6 +98,16 @@ def test_all_vars_together_with_only_vars_is_refused() -> None:
         assert "not both" in r["error"] and "not both" in r2["error"]
 
 
+def test_empty_only_vars_is_refused_before_any_dialog() -> None:
+    with isolated_vault():
+        with fake_dialog(_allow()) as calls:
+            r = mcp_server._run_with_env_impl(_py(), None, False, None, [])
+            r2 = mcp_server._run_with_env_impl(_py(), None, True, None, [])
+        assert calls == [], "an empty scope must not cost a password prompt"
+        assert "error" in r and not r.get("applied") and "empty" in r["error"]
+        assert "error" in r2 and "empty" in r2["error"]
+
+
 def test_all_vars_must_be_a_real_bool() -> None:
     with isolated_vault():
         with fake_dialog(_allow()) as calls:
@@ -350,6 +360,41 @@ def test_catastrophic_patterns_are_refused_not_run() -> None:
             assert "error" not in mcp_server._read_run_output_impl(rid, pattern=good), good
 
 
+def test_nested_and_alternated_repeats_are_refused_whatever_the_bound() -> None:
+    with small_store() as store:
+        rid = store.put({"stdout": ("a" * 40 + "\n") * 20, "stderr": ""})
+        for bad in ("(a{0,50})+!", "(a{0,50})*!", "(a{1,2}){2,}!", "(a?)+!", "(a|a){0,99}!",
+                    "(a|b|ab){2,5}!", "(?:ab|cd)*", "(?:x(a|aa))+", "((a+))+", "(?:a+b?){3}",
+                    "(?=(a|aa)+)a"):
+            t0 = time.monotonic()
+            r = mcp_server._read_run_output_impl(rid, pattern=bad)
+            assert "error" in r and "restricts" in r["error"], (bad, r)
+            assert time.monotonic() - t0 < 1.0, f"{bad!r} was not refused up front"
+        # A bounded repeat on its own, or an alternation of single characters
+        # (a character set to the regex engine), is fine.
+        for ok in (r"a{0,50}!", r"(a{0,2})?", r"[ab]{0,99}", r"(a|b){0,99}", r"fail(ed|ure)?"):
+            assert "error" not in mcp_server._read_run_output_impl(rid, pattern=ok), ok
+
+
+def test_common_legit_patterns_still_work() -> None:
+    text = ("test_login PASSED\nFAILED tests/test_a.py::test_x\nERROR collecting b\n"
+            "E   assert 1 == 2\n12 passed, 1 failed\nplain\n")
+    with small_store() as store:
+        rid = store.put({"stdout": text, "stderr": ""})
+        for pat, expect in ((r"FAILED|ERROR", ["FAILED tests", "ERROR collecting"]),
+                            (r"test_\w+", ["test_login", "test_a"]),
+                            (r"^E\s+.*", ["assert 1 == 2"]),
+                            (r"\d+ passed", ["12 passed"]),
+                            (r"(?i)fail(ed|ure)?", ["FAILED", "1 failed"]),
+                            (r"^plain$", ["plain"]),
+                            (r".*assert.*", ["assert 1 == 2"])):
+            res = mcp_server._read_run_output_impl(rid, "stdout", pattern=pat)
+            assert "error" not in res, (pat, res)
+            got = res["streams"]["stdout"]["text"]
+            for e in expect:
+                assert e in got, (pat, e, got)
+
+
 def test_search_has_a_deadline() -> None:
     rx = runstore.validate_pattern("a.*b.*c")
     s = runstore.RunOutput("r", {"stdout": ("a" * 900 + "\n") * 2000, "stderr": ""},
@@ -358,6 +403,52 @@ def test_search_has_a_deadline() -> None:
     res = runstore.search(s, rx, 0, 0, 10, 1000, time_budget=0.05)
     assert time.monotonic() - t0 < 5
     assert res.get("search_timed_out") or res["next_offset"] is None
+
+
+# --------------------------------------------------------------------------
+# paging always advances
+# --------------------------------------------------------------------------
+
+def test_window_first_line_longer_than_max_chars_still_advances() -> None:
+    with small_store() as store:
+        rid = store.put({"stdout": "x" * 500 + "\nsecond\nthird\n", "stderr": ""})
+        offset, seen, steps = 0, [], 0
+        while offset is not None and steps < 10:
+            res = mcp_server._read_run_output_impl(rid, "stdout", offset=offset,
+                                                   max_chars=60)["streams"]["stdout"]
+            assert res["text"] and len(res["text"]) <= 60, res
+            assert res["lines_returned"] >= 1
+            assert res["next_offset"] is None or res["next_offset"] > offset
+            seen.append(res["text"])
+            offset, steps = res["next_offset"], steps + 1
+        assert offset is None, "paging never reached the end"
+        assert "[line truncated]" in seen[0]
+        assert any("second" in t for t in seen) and any("third" in t for t in seen)
+        first = mcp_server._read_run_output_impl(rid, "stdout", offset=0,
+                                                 max_chars=60)["streams"]["stdout"]
+        assert first["line_truncated"] is True and first["next_offset"] == 1
+        # Even a one-character budget makes progress.
+        tiny = mcp_server._read_run_output_impl(rid, "stdout", offset=0,
+                                                max_chars=1)["streams"]["stdout"]
+        assert tiny["text"] and tiny["next_offset"] == 1
+
+
+def test_search_first_match_larger_than_max_chars_still_advances() -> None:
+    text = "x" * 400 + " hit one\nmiddle\nhit two\nhit three\n"
+    with small_store() as store:
+        rid = store.put({"stdout": text, "stderr": ""})
+        offset, found, steps = 0, [], 0
+        while offset is not None and steps < 10:
+            res = mcp_server._read_run_output_impl(rid, "stdout", pattern="hit", context_lines=1,
+                                                   offset=offset, max_chars=50)["streams"]["stdout"]
+            assert res["text"] and res["matches_returned"] >= 1, res
+            assert res["next_offset"] is None or res["next_offset"] > offset
+            found.append(res["text"])
+            offset, steps = res["next_offset"], steps + 1
+        assert offset is None, "paging never reached the end"
+        assert "[line truncated]" in found[0]
+        joined = "\n".join(found)
+        assert "hit two" in joined and "hit three" in joined
 
 
 # --------------------------------------------------------------------------
@@ -375,6 +466,40 @@ def test_ring_buffer_evicts_the_oldest_run() -> None:
         except runstore.RunNotFound:
             pass
     assert store.get(ids[4]).streams["stdout"].text == "run 4\n"
+
+
+def test_pending_reservation_survives_finished_runs_coming_and_going() -> None:
+    store = runstore.RunOutputStore(max_runs=3)
+    pending = store.reserve()
+    done = [store.put({"stdout": f"run {i}\n", "stderr": ""}) for i in range(6)]
+    assert pending in store.ids(), "a running background command lost its slot"
+    assert store.ids() == [pending] + done[-2:]
+    assert store.fulfil(pending, {"stdout": "late output\n"}) is True
+    assert store.get(pending).streams["stdout"].text == "late output\n"
+
+
+def test_pending_entries_are_bounded_separately_oldest_goes_first() -> None:
+    store = runstore.RunOutputStore(max_runs=10, max_pending=3)
+    kept = store.put({"stdout": "finished\n", "stderr": ""})
+    pend = [store.reserve() for _ in range(5)]
+    assert store.ids() == [kept] + pend[-3:], "finished runs are not evicted by pending ones"
+    assert store.fulfil(pend[0], {"stdout": "x"}) is False
+    assert store.fulfil(pend[1], {"stdout": "x"}) is False
+    assert store.fulfil(pend[4], {"stdout": "ok\n"}) is True
+    try:
+        store.get(pend[0])
+        raise AssertionError("evicted reservation is readable")
+    except runstore.RunNotFound:
+        pass
+
+
+def test_all_pending_ring_still_respects_max_runs_and_keeps_the_new_entry() -> None:
+    store = runstore.RunOutputStore(max_runs=2, max_pending=5)
+    a, b, c = store.reserve(), store.reserve(), store.reserve()
+    assert store.ids() == [b, c]
+    d = store.put({"stdout": "now\n", "stderr": ""})
+    assert store.ids() == [c, d]
+    assert runstore.MAX_PENDING == 20
 
 
 def test_default_ring_is_twenty_runs_and_evicted_id_errors_through_the_tool() -> None:
