@@ -182,3 +182,8 @@ values and re-vaults them.
    a secret.
 4. That `tests/test_legacy_swap_recovery.py` still calls no swap writer. The moment it does, it
    will die with them and take the recovery coverage with it.
+5. That `LLM_ENV_VAULT_HEADLESS` can only ever make a dialog refuse. `gui._refuse_if_headless`
+   (called first in `_new_window` and `_foreground`) raises; there is no branch that skips the
+   dialog, approves, or returns a password or confirmation. Setting the variable in production
+   can deny service to the dialog tools and nothing else. `tests/test_headless_guard.py` calls
+   every `gui.*_dialog` entry point under it and fails if one does not refuse.

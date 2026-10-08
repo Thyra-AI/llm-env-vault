@@ -30,6 +30,11 @@ jobs:
       # sweep globals() for callables named test_*, pytest uses its own
       # collection. A test can pass under one and not be seen by the other.
       - name: Run standalone
+        # The pytest runs below get this from tests/conftest.py; standalone
+        # scripts bypass conftest, so set it here. It makes dialogs refuse
+        # (fail closed) instead of opening a window on the runner.
+        env:
+          LLM_ENV_VAULT_HEADLESS: "1"
         run: |
           python tests/test_trust.py
           python tests/test_install_migrate_robustness.py
@@ -44,7 +49,7 @@ jobs:
           python tests/test_manage_vault.py
           python tests/test_integration_v2.py
           python tests/test_security_invariants.py
-          python tests/test_swap.py
+          python tests/test_headless_guard.py
           python tests/test_consumption_matrix.py
           python tests/test_hardening_161.py
           python tests/test_single_view.py

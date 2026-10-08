@@ -42,6 +42,11 @@ import sys
 import time
 from pathlib import Path
 
+# Children whose output is captured must not flash a console window when the
+# launcher itself has none. Not used for the final server spawn below, which
+# must inherit stdio untouched.
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 PLUGIN_ROOT = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", Path(__file__).resolve().parent))
 DATA_DIR = Path(os.environ.get("CLAUDE_PLUGIN_DATA", PLUGIN_ROOT / ".venv-data"))
 VENV_DIR = DATA_DIR / "venv"
@@ -165,7 +170,8 @@ def _venv_is_functional(python: Path) -> bool:
         return False
     try:
         result = subprocess.run([str(python), "-m", "pip", "--version"],
-                                 capture_output=True, timeout=10)
+                                 capture_output=True, timeout=10,
+                                 creationflags=_NO_WINDOW)
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -188,7 +194,8 @@ def _run_logged(cmd: list[str], step: str) -> None:
     to log anything, defeating the entire point of it existing."""
     _log(f"Running ({step}): {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True,
-                             encoding="utf-8", errors="replace")
+                             encoding="utf-8", errors="replace",
+                             creationflags=_NO_WINDOW)
     if result.stdout:
         _log(result.stdout.rstrip())
     if result.returncode != 0:

@@ -12,14 +12,111 @@ start failing with "tk wasn't installed properly", and which ones fail depends
 on execution order. That is worse than no test, because a flaky security test
 gets muted. One fresh process per full sweep makes it deterministic.
 
-Prints one line per check: "OK <name>" or "FAIL <name>: <reason>".
-Exit code is 0 only if every check passed.
+Where the windows go. The sweep builds some fifty real Tk roots, and the
+product deliberately grabs the Windows foreground for each of them, so run on
+the user's own desktop it makes the PC unusable for the duration. The sweep
+therefore switches this thread to a PRIVATE Win32 desktop, before tkinter is
+imported, and every window lives and dies there: nothing is ever drawn on the
+interactive desktop. If the private desktop cannot be created, entered and
+verified, the sweep exits non-zero (EXIT_NO_DESKTOP) -- it never falls back to
+the visible desktop and never passes silently. The one check that needs the
+real foreground (GetForegroundWindow only works on the input desktop) is opt-in:
+set LLM_ENV_VAULT_REAL_FOREGROUND=1 and the WHOLE sweep runs on the visible
+desktop, deliberately, for a human who wants to watch.
+
+Prints one line per check: "OK <name>", "SKIP <name>: <reason>" or
+"FAIL <name>: <reason>". Exit code is 0 only if every check passed.
 """
+import atexit
 import contextlib
 import os
 import pathlib
 import sys
-import tkinter as tk
+
+EXIT_NO_DESKTOP = 3
+REAL_FOREGROUND = os.environ.get("LLM_ENV_VAULT_REAL_FOREGROUND") == "1"
+
+
+def _enter_private_desktop():
+    """Create a private desktop, make this thread live on it, and PROVE it.
+
+    Must run before the first window of the thread exists (SetThreadDesktop
+    fails for a thread that already owns windows), so before `import tkinter`.
+    Returns a teardown callable. Exits the process on any failure.
+    """
+    def fail(why):
+        sys.stderr.write(
+            "PRIVATE DESKTOP UNAVAILABLE: " + why + ". Refusing to run the Tk "
+            "sweep on the interactive desktop (it would steal the user's "
+            "focus).\n")
+        sys.exit(EXIT_NO_DESKTOP)
+
+    if sys.platform != "win32":
+        fail("no private desktop on this platform")
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.CreateDesktopW.restype = wintypes.HANDLE
+    user32.CreateDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                      wintypes.LPVOID, wintypes.DWORD,
+                                      wintypes.DWORD, wintypes.LPVOID]
+    user32.GetThreadDesktop.restype = wintypes.HANDLE
+    user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+    user32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
+    user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+    user32.GetUserObjectInformationW.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
+    def desktop_name(handle):
+        buf = ctypes.create_unicode_buffer(256)
+        need = wintypes.DWORD()
+        UOI_NAME = 2
+        if not user32.GetUserObjectInformationW(
+                handle, UOI_NAME, buf, ctypes.sizeof(buf), ctypes.byref(need)):
+            return None
+        return buf.value
+
+    original = user32.GetThreadDesktop(kernel32.GetCurrentThreadId())
+    name = f"llm_env_vault_tk_sweep_{os.getpid()}"
+    GENERIC_ALL = 0x10000000
+    private = user32.CreateDesktopW(name, None, None, 0, GENERIC_ALL, None)
+    if not private:
+        fail(f"CreateDesktopW failed (error {ctypes.get_last_error()})")
+    if not user32.SetThreadDesktop(private):
+        err = ctypes.get_last_error()
+        user32.CloseDesktop(private)
+        fail(f"SetThreadDesktop failed (error {err})")
+    current = user32.GetThreadDesktop(kernel32.GetCurrentThreadId())
+    if desktop_name(current) != name:
+        fail(f"the thread is on desktop {desktop_name(current)!r}, not {name!r}")
+
+    def teardown():
+        # CloseDesktop refuses while any thread of this process is still
+        # assigned to the desktop, so step back to the original one first.
+        if original:
+            user32.SetThreadDesktop(original)
+        user32.CloseDesktop(private)
+
+    return teardown
+
+
+if REAL_FOREGROUND:
+    sys.stderr.write("LLM_ENV_VAULT_REAL_FOREGROUND=1: running the sweep on the "
+                     "VISIBLE desktop (windows will appear and take focus).\n")
+    os.environ.pop("LLM_ENV_VAULT_HEADLESS", None)
+else:
+    atexit.register(_enter_private_desktop())
+    # Verified above: from here on, any window is on the private desktop, so
+    # the process may build real Tk roots. Opt out of the headless refusal
+    # explicitly; the parent test does the same for the environment it passes.
+    os.environ.pop("LLM_ENV_VAULT_HEADLESS", None)
+    os.environ["LLM_ENV_VAULT_PRIVATE_DESKTOP"] = "1"
+
+import tkinter as tk  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -28,11 +125,17 @@ from vault_lib import crypto, gui, store  # noqa: E402
 RESULTS = []
 
 
+class Skip(Exception):
+    """Raised by a check that does not apply; reported as SKIP, not FAIL."""
+
+
 def check(name):
     def wrap(fn):
         try:
             fn()
             RESULTS.append((name, None))
+        except Skip as exc:
+            RESULTS.append((name, ("SKIP", str(exc))))
         except AssertionError as exc:
             RESULTS.append((name, str(exc)))
         except Exception as exc:  # noqa: BLE001
@@ -558,10 +661,93 @@ def _():
         _drop_dead_root()
 
 
-@check("dialog_takes_the_windows_foreground")
+@check("dialog_asks_for_the_windows_foreground")
 def _():
+    """Mocked, so it runs on the private desktop.
+
+    Two halves. gui._foreground must hand THIS dialog's window to
+    _win32_take_foreground; and _win32_take_foreground must aim
+    SetForegroundWindow at that window's top-level HWND (the parent of Tk's
+    client area), attaching to the foreground thread's input queue before the
+    call and detaching after.
+    """
+    win, _run = gui._new_window()
+    seen = []
+    real = gui._win32_take_foreground
+    gui._win32_take_foreground = seen.append
+    try:
+        gui._style(win)
+        gui._foreground(win)
+    finally:
+        gui._win32_take_foreground = real
+        win.destroy()
+        _drop_dead_root()
+    assert len(seen) == 1 and seen[0] is win, (
+        f"_foreground did not ask for the foreground for the dialog window "
+        f"(calls: {len(seen)})")
+
     if sys.platform != "win32":
         return
+    import ctypes
+    calls = []
+
+    class _Fn:
+        def __init__(self, label, result):
+            self.label, self.result = label, result
+
+        def __call__(self, *args):
+            calls.append((self.label, tuple(args)))
+            return self.result
+
+    class _Lib:
+        def __init__(self, **fns):
+            self.__dict__.update(fns)
+
+    TOP_LEVEL, CLIENT, OTHER_FG, FG_TID, OUR_TID = 4242, 100, 7, 55, 66
+    fake_user32 = _Lib(
+        GetParent=_Fn("GetParent", TOP_LEVEL),
+        GetForegroundWindow=_Fn("GetForegroundWindow", OTHER_FG),
+        GetWindowThreadProcessId=_Fn("GetWindowThreadProcessId", FG_TID),
+        AttachThreadInput=_Fn("AttachThreadInput", 1),
+        BringWindowToTop=_Fn("BringWindowToTop", 1),
+        SetForegroundWindow=_Fn("SetForegroundWindow", 1),
+        SetActiveWindow=_Fn("SetActiveWindow", 1))
+    fake_kernel32 = _Lib(GetCurrentThreadId=_Fn("GetCurrentThreadId", OUR_TID))
+
+    class _FakeWin:
+        def winfo_id(self):
+            return CLIENT
+
+    real_windll = ctypes.windll
+    ctypes.windll = _Lib(user32=fake_user32, kernel32=fake_kernel32)
+    try:
+        gui._win32_take_foreground(_FakeWin())
+    finally:
+        ctypes.windll = real_windll
+    by_name = [c[0] for c in calls]
+    assert ("SetForegroundWindow", (TOP_LEVEL,)) in calls, (
+        f"SetForegroundWindow was not aimed at the dialog's top-level window "
+        f"(calls: {calls})")
+    assert ("AttachThreadInput", (FG_TID, OUR_TID, True)) in calls, (
+        f"the foreground thread's input queue was not attached (calls: {calls})")
+    assert ("AttachThreadInput", (FG_TID, OUR_TID, False)) in calls, (
+        f"the foreground thread's input queue was never detached (calls: {calls})")
+    assert by_name.index("AttachThreadInput") < by_name.index("SetForegroundWindow"), (
+        "SetForegroundWindow ran before attaching to the foreground thread")
+
+
+@check("dialog_takes_the_windows_foreground")
+def _():
+    """The real thing: GetForegroundWindow() must be the dialog. Foreground
+    only exists on the input desktop, so this cannot run on the private one;
+    it is opt-in (LLM_ENV_VAULT_REAL_FOREGROUND=1, which also puts the whole
+    sweep on the visible desktop). Run it before a release."""
+    if not REAL_FOREGROUND:
+        raise Skip("needs the real input desktop; set "
+                   "LLM_ENV_VAULT_REAL_FOREGROUND=1 to run it (windows will "
+                   "appear and take focus)")
+    if sys.platform != "win32":
+        raise Skip("Windows-only")
     import ctypes
     win, _run = gui._new_window()
     try:
@@ -586,6 +772,8 @@ if __name__ == "__main__":
     for name, err in RESULTS:
         if err is None:
             print(f"OK {name}")
+        elif isinstance(err, tuple):
+            print(f"SKIP {name}: {err[1]}")
         else:
             print(f"FAIL {name}: {err}")
             failed += 1

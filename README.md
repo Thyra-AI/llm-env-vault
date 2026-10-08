@@ -909,6 +909,12 @@ plus additional pytest-only files:
   against a placeholder-only `.env` and a real `pydantic-settings` class. The control (legacy
   placeholders) fails with "should be a valid integer"; the typed file loads.
 
+Running the suite never opens a window on your screen. `tests/conftest.py` sets
+`LLM_ENV_VAULT_HEADLESS=1` (which makes every dialog refuse, fail closed) and fails any test that
+creates a Tk window; the one sweep that needs real Tk windows (`tests/_tk_checks.py`) runs them on a
+private Windows desktop. The single check that needs the real foreground window is opt-in: set
+`LLM_ENV_VAULT_REAL_FOREGROUND=1` before a release (windows will appear and take focus).
+
 All tests fully isolate the real vault — running the suite never touches your actual vault. Run
 from the project venv:
 

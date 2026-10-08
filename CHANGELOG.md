@@ -7,6 +7,42 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.3.3] — 2026-10-08
+
+The test suite no longer puts windows on your screen or takes your focus.
+
+### Fixed
+
+- **The password field is cleared after a wrong password.** The native dialogs used to leave the
+  rejected password sitting in the box. The field is now emptied, the cursor is put back in it,
+  and the error message is still shown. Covered by `a_refused_password_is_cleared_and_the_field_refocused`.
+- **Running the tests made real windows appear and steal focus.** `tests/_tk_checks.py` builds about
+  fifty real Tk roots and the dialogs deliberately take the Windows foreground, so a test run made
+  the PC unusable. The sweep now runs on a **private Win32 desktop** (created and verified before
+  `tkinter` is imported; if that fails the sweep exits non-zero rather than falling back to your
+  desktop). Nothing is drawn on the interactive desktop.
+- **`.github/workflows/ci.yml` ran `tests/test_swap.py`, which was retired in 2.0.0.** The reference
+  is removed.
+
+### Changed
+
+- **A fail-closed headless guard.** `tests/conftest.py` sets `LLM_ENV_VAULT_HEADLESS=1` (inherited
+  by every subprocess a test starts) and installs a tripwire that fails any test creating a
+  `tkinter.Tk`/`Toplevel` or calling a `MessageBox`. `gui._new_window` and `gui._foreground`
+  **raise `HeadlessDialogRefused`** when the variable is set: no dialog is shown, nothing is
+  approved, no password or confirmation is returned. The variable can therefore only ever deny a
+  dialog, never bypass one, so it is harmless in production. `tests/test_headless_guard.py` calls
+  every `gui.*_dialog` entry point under it and asserts each refuses.
+- **No console windows flashing from helper processes.** `CREATE_NO_WINDOW` on Windows for the git
+  probe, foreground and background `run_with_env` commands (`run_bound` too), and the plugin
+  launcher's venv/pip checks. The launcher's final `mcp_server.py` spawn still inherits stdio untouched.
+- **Tests:** `dialog_takes_the_windows_foreground` is split. A mocked check
+  (`dialog_asks_for_the_windows_foreground`) always runs; the real `GetForegroundWindow` assertion
+  needs the input desktop, so it runs only with `LLM_ENV_VAULT_REAL_FOREGROUND=1` (which also puts
+  the whole sweep on the visible desktop) and is reported as skipped otherwise. The silent
+  "headless box" early return in the sweep is now a visible `pytest.skip`.
+- A docstring in `vault_lib/runstore.py` about the cut line is reworded. No behaviour change.
+
 ## [2.3.2] — 2026-10-08
 
 ### Fixed

@@ -206,7 +206,21 @@ def test_dialog_checks_pass_in_a_clean_interpreter() -> None:
         python = sys.executable
     script = os.path.join(repo, "tests", "_tk_checks.py")
 
-    proc = subprocess.run([python, script], cwd=repo, capture_output=True,
+    if sys.platform != "win32":
+        import pytest
+        pytest.skip("the Tk sweep needs a private Win32 desktop to keep its "
+                    "windows off the user's screen; there is none on this platform")
+
+    # The child is the one process allowed real Tk, and only because it moves
+    # itself onto a private desktop (verified inside the child before it
+    # imports tkinter). Everything else inherits LLM_ENV_VAULT_HEADLESS=1 from
+    # tests/conftest.py and refuses to open a dialog at all.
+    env = dict(os.environ)
+    env.pop("LLM_ENV_VAULT_HEADLESS", None)
+    if env.get("LLM_ENV_VAULT_REAL_FOREGROUND") != "1":
+        env["LLM_ENV_VAULT_PRIVATE_DESKTOP"] = "1"
+
+    proc = subprocess.run([python, script], cwd=repo, capture_output=True, env=env,
                           # A clean sweep takes about 5 seconds. 300 s meant a
                           # dialog that hangs -- a pack/grid deadlock inside
                           # .grid(), say, which no teardown guard can rescue --
@@ -215,8 +229,17 @@ def test_dialog_checks_pass_in_a_clean_interpreter() -> None:
                           text=True, timeout=90)
     out = (proc.stdout or "") + (proc.stderr or "")
 
+    # Exit 3 is "no private desktop": a failure, never a skip. A sweep that
+    # silently did not run is how this suite ended up unmonitored before.
+    assert proc.returncode != 3, (
+        "the Tk sweep could not get a private desktop and refused to run on "
+        "the visible one.\n" + out)
+
     if "tk wasn't installed properly" in out or "no display name" in out:
-        return  # headless box -- nothing to assert
+        import pytest
+        pytest.skip("Tk is unusable in this environment ("
+                    "\"tk wasn't installed properly\" / \"no display name\"); "
+                    "the dialog sweep did NOT run")
 
     failures = [ln for ln in out.splitlines() if ln.startswith("FAIL ")]
     assert proc.returncode == 0 and not failures, (
@@ -372,7 +395,12 @@ if __name__ == "__main__":
         try:
             test()
             print("  PASS")
-        except Exception as exc:  # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001
+            if type(exc).__name__ == "Skipped":  # pytest.skip(): not an Exception
+                print(f"  SKIP: {exc}")
+                continue
+            if not isinstance(exc, Exception):
+                raise
             print(f"  FAIL: {exc}")
             failures.append((test.__name__, exc))
     print(f"\nResults: {len(tests) - len(failures)}/{len(tests)} passed")

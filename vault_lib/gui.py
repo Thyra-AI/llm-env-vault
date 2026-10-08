@@ -19,6 +19,7 @@ means there -- an in-memory-only cache scoped to this one server
 process, never written to disk.
 """
 import hashlib
+import os
 import re
 import sys
 import tkinter as tk
@@ -250,6 +251,35 @@ def _style(root):
     _enable_dark_titlebar(root)
 
 
+HEADLESS_ENV = "LLM_ENV_VAULT_HEADLESS"
+
+
+class HeadlessDialogRefused(RuntimeError):
+    """A dialog was requested while LLM_ENV_VAULT_HEADLESS is set."""
+
+
+def _refuse_if_headless(what: str) -> None:
+    """Fail CLOSED when LLM_ENV_VAULT_HEADLESS is set.
+
+    The test suite sets this (tests/conftest.py) so that no test, and no
+    subprocess a test starts, can put a real window on someone's screen. The
+    only effect of the variable is to make dialog creation RAISE: no dialog
+    is shown, nothing is auto-approved, no password or confirmation is ever
+    returned. Setting it in production therefore cannot bypass a consent
+    dialog -- the worst an attacker who controls this process's environment
+    achieves is a denial of service on the dialog tools, which they could
+    already do by killing the server. Do not ever turn this into a switch
+    that skips the dialog and carries on.
+
+    Every dialog entry point reaches a window only through _new_window (and
+    _foreground), so guarding those two covers all of them.
+    """
+    if os.environ.get(HEADLESS_ENV, "").strip().lower() not in ("", "0"):
+        raise HeadlessDialogRefused(
+            f"{what}: refusing to open a dialog because {HEADLESS_ENV} is set. "
+            f"Nothing was approved and no input was collected.")
+
+
 def _new_window():
     """Returns (window, run_modal) for a dialog.
 
@@ -266,7 +296,10 @@ def _new_window():
     mainloop(); any window opened while one is already alive becomes a
     Toplevel of it, made transient and modal and driven with wait_window().
     Behaviour is identical to before for the common single-dialog case.
+
+    Refuses (raises) under LLM_ENV_VAULT_HEADLESS -- see _refuse_if_headless.
     """
+    _refuse_if_headless("_new_window")
     existing = getattr(tk, "_default_root", None)
     try:
         alive = existing is not None and existing.winfo_exists()
@@ -318,6 +351,9 @@ def _foreground(win):
     Every step is best-effort -- if any of it is refused we still have topmost
     and lift, so the window is at least visible.
     """
+    # Outside the try below on purpose: that block swallows every exception,
+    # and a headless refusal must not be one of them.
+    _refuse_if_headless("_foreground")
     try:
         win.deiconify()
         win.lift()

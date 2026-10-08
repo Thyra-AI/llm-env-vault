@@ -34,8 +34,8 @@ one expensive one), and stops at a deadline between windows. Known limit: a
 match spanning more than ~MATCH_STEP characters across a window boundary may be
 missed on a line longer than MATCH_WINDOW characters. Constructs that look at what
 follows the match (`$`, `\\Z`, `\\b`, `\\B`, lookahead) match only at their real
-position in the line, not at a window edge, and on a line cut at MATCH_LINE_CAP not
-at the cut either (see _line_matches).
+position in the line: not at a window edge, and, on a line longer than
+MATCH_LINE_CAP, not at the point where it is cut either (see _line_matches).
 """
 import re
 import secrets

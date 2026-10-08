@@ -538,7 +538,8 @@ def _git(args: list, cwd: Path) -> Optional[int]:
             [_GIT_EXE, "-C", str(cwd),
              "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={_GIT_HOOKS_DIR}",
              "-c", "core.virtualFilesystem=", *args],
-            cwd=os.path.dirname(_GIT_EXE), env=_git_env(), capture_output=True, timeout=10)
+            cwd=os.path.dirname(_GIT_EXE), env=_git_env(), capture_output=True, timeout=10,
+            creationflags=procs.NO_WINDOW)
         return proc.returncode
     except (OSError, subprocess.SubprocessError):
         return None
@@ -1703,7 +1704,7 @@ def _run_command(command: list, env: dict, cwd: Optional[str],
     if not bind:
         proc = subprocess.run(command, env=env, cwd=cwd, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
-                              timeout=timeout)
+                              timeout=timeout, creationflags=procs.NO_WINDOW)
         return procs.RunResult(proc.returncode, proc.stdout, proc.stderr, False, "none")
     return procs.run_bound(command, env, cwd, timeout, on_start=on_start)
 
@@ -2117,7 +2118,8 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
             with open(log_path, "wb") as log_file:
                 proc = subprocess.Popen(command, env=env, cwd=cwd,
                                          stdin=subprocess.DEVNULL,
-                                         stdout=log_file, stderr=subprocess.STDOUT)
+                                         stdout=log_file, stderr=subprocess.STDOUT,
+                                         creationflags=procs.NO_WINDOW)
         except OSError as e:
             return _finish({"applied": False, "error": f"could not start {command[0]!r}: {e}"})
         # Redact the log in place once the process exits. Best-effort: a

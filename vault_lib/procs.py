@@ -32,6 +32,12 @@ from typing import Optional
 # a pid reused minutes later slip through.
 _START_TOLERANCE = 2.0
 
+# CREATE_NO_WINDOW on Windows, 0 elsewhere (creationflags=0 is accepted on
+# POSIX). For children whose output is captured or redirected: a console-
+# subsystem child started by a process with no console otherwise gets a fresh
+# console window that flashes on the user's screen.
+NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 
 def _windows_start_time(pid: int) -> tuple:
     """Returns (exists, start_time_or_None).
@@ -248,7 +254,7 @@ def run_bound(argv, env, cwd, timeout: Optional[float], on_start=None) -> RunRes
             assign, terminate, close, job_handle = _windows_job()
         except Exception:  # noqa: BLE001 -- never let ctypes trouble block a run
             assign = None
-        proc = subprocess.Popen(argv, **kwargs)
+        proc = subprocess.Popen(argv, creationflags=NO_WINDOW, **kwargs)
         if assign is not None:
             try:
                 binding = "job" if assign(int(proc._handle)) else "unavailable"
