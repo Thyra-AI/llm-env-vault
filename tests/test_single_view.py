@@ -385,29 +385,29 @@ def test_max_reads_refusals_happen_before_the_dialog() -> None:
     with workspace() as (project, _env_path):
         with fake_dialog() as calls:
             r = mcp_server._run_with_env_impl(["cmd"], None, False, str(project), None, None,
-                                              max_reads=1)
+                                              max_reads=1, all_vars=True)
             assert "only means something" in r["error"]
             r = mcp_server._run_with_env_impl(["cmd"], MATERIALIZED, False, str(project), None,
-                                              None, max_reads=0)
+                                              None, max_reads=0, all_vars=True)
             assert "between 1 and" in r["error"]
             r = mcp_server._run_with_env_impl(["cmd"], MATERIALIZED, False, str(project), None,
-                                              None, max_reads=True)
+                                              None, max_reads=True, all_vars=True)
             assert "between 1 and" in r["error"]
             r = mcp_server._run_with_env_impl(["cmd"], MATERIALIZED, True, str(project), None,
-                                              None, max_reads=1)
+                                              None, max_reads=1, all_vars=True)
             assert "background" in r["error"]
             if IS_WIN:
                 original = singleview.self_test
                 singleview.self_test = lambda path, timeout=3.0: "simulated: no oplock here"
                 try:
                     r = mcp_server._run_with_env_impl(["cmd"], MATERIALIZED, False,
-                                                      str(project), None, None, max_reads=1)
+                                                      str(project), None, None, max_reads=1, all_vars=True)
                 finally:
                     singleview.self_test = original
                 assert "cannot be honoured" in r["error"] and "no oplock" in r["error"]
             else:
                 r = mcp_server._run_with_env_impl(["cmd"], MATERIALIZED, False, str(project),
-                                                  None, None, max_reads=1)
+                                                  None, None, max_reads=1, all_vars=True)
                 assert "Windows" in r["error"]
         assert calls == []
         a = trust.make_signature(["c"], str(project), None, None, False, None, max_reads=1)
@@ -500,7 +500,7 @@ def test_materialize_refuses_a_unc_path_before_resolving_it() -> None:
         for bad in (r"\\evil-host\share\.env.runtime", "//evil-host/share/.env.runtime"):
             with fake_dialog() as calls:
                 r = mcp_server._run_with_env_impl(["cmd"], bad, False, str(project),
-                                                  None, None)
+                                                  None, None, all_vars=True)
             assert "error" in r, r
             assert "UNC" in r["error"], r["error"]
             assert calls == [], "a refused path still opened the dialog"
@@ -516,7 +516,7 @@ def test_materialize_refuses_a_mapped_network_drive() -> None:
         try:
             with fake_dialog() as calls:
                 r = mcp_server._run_with_env_impl(["cmd"], ".env.runtime", False,
-                                                  str(project), None, None)
+                                                  str(project), None, None, all_vars=True)
         finally:
             mcp_server._drive_is_remote = original
         assert "error" in r and "mapped network drive" in r["error"], r
@@ -535,7 +535,7 @@ def test_materialize_refuses_a_junction_pointing_at_a_share() -> None:
         try:
             with fake_dialog() as calls:
                 r = mcp_server._run_with_env_impl(["cmd"], "sub/.env.runtime", False,
-                                                  str(project), None, None)
+                                                  str(project), None, None, all_vars=True)
         finally:
             mcp_server._reparse_points_to_share = original
         assert "error" in r and "junction" in r["error"], r

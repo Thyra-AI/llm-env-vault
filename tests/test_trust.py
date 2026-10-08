@@ -335,7 +335,7 @@ def test_b1_integration_zero_secret_grant_does_not_auto_allow_full_vault_run() -
             assert r_empty.get("applied") is True
             assert len(calls) == 1
 
-            r_full = mcp_server._run_with_env_impl(list(cmd), None, False, None, None)
+            r_full = mcp_server._run_with_env_impl(list(cmd), None, False, None, None, all_vars=True)
             assert len(calls) == 2, (
                 "REGRESSION (B1): only_vars=None auto-allowed off an only_vars=[] "
                 "grant without re-prompting")
@@ -362,11 +362,11 @@ def test_b2_integration_foreground_grant_does_not_auto_allow_background_run() ->
     with isolated_vault():
         cmd = _py()
         with fake_dialog(_allow(trust_it=True)) as calls:
-            r_fg = mcp_server._run_with_env_impl(list(cmd), None, False, None, None)
+            r_fg = mcp_server._run_with_env_impl(list(cmd), None, False, None, None, all_vars=True)
             assert r_fg.get("applied") is True
             assert len(calls) == 1
 
-            r_bg = mcp_server._run_with_env_impl(list(cmd), None, True, None, None)
+            r_bg = mcp_server._run_with_env_impl(list(cmd), None, True, None, None, all_vars=True)
             assert len(calls) == 2, (
                 "REGRESSION (B2): background=True auto-allowed off a foreground "
                 "grant without re-prompting")
@@ -383,8 +383,8 @@ def test_b3_vault_change_drops_entire_cache_and_reprompts() -> None:
         cmd1 = _py()
         cmd2 = _py("--second-command-marker")
         with fake_dialog(_allow(trust_it=True)) as calls:
-            mcp_server._run_with_env_impl(list(cmd1), None, False, None, None)
-            mcp_server._run_with_env_impl(list(cmd2), None, False, None, None)
+            mcp_server._run_with_env_impl(list(cmd1), None, False, None, None, all_vars=True)
+            mcp_server._run_with_env_impl(list(cmd2), None, False, None, None, all_vars=True)
             assert len(calls) == 2
             assert trust.has_cached_secrets()
 
@@ -392,7 +392,7 @@ def test_b3_vault_change_drops_entire_cache_and_reprompts() -> None:
             # mutation) -- this is exactly what add_secret/remove_secret do.
             store.save_secrets(TEST_PASSWORD, {**BASE_SECRETS, "NEW_ONE": "rotated"})
 
-            r1 = mcp_server._run_with_env_impl(list(cmd1), None, False, None, None)
+            r1 = mcp_server._run_with_env_impl(list(cmd1), None, False, None, None, all_vars=True)
             assert len(calls) == 3, (
                 "REGRESSION (B3): a rotated vault still served a cached, "
                 "pre-rotation secret set")
@@ -401,7 +401,7 @@ def test_b3_vault_change_drops_entire_cache_and_reprompts() -> None:
 
             # The *other* previously-trusted command must also need
             # re-approval now -- the whole cache was stale, not just cmd1.
-            r2 = mcp_server._run_with_env_impl(list(cmd2), None, False, None, None)
+            r2 = mcp_server._run_with_env_impl(list(cmd2), None, False, None, None, all_vars=True)
             assert len(calls) == 4, (
                 "REGRESSION (B3): only the touched command's trust was revoked, "
                 "not the whole (now-stale) cache")
@@ -424,7 +424,7 @@ def test_b4_hash_taken_before_dialog_not_after_allow_click() -> None:
             return {"secrets": dict(BASE_SECRETS), "trust": True}
 
         with fake_dialog(respond_and_mutate) as calls:
-            r1 = mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None)
+            r1 = mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None, all_vars=True)
             assert r1.get("applied") is True
             assert len(calls) == 1
 
@@ -433,7 +433,7 @@ def test_b4_hash_taken_before_dialog_not_after_allow_click() -> None:
             # would incorrectly auto-allow. It must instead detect that
             # "version-2" != the "version-1" hash taken before the dialog
             # opened, and fall back to the dialog again.
-            r2 = mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None)
+            r2 = mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None, all_vars=True)
             assert len(calls) == 2, (
                 "REGRESSION (B4): trust bound to file content read AFTER the "
                 "dialog closed, not before it opened")
@@ -495,10 +495,10 @@ def test_n1_result_mentions_both_revocation_and_fresh_grant() -> None:
         ref.write_text("v1")
         cmd = _py(str(ref))
         with fake_dialog(_allow(trust_it=True)) as calls:
-            mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None)
+            mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None, all_vars=True)
 
             ref.write_text("v2")
-            r2 = mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None)
+            r2 = mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None, all_vars=True)
             note = r2.get("trust_note", "")
             assert "revoked" in note.lower(), (
                 "REGRESSION (N1): the tool result dropped the revocation "
@@ -515,11 +515,11 @@ def test_n1_denial_after_revocation_still_surfaces_the_reason() -> None:
         ref.write_text("v1")
         cmd = _py(str(ref))
         with fake_dialog(_allow(trust_it=True)):
-            mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None)
+            mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None, all_vars=True)
 
         ref.write_text("v2")
         with fake_dialog(_deny()):
-            r2 = mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None)
+            r2 = mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None, all_vars=True)
             assert r2.get("applied") is False
             assert "revoked" in (r2.get("trust_note") or "").lower()
 
@@ -603,7 +603,7 @@ def test_trust_note_includes_unmonitored_warning_on_grant() -> None:
         trust._MAX_HASH_BYTES = 10
         try:
             with fake_dialog(_allow(trust_it=True)):
-                r = mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None)
+                r = mcp_server._run_with_env_impl(list(cmd), None, False, str(tmp), None, all_vars=True)
                 note = r.get("trust_note", "")
                 assert "unreadable to monitor" in note.lower() or "large" in note.lower(), note
         finally:
@@ -619,10 +619,10 @@ def test_auto_allow_skips_dialog_call_entirely() -> None:
     with isolated_vault():
         cmd = _py()
         with fake_dialog(_allow(trust_it=True)) as calls:
-            mcp_server._run_with_env_impl(list(cmd), None, False, None, None)
+            mcp_server._run_with_env_impl(list(cmd), None, False, None, None, all_vars=True)
             assert len(calls) == 1
             for _ in range(3):
-                r = mcp_server._run_with_env_impl(list(cmd), None, False, None, None)
+                r = mcp_server._run_with_env_impl(list(cmd), None, False, None, None, all_vars=True)
                 assert r.get("auto_allowed") is True
             assert len(calls) == 1, "dialog must not be invoked again once trusted"
 
@@ -631,7 +631,7 @@ def test_denial_does_not_cache_or_trust_anything() -> None:
     with isolated_vault():
         cmd = _py()
         with fake_dialog(_deny()):
-            r = mcp_server._run_with_env_impl(list(cmd), None, False, None, None)
+            r = mcp_server._run_with_env_impl(list(cmd), None, False, None, None, all_vars=True)
             assert r == {"applied": False, "message": "Denied by user."}
         assert not trust.has_cached_secrets()
         sig = trust.make_signature(cmd, None, None, None, False)
@@ -642,9 +642,9 @@ def test_allow_without_checking_trust_does_not_grant_trust() -> None:
     with isolated_vault():
         cmd = _py()
         with fake_dialog(_allow(trust_it=False)) as calls:
-            r1 = mcp_server._run_with_env_impl(list(cmd), None, False, None, None)
+            r1 = mcp_server._run_with_env_impl(list(cmd), None, False, None, None, all_vars=True)
             assert r1.get("applied") is True
-            r2 = mcp_server._run_with_env_impl(list(cmd), None, False, None, None)
+            r2 = mcp_server._run_with_env_impl(list(cmd), None, False, None, None, all_vars=True)
             assert len(calls) == 2, "no trust was granted, so the dialog must reappear"
             assert not r2.get("auto_allowed")
 

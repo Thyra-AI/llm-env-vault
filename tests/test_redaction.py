@@ -304,7 +304,7 @@ def test_b1_grant_note_always_enumerates_what_is_monitored() -> None:
     with isolated_vault():
         cmd = [sys.executable, "-c", "print('ok')"]
         with fake_dialog(_allow(trust_it=True)):
-            r = mcp_server._run_with_env_impl(list(cmd), None, False, None, None)
+            r = mcp_server._run_with_env_impl(list(cmd), None, False, None, None, all_vars=True)
         note = r.get("trust_note", "")
         exe_resolved = str(Path(sys.executable).resolve())
         assert exe_resolved in note, (
@@ -328,7 +328,7 @@ def test_ordinary_command_does_not_raise_the_amber_warning() -> None:
     with isolated_vault():
         cmd = [sys.executable, "-c", "print('ok')"]
         with fake_dialog(_allow(trust_it=True)) as calls:
-            mcp_server._run_with_env_impl(list(cmd), None, False, None, None)
+            mcp_server._run_with_env_impl(list(cmd), None, False, None, None, all_vars=True)
         dialog_note = calls[-1].get("trust_note") or ""
         assert "not revoke trust" not in dialog_note.lower(), (
             f"REGRESSION: the amber executable-only warning fired for a command "
@@ -402,7 +402,7 @@ def test_b1_file_arg_grant_note_enumerates_file_and_not_executable_only() -> Non
         cmd = [sys.executable, "-c", "print('ok')", str(ref)]
         with fake_dialog(_allow(trust_it=True)):
             r = mcp_server._run_with_env_impl(
-                list(cmd), None, False, str(tmp), None)
+                list(cmd), None, False, str(tmp), None, all_vars=True)
         note = r.get("trust_note", "")
         ref_resolved = str(ref.resolve())
         assert ref_resolved in note, (

@@ -125,7 +125,14 @@ def make_signature(command, cwd, only_vars, materialize, background=False, files
     only_vars=[] and only_vars=None are deliberately kept distinct here
     (empty tuple vs None) -- they mean opposite things to the caller
     (inject nothing vs inject the entire vault), so collapsing them would
-    let a grant for one silently cover the other. Same reasoning for
+    let a grant for one silently cover the other. Since 2.3.0 run_with_env
+    only lets only_vars=None through when the caller passed all_vars=True, so
+    None here still means exactly "whole vault" and a whole-vault grant is
+    the same key it always was: it cannot match a scoped call, and a scoped
+    call's grant cannot match it. all_vars is therefore not a separate
+    element. tail_chars is deliberately NOT part of the signature either: it
+    only sizes how much already-redacted output comes back, and changes nothing
+    about what the command can read or do. Same reasoning for
     background: a foreground run and a detached background run (secrets
     sitting in an unmanaged child process's environment) are materially
     different approvals even with identical argv.

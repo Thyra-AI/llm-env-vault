@@ -7,6 +7,55 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.3.0] — 2026-10-08
+
+### Changed (breaking)
+
+- **`run_with_env` now requires `only_vars` or `all_vars=True`.** Until now a call that left
+  `only_vars` out injected the *entire* vault into the command and everything it spawned. That
+  was the easiest thing to do and the widest exposure, so it is no longer the default: a call
+  with neither is refused, before any dialog opens, with an error that names both options.
+  `all_vars=True` does exactly what omitting `only_vars` used to do. Passing both is an error.
+  `only_vars=[]` (inject nothing) is unchanged.
+
+  **Migrating.** Wherever you (or an agent, a script, a saved prompt) called `run_with_env`
+  without `only_vars`, either list the variables the command needs —
+  `run_with_env(command=[...], only_vars=["DATABASE_URL"])`, the better choice — or keep the old
+  behaviour explicitly with `run_with_env(command=[...], all_vars=True)`. `vault_status()` lists
+  the names. The standing instructions the server hands to agents say the same, so a connected
+  agent picks it up on its own.
+
+  **Trusted commands are not widened.** The trust signature is unchanged: a whole-vault call
+  still carries `None` in the `only_vars` slot, which now can only come from `all_vars=True`.
+  A grant for a whole-vault call never covers a scoped call and a scoped grant never covers a
+  whole-vault call. Grants live in server memory only, so none survive the upgrade anyway.
+
+### Added
+
+- **`tail_chars` on `run_with_env`**: how many characters from the end of each of stdout and
+  stderr to return inline. Default 4000 (what was hard-coded before), accepted range 0 to
+  200000, anything else is rejected before the dialog. It is applied *after* redaction, and it
+  is deliberately **not** part of the trusted-command signature — it changes how much already
+  redacted text comes back, not what the command may do.
+- **Every foreground result now carries a `run_id`** and, per stream under `streams`, the total
+  `chars` and `lines` and a `truncated` flag (true when the inline text is shorter than the
+  whole output).
+- **`read_run_output(run_id, stream="both", pattern=None, context_lines=0, offset=0, limit=200,
+  max_chars=20000)`**, a new tool to search or page through a run's full output instead of
+  re-running the command for another prompt. With `pattern` it returns the matching lines with
+  1-based line numbers and context, grep-style; without it, a window of lines. It needs no
+  password: what it reads is the output *after* the server redacted vault values from it, held
+  **in server memory only** — never written to disk, bounded to the last 20 runs and about
+  10 MB per stream (a longer stream keeps its tail and says so), and gone when the server
+  restarts. An unknown or evicted `run_id` is a clear error; an invalid regex is rejected, and
+  so is one that could run away (over 200 characters, a repeat inside a repeat, an alternation
+  inside a repeat, more than three unbounded repeats). Lines are matched on their first 1000
+  characters and a scan stops after 5 seconds.
+- **Background runs are searchable too**, once the process has exited and the server has
+  redacted its log in place; until then `read_run_output` says the run is still in progress.
+  Their stdout and stderr are one merged stream, shown as `stdout`. The log file itself is
+  unchanged and is still unredacted while the process runs.
+
 ## [2.2.1] — 2026-10-07
 
 Tidy-ups to the 2.2.0 unlock throttle. No change to the limits or what users see.

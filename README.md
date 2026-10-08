@@ -163,11 +163,11 @@ Stated plainly, so you can decide whether to install it. Everything below was ch
 
 1. **Migrate an existing project:** ask your agent to call `install_migrate` on the project's `.env`. A dialog shows exactly which variable *names* will move (never values); on Allow, real values go into the vault and the file is rewritten with placeholders in place.
 2. **Add a one-off secret:** `add_secret("STRIPE_KEY")` — you type the real value into the GUI, never into chat.
-3. **Run your app for real:** `run_with_env(command=["python", "manage.py", "runserver"])` — password prompt, then the command runs with real values in its environment.
+3. **Run your app for real:** `run_with_env(command=["python", "manage.py", "runserver"], only_vars=["DATABASE_URL"])` — password prompt, then the command runs with real values in its environment.
 4. **Encrypt a whole file:** `encrypt_file("certs/server.pem")` — for the secrets that aren't
    variables. The file becomes `certs/server.pem.levault`, the original is destroyed, and the
    ciphertext is safe to commit. Get it back with `decrypt_file`, or hand it to one command with
-   `run_with_env(..., files=["certs/server.pem.levault"])`.
+   `run_with_env(..., only_vars=[...], files=["certs/server.pem.levault"])`.
 
 ---
 
@@ -262,24 +262,52 @@ Conservative by construction: a line is only rewritten if it's a managed variabl
 
 Two known quirks (see [Known limitations](#known-limitations)): this ongoing path is not multi-line-aware, and a resync normalizes the file's line endings even when nothing else changed.
 
-### `run_with_env(command, materialize=None, background=False, cwd=None, only_vars=None, files=None, timeout=None, max_reads=None)`
+### `run_with_env(command, materialize=None, background=False, cwd=None, only_vars=None, files=None, timeout=None, max_reads=None, all_vars=False, tail_chars=4000)`
 
 The consumption side: runs a real command with the vault's real values injected as environment variables. Since `llm.env` never contains real values, this is how your app actually gets its secrets.
 
 ```python
-run_with_env(command=["python", "manage.py", "migrate"])
-run_with_env(command=["docker", "compose", "up"], background=True)
+run_with_env(command=["python", "manage.py", "migrate"], only_vars=["DATABASE_URL"])
+run_with_env(command=["docker", "compose", "up"], background=True, all_vars=True)
 ```
 
-**`only_vars`** — restricts which vault variables get injected, instead of the whole vault:
+**`only_vars` or `all_vars=True` — one of the two is required.** Every call states its scope; a call with neither is refused with an error that names both options. (This changed in 2.3.0 — see the [changelog](CHANGELOG.md) for migrating.)
+
+**`only_vars`** — the vault variables to inject; nothing else reaches the command:
 
 ```python
 run_with_env(command=["python", "send_mail.py"], only_vars=["SMTP_HOST", "SMTP_PASSWORD"])
 ```
 
 - Validated against the vault index **before** any password prompt (a typo'd name fails fast).
-- `only_vars` omitted / `None` → inject everything. `only_vars=[]` → inject *nothing*. These are deliberately distinct cases — a zero-secret run and a full-vault run are very different authorizations.
-- Strongly recommended whenever the command doesn't need the whole vault: it limits both what a misbehaving command can see and what its output can leak (see Security notes).
+- `only_vars=[]` → inject *nothing*. A zero-secret run and a full-vault run are very different authorizations, so they are different trust signatures too.
+- It limits both what a misbehaving command can see and what its output can leak (see Security notes).
+
+**`all_vars=True`** — inject the **whole vault**, which is what omitting `only_vars` used to do. Use it only when the command really needs most of the variables (a `docker compose up` for a stack, say): every unrelated secret is exposed to that command and to anything it spawns. It cannot be combined with `only_vars`. A trusted-command grant for an `all_vars=True` call is the same signature a whole-vault call always had, so it never covers a scoped call and a scoped grant never covers it.
+
+**Output: `tail_chars`, `run_id` and `read_run_output`.** Stdout and stderr are redacted, and *then* the last `tail_chars` characters of each (default 4000, any value from 0 to 200000; anything else is rejected) come back inline. Each result also carries:
+
+- `run_id`, naming this run's output;
+- `streams`, per stream: total `chars`, total `lines`, and `truncated` (true when the inline text is shorter than the whole output).
+
+`tail_chars` only sizes the reply. It changes nothing about what the command can do, so it is **not** part of the trusted-command signature.
+
+The whole redacted output of the last 20 runs is kept **in the server's memory only** — never written to disk, gone when the server restarts. Each stream is capped at about 10 MB; a longer one keeps its tail and says so. Because only already-redacted text is stored, `read_run_output` needs no password. Use it instead of re-running a command to see a different part of its output (a re-run costs you another prompt):
+
+```python
+read_run_output(run_id, pattern=r"(?i)error|traceback", context_lines=3)   # matching lines + context, with line numbers
+read_run_output(run_id, stream="stderr", offset=1200, limit=100)           # a window of lines
+```
+
+### `read_run_output(run_id, stream="both", pattern=None, context_lines=0, offset=0, limit=200, max_chars=20000)`
+
+Searches or pages through the redacted output of an earlier `run_with_env`. No password, no dialog.
+
+- `stream`: `stdout`, `stderr` or `both` (the `max_chars` budget is split between them).
+- `pattern`: a Python regular expression, matched per line. With it you get the matching lines as `N: line` and `context_lines` (0–20) neighbours as `N- line`, grep-style, 1-based. Without it you get a window of `limit` lines from 0-based line `offset`. In a search, `offset` is where scanning starts and `limit` caps the matches returned.
+- `max_chars` (1–200000) caps the text returned. Each stream's entry has `total_lines`, `total_chars` and `next_offset` (what to pass to continue, or `null` when done).
+- An unknown or evicted `run_id` is an error that says so. An invalid regex is rejected, and so is one that can run away: more than 200 characters, a repeat inside a repeat or an alternation inside a repeat (`(a+)+`, `(a|aa)*`), more than three unbounded repeats. Only the first 1000 characters of each line are matched, and a scan stops after 5 seconds.
+- **Background runs** are registered too, once the process has exited and the server has redacted its log in place; before that the call says the run is still in progress. Their stdout and stderr are one merged stream, shown as `stdout`.
 
 **`files`** — decrypts whole encrypted files into the command's working directory for the lifetime
 of that one run:
@@ -589,7 +617,7 @@ Check it, click Allow once, and identical future calls auto-run with no dialog. 
 8 hours after it was granted — verified on both wall clock and monotonic clock, so neither
 a machine suspend nor a clock adjustment extends it.
 
-**"Exact" means exact.** The full argument list, `cwd`, `only_vars`, `materialize`, `background` and `files` together form the trusted signature — change any one and a fresh Allow is required. `only_vars=[]` and `only_vars` omitted are deliberately different signatures even though both are falsy in Python, because they authorize very different exposure.
+**"Exact" means exact.** The full argument list, `cwd`, `only_vars` (or `all_vars=True`), `materialize`, `background` and `files` together form the trusted signature — change any one and a fresh Allow is required. `only_vars=[]` and `all_vars=True` are deliberately different signatures even though neither names a variable, because they authorize very different exposure. `tail_chars` is not part of it: it only sizes the reply.
 
 **A run that decrypts files is never trusted.** If `files` is non-empty the checkbox isn't even
 offered, and trust is never consulted — you are asked every single time. An 8-hour unattended grant
@@ -702,7 +730,10 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
   while the process is still running), and a `materialize` target is real values on disk by design.
   An agent that chooses the command line can also transform output (gzip, chunk, re-encode) in
   ways that defeat string matching. `only_vars` remains the first line of defence — scope
-  injection to what the command actually needs.
+  injection to what the command actually needs (`run_with_env` refuses a call that names
+  neither `only_vars` nor `all_vars=True`). The full output kept for `read_run_output` is the
+  redacted text only, held in server memory (last 20 runs, ~10 MB per stream) and never written
+  to disk.
 - **`materialize` is the one standing exception to "no file an agent can read holds a real
   value".** It writes to a fresh path that must not already exist, never to your own `.env`, and
   unlinks it when the command exits; `max_reads` cuts the window to the milliseconds between the
@@ -840,6 +871,12 @@ plus additional pytest-only files:
   `tests/fixtures/file_envelope/golden.levault.b64` (base64 text of the frozen envelope) is a byte-frozen format tripwire: every other test
   round-trips through the current code and would stay green if the on-disk format changed, which
   would silently make real users' committed files unopenable.
+- `tests/test_run_output.py` — 2.3.0: the `only_vars` / `all_vars=True` rules and the trust
+  signature that still separates whole-vault from scoped; `tail_chars` bounds, applied after
+  redaction and absent from the signature; a secret far outside the inline tail redacted in
+  `read_run_output`'s search and window; ring-buffer eviction, the per-stream cap, unknown
+  `run_id`, bad and runaway regexes, and background runs registered only after their log is
+  redacted.
 - `tests/test_single_view.py` — 1.7.0 `max_reads`: every test runs a real child in a real Job
   against a real oplock. The headline: the child reads the real value, sleeps, reads again while
   still running and gets the placeholder. Also: `max_reads=2` serves both reads; `stat` alone is
@@ -893,7 +930,8 @@ If you are an AI assistant with this MCP server available:
   paths and there is no reason for you to read it.
 - Only `llm.env` and `vault_index.json` are meant for you to read directly.
 - **Never ask the human to paste a secret value or the master password into chat.** Route secrets through `add_secret` / `install_migrate` and let the human type values into the GUI themselves.
-- Prefer `only_vars` on `run_with_env` whenever you know which variables the command needs.
+- `run_with_env` requires `only_vars` (the variables the command needs) or `all_vars=True` (the whole vault; use sparingly). A call with neither is refused.
+- `run_with_env` returns only the last `tail_chars` characters (default 4000) of each stream, plus a `run_id`. To find something that is not in that tail, use `read_run_output(run_id, pattern=...)` rather than re-running the command.
 - Use `swap` only when the consumer is known to read the `.env` file and nothing else reaches
   it; never read the swapped file while the command runs; and if a result carries
   `swap_restore_conflicts`, `swap_restore_failed`, `swap_verify_failed` or `swap_recovered`,

@@ -35,7 +35,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from vault_lib import gui, legacy_swap, procs, singleview, store, trust
+from vault_lib import gui, legacy_swap, procs, runstore, singleview, store, trust
 from vault_lib.crypto import (WrongPassword, TooManyAttempts, WrongRecoveryKey,
                               MalformedRecoveryKey, NoRecoverySlot, VaultCorrupted,
                               VaultTampered)
@@ -57,9 +57,11 @@ human types into directly -- that is the only correct path.
 keys are displayed and confirmed exclusively in a native dialog the human \
 reads from their printed copy -- the chat is never the right channel for a \
 recovery key, and a key entered into chat is immediately compromised.
-- When running a command with run_with_env, pass only_vars to scope the \
-exposure to the variables that command actually needs. Injecting the whole \
-vault when two variables would do is the main avoidable risk here.
+- run_with_env requires only_vars: list the variables the command actually \
+needs, and only those are injected. A call with neither only_vars nor \
+all_vars=True is refused. all_vars=True injects the whole vault; use it only \
+when the command really needs most of it, because every unrelated secret is \
+then exposed to that command and anything it spawns.
 - run_with_env output is redacted before it reaches you: vault values, and \
 their base64 and URL-encoded forms, are replaced with [REDACTED:NAME]. This \
 is best-effort damage control, NOT a guarantee -- values under 8 characters \
@@ -67,6 +69,13 @@ are left alone (they would shred unrelated output; the names are reported in \
 redaction_skipped), and a command that transforms what it prints can still \
 emit a real value. Do not echo run_with_env output back verbatim, and never \
 craft a command whose purpose is to get a value past the redactor.
+- run_with_env returns only the last tail_chars characters (default 4000) of \
+each stream, plus a run_id and the stream's total size. When the part you need \
+is not in that tail, call read_run_output(run_id, pattern=...) to search the \
+whole redacted output, or read a window of lines -- do not re-run the command \
+for it (that costs the human another password prompt). It needs no password, \
+because only already-redacted output is kept, and only in this server's \
+memory (the last 20 runs; gone when the server restarts).
 - Never read the background-run log file (the llm-env-vault-run-*.log path \
 returned when background=True) while the process is still running -- it \
 contains real secret values until the server redacts it in place once the \
@@ -109,6 +118,10 @@ mcp = FastMCP("llm-env-vault", instructions=_AGENT_INSTRUCTIONS)
 # writing to it.
 _STALE_RUN_LOG_AGE_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
+
+# Full redacted output of recent foreground runs (and background runs, once the
+# server has redacted their log), for read_run_output. Memory only.
+_RUN_OUTPUT = runstore.RunOutputStore()
 
 # Reports from a recovery performed at server start, before any tool call
 # existed to return them in. Drained into the first tool result that can carry
@@ -1697,24 +1710,60 @@ def _run_command(command: list, env: dict, cwd: Optional[str],
 
 MAX_READS_LIMIT = 1000
 
+# How much of each stream run_with_env returns inline. The rest stays
+# searchable through read_run_output.
+DEFAULT_TAIL_CHARS = 4000
+MAX_TAIL_CHARS = 200_000
+
+
+def _tail(text: str, n: int) -> str:
+    # text[-0:] is the whole string, which is the opposite of what 0 asks for.
+    return text[-n:] if n > 0 else ""
+
+
+def _stream_info(text: str, tail_chars: int) -> dict:
+    return {"chars": len(text), "lines": runstore.count_lines(text),
+            "truncated": len(text) > tail_chars}
+
 
 def _run_with_env_impl(command: list, materialize: Optional[str], background: bool,
                         cwd: Optional[str], only_vars: Optional[list] = None,
                         files: Optional[list] = None,
                         timeout: Optional[int] = None,
-                        max_reads: Optional[int] = None) -> dict:
+                        max_reads: Optional[int] = None,
+                        all_vars: bool = False,
+                        tail_chars: int = DEFAULT_TAIL_CHARS) -> dict:
     return _with_swap_recovery(
         lambda: _run_with_env_core(command, materialize, background, cwd, only_vars, files,
-                                   timeout, max_reads))
+                                   timeout, max_reads, all_vars, tail_chars))
 
 
 def _run_with_env_core(command: list, materialize: Optional[str], background: bool,
                         cwd: Optional[str], only_vars: Optional[list] = None,
                         files: Optional[list] = None,
                         timeout: Optional[int] = None,
-                        max_reads: Optional[int] = None) -> dict:
+                        max_reads: Optional[int] = None,
+                        all_vars: bool = False,
+                        tail_chars: int = DEFAULT_TAIL_CHARS) -> dict:
     if not command or not all(isinstance(c, str) for c in command):
         return {"error": "command must be a non-empty list of strings."}
+    # Scope is explicit: a call must name the variables it needs, or say in so
+    # many words that it wants the whole vault. Checked before anything else
+    # can open a dialog. only_vars=None survives past this point only when
+    # all_vars=True, so it still means "whole vault" everywhere below (the
+    # trust signature included).
+    if not isinstance(all_vars, bool):
+        return {"error": "all_vars must be true or false."}
+    if all_vars and only_vars is not None:
+        return {"error": "Pass either only_vars (inject just those variables) or "
+                         "all_vars=True (inject the whole vault), not both."}
+    if only_vars is None and not all_vars:
+        return {"error": "run_with_env now requires a scope: pass only_vars=[...] naming the "
+                         "variables this command needs (see vault_status for the names), or "
+                         "all_vars=True to inject the whole vault. Prefer only_vars."}
+    if isinstance(tail_chars, bool) or not isinstance(tail_chars, int) or \
+            not 0 <= tail_chars <= MAX_TAIL_CHARS:
+        return {"error": f"tail_chars must be an integer between 0 and {MAX_TAIL_CHARS}."}
     # Before anything resolves, stats or which()es these: a UNC string in
     # either would make this process open a network connection -- with the
     # user's credentials -- on an agent's say-so, before any dialog.
@@ -2075,11 +2124,16 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         # We do NOT pipe the child's output through the server to redact live:
         # if the server dies, the pipe fills and the child hangs.
         _secrets_for_redaction = dict(raw_secrets)
+        # Reserved now so the caller has an id to ask about; filled in by the
+        # thread below, and ONLY with the text it has just redacted. Until then
+        # read_run_output says the run is still in progress.
+        bg_run_id = _RUN_OUTPUT.reserve()
 
         def _log_redactor_thread() -> None:
             try:
                 proc.wait()
             except Exception:
+                _RUN_OUTPUT.abandon(bg_run_id)
                 return
             try:
                 with open(log_path, "r", encoding="utf-8", errors="replace") as _f:
@@ -2088,13 +2142,23 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                 with open(log_path, "w", encoding="utf-8") as _f:
                     _f.write(_redacted)
             except OSError:
-                pass  # best-effort: swallow all IO failures silently
+                # best-effort: swallow all IO failures silently. If the log
+                # could not be rewritten it may still hold real values, so
+                # nothing from it is registered either.
+                _RUN_OUTPUT.abandon(bg_run_id)
+                return
+            # The child's stderr was redirected into the same log, so a
+            # background run has one merged stream, reported as stdout.
+            _RUN_OUTPUT.fulfil(bg_run_id, {"stdout": _redacted, "stderr": ""})
 
         threading.Thread(target=_log_redactor_thread, daemon=True).start()
         return _finish({"applied": True, "started": True, "pid": proc.pid, "log_file": log_path,
+                "run_id": bg_run_id,
                 "note": "Running detached. The log file is unredacted while the process is "
                         "still running -- secret values may appear in it until the process "
-                        "exits and the server redacts it in place. "
+                        "exits and the server redacts it in place. Once it has exited, "
+                        "read_run_output(run_id) searches the redacted log (stdout and stderr "
+                        "are merged into 'stdout' for a background run). "
                         "Use the OS/your own process manager to stop it later."})
 
     old_sigterm = None
@@ -2178,21 +2242,33 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                 + ", ".join(str(p) for p in survivors))
         return _finish(early)
 
-    # Redact BEFORE the [-4000:] slice so a secret value that straddles the
+    # Redact BEFORE the tail_chars slice so a secret value that straddles the
     # cut point is still caught. The full output is redacted first, then
     # truncated -- the truncation can split a [REDACTED:NAME] marker but
-    # cannot leave a raw secret value visible.
+    # cannot leave a raw secret value visible. The same redacted text (never
+    # the raw output) is what read_run_output later searches.
     _stdout_full = proc.stdout or ""
     _stderr_full = proc.stderr or ""
     _stdout_redacted, _stdout_skipped = _redact_secrets(_stdout_full, redact_map)
     _stderr_redacted, _stderr_skipped = _redact_secrets(_stderr_full, redact_map)
     _all_skipped = sorted(set(_stdout_skipped) | set(_stderr_skipped))
+    _run_id = _RUN_OUTPUT.put({"stdout": _stdout_redacted, "stderr": _stderr_redacted})
     result = {
         "applied": True,
+        "run_id": _run_id,
         "exit_code": proc.returncode,
-        "stdout": _stdout_redacted[-4000:],
-        "stderr": _stderr_redacted[-4000:],
+        "stdout": _tail(_stdout_redacted, tail_chars),
+        "stderr": _tail(_stderr_redacted, tail_chars),
+        "streams": {
+            "stdout": _stream_info(_stdout_redacted, tail_chars),
+            "stderr": _stream_info(_stderr_redacted, tail_chars),
+        },
     }
+    if len(_stdout_redacted) > runstore.MAX_STREAM_CHARS or \
+            len(_stderr_redacted) > runstore.MAX_STREAM_CHARS:
+        result["retention_note"] = (
+            f"A stream longer than {runstore.MAX_STREAM_CHARS} characters is kept only as "
+            f"its last {runstore.MAX_STREAM_CHARS} for read_run_output.")
     if watchers:
         result["single_read"] = {k: w.report() for k, w in watchers.items()}
         early = [k for k, w in watchers.items() if w.restored_early]
@@ -2255,12 +2331,15 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
                   only_vars: Optional[list[str]] = None,
                   files: Optional[list[str]] = None,
                   timeout: Optional[int] = None,
-                  max_reads: Optional[int] = None) -> dict:
+                  max_reads: Optional[int] = None,
+                  all_vars: bool = False,
+                  tail_chars: int = 4000) -> dict:
     """Run a real command with the vault's real secret values injected as
     environment variables. Prompts once for the master password via a GUI
     (which also lists which variable names -- never values -- will be
     exposed) and never writes real values to disk unless materialize is
-    given. Returns the command's exit code, stdout, and stderr, with every
+    given. Returns the command's exit code, run_id, and the last tail_chars
+    characters of stdout and stderr, with every
     vault value -- plus its base64 and URL-encoded forms -- replaced by
     [REDACTED:VAR_NAME] before the result is handed back. That redaction is
     accident-prevention, not a boundary: values shorter than 8 characters
@@ -2270,11 +2349,27 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     a background run's log file is only redacted once the process exits,
     and a materialize target holds real values on disk by design.
 
-    only_vars: restrict which vault variables are actually injected, by
-    name (e.g. ["DATABASE_URL"]). Strongly recommended whenever the
-    command only needs a few of them -- without it, every unrelated
-    secret in the vault is exposed to this command and anything it
-    spawns. Unknown names are rejected before the password prompt opens.
+    only_vars: REQUIRED unless all_vars=True. The vault variables to
+    inject, by name (e.g. ["DATABASE_URL"]); nothing else is exposed to
+    the command or anything it spawns. Unknown names are rejected before
+    the password prompt opens. A call with neither only_vars nor
+    all_vars=True is refused with an error naming both options.
+
+    all_vars: pass True to inject the WHOLE vault (what omitting
+    only_vars used to do). Mutually exclusive with only_vars. Use it only
+    when the command really needs most variables: every unrelated secret
+    is exposed to it and to anything it spawns.
+
+    tail_chars: how many characters from the end of each of stdout and
+    stderr to return inline (default 4000, 0 to 200000; anything else is
+    rejected). Applied AFTER redaction. Each result also carries a run_id
+    and, per stream, the total chars and lines and whether the inline text
+    was truncated -- the full redacted output stays in this server's
+    memory (last 20 runs, up to 10 MB per stream, never written to disk,
+    lost on restart) and is searchable with read_run_output(run_id, ...).
+    Not part of the trust signature. For background=True the result
+    carries a run_id too, which read_run_output can use once the process
+    has exited and the log has been redacted.
 
     materialize: path for a short-lived real .env file (mode 0600,
     unquoted -- matches `docker run --env-file` semantics exactly),
@@ -2333,8 +2428,8 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
 
     Trusted commands: the dialog offers a "Trust this exact command for
     the rest of this session" checkbox. If checked, this exact
-    (command, cwd, only_vars, materialize, background, files, timeout,
-    max_reads) combination
+    (command, cwd, only_vars or all_vars, materialize, background, files,
+    timeout, max_reads) combination (tail_chars is not part of it)
     auto-runs on every later call with no dialog at all, as long as every
     file named directly on the command line (e.g. a compose file named
     after -f) hasn't changed, and the vault itself hasn't changed (a
@@ -2349,7 +2444,115 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     can't catch -- e.g. a Dockerfile only referenced indirectly via a
     compose file's `context:`)."""
     return _run_with_env_impl(command, materialize, background, cwd, only_vars, files,
-                              timeout, max_reads)
+                              timeout, max_reads, all_vars, tail_chars)
+
+
+READ_RUN_MAX_CONTEXT = 20
+READ_RUN_MAX_LIMIT = 5000
+READ_RUN_MAX_CHARS = 200_000
+READ_RUN_MAX_OFFSET = 100_000_000
+
+
+def _read_run_output_impl(run_id: str, stream: str = "both", pattern: Optional[str] = None,
+                           context_lines: int = 0, offset: int = 0, limit: int = 200,
+                           max_chars: int = 20000) -> dict:
+    def _bad_int(v, lo, hi):
+        return isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi
+
+    if not isinstance(run_id, str) or not run_id:
+        return {"error": "run_id must be the run_id string a run_with_env result returned."}
+    if stream not in ("stdout", "stderr", "both"):
+        return {"error": "stream must be 'stdout', 'stderr' or 'both'."}
+    if _bad_int(context_lines, 0, READ_RUN_MAX_CONTEXT):
+        return {"error": f"context_lines must be an integer between 0 and "
+                         f"{READ_RUN_MAX_CONTEXT}."}
+    if _bad_int(offset, 0, READ_RUN_MAX_OFFSET):
+        return {"error": f"offset must be an integer line number between 0 and "
+                         f"{READ_RUN_MAX_OFFSET}."}
+    if _bad_int(limit, 1, READ_RUN_MAX_LIMIT):
+        return {"error": f"limit must be an integer between 1 and {READ_RUN_MAX_LIMIT}."}
+    if _bad_int(max_chars, 1, READ_RUN_MAX_CHARS):
+        return {"error": f"max_chars must be an integer between 1 and {READ_RUN_MAX_CHARS}."}
+    rx = None
+    if pattern is not None:
+        try:
+            rx = runstore.validate_pattern(pattern)
+        except ValueError as e:
+            return {"error": str(e)}
+    try:
+        run = _RUN_OUTPUT.get(run_id)
+    except runstore.RunNotFound:
+        return {"error": f"Unknown run_id {run_id!r}: it never existed in this server "
+                         f"process, or it has been evicted (only the last "
+                         f"{runstore.MAX_RUNS} runs are kept, in memory, and are lost when the "
+                         f"server restarts)."}
+    except runstore.RunPending:
+        return {"error": f"Run {run_id!r} is a background run that has not exited yet. Its "
+                         f"output is available here once the process exits and the server "
+                         f"has redacted its log."}
+    names = ["stdout", "stderr"] if stream == "both" else [stream]
+    per_stream_chars = max(max_chars // len(names), 1)
+    streams = {}
+    for name in names:
+        s = run.streams[name]
+        if rx is not None:
+            info = runstore.search(s, rx, context_lines, offset, limit, per_stream_chars)
+        else:
+            info = runstore.read_window(s, offset, limit, per_stream_chars)
+        info["total_chars"] = len(s.text) + s.dropped_chars
+        if s.retention_truncated:
+            info["retention_truncated"] = True
+            info["retention_note"] = (
+                f"This stream was longer than {runstore.MAX_STREAM_CHARS} characters; only its "
+                f"tail is kept, starting at line {s.first_line}.")
+        streams[name] = info
+    return {"run_id": run_id, "streams": streams}
+
+
+@mcp.tool()
+def read_run_output(run_id: str, stream: str = "both", pattern: Optional[str] = None,
+                     context_lines: int = 0, offset: int = 0, limit: int = 200,
+                     max_chars: int = 20000) -> dict:
+    """Search or page through the full output of an earlier run_with_env call,
+    by the run_id its result returned, instead of re-running the command (which
+    would cost the human another password prompt).
+
+    What it reads is the output AFTER the server redacted vault values from
+    it -- the same text run_with_env's inline tail is cut from -- held only in
+    this server's memory: the last 20 runs, each stream capped at 10 MB (a
+    longer one keeps its tail and says so), never written to disk, gone when
+    the server restarts. So no password is needed. An unknown or evicted
+    run_id is an error. A background run (background=True) is registered too,
+    once the process has exited and the server has redacted its log in place;
+    its stdout and stderr are one merged stream, reported as stdout. Before
+    that, the call says the run is still in progress.
+
+    stream: 'stdout', 'stderr' or 'both' (default). With 'both', max_chars is
+    split evenly between the two.
+
+    pattern: optional Python regular expression, matched against each line
+    (use (?i) at the start for case-insensitive). With it, the result is the
+    matching lines with their 1-based line numbers (`N: matching line`) and
+    context_lines lines either side (`N- context line`), grep-style. Without
+    it, the result is a window of lines. Patterns are bounded: at most 200
+    characters, no repeat nested in a repeat or alternation inside a repeat,
+    at most 3 unbounded repeats, only the first 1000 characters of a line are
+    matched, and a scan stops after 5 seconds. Invalid or refused patterns
+    return an error.
+
+    context_lines: 0 to 20 (default 0). Only used with pattern.
+    offset: the 0-based line to start from (default 0). In a search it is
+    where scanning starts, so it pages through matches. Per stream.
+    limit: lines returned in a window, or matching lines returned in a
+    search (1 to 5000, default 200). Per stream.
+    max_chars: cap on the text returned in total (1 to 200000, default 20000);
+    lines are cut to fit.
+
+    Each stream's entry has the text, total_lines and total_chars, and
+    next_offset -- the offset to pass to continue, or null when everything has
+    been returned."""
+    return _read_run_output_impl(run_id, stream, pattern, context_lines, offset, limit,
+                                 max_chars)
 
 
 if __name__ == "__main__":

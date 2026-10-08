@@ -182,7 +182,7 @@ def test_the_file_exists_during_the_run_and_is_gone_afterwards() -> None:
 
         with fake_dialog(), stub_run(observer):
             result = mcp_server._run_with_env_impl(
-                ["echo", "hi"], None, False, str(project), None, [_levault(project)])
+                ["echo", "hi"], None, False, str(project), None, [_levault(project)], all_vars=True)
 
         assert result["applied"] is True, result
         assert seen["existed"] is True, "the file was not on disk while the command ran"
@@ -200,7 +200,7 @@ def test_the_restored_file_keeps_its_recorded_permissions() -> None:
 
         with fake_dialog(), stub_run(observer):
             mcp_server._run_with_env_impl(
-                ["echo", "hi"], None, False, str(project), None, [_levault(project)])
+                ["echo", "hi"], None, False, str(project), None, [_levault(project)], all_vars=True)
         assert "mode" in modes  # on Windows the value itself is best-effort
 
 
@@ -215,7 +215,7 @@ def test_several_files_are_all_restored_and_all_cleaned_up() -> None:
         files = [_levault(project, n) for n in ("server.pem", "client.p12", "kubeconfig")]
         with fake_dialog(), stub_run(observer):
             result = mcp_server._run_with_env_impl(
-                ["echo", "hi"], None, False, str(project), None, files)
+                ["echo", "hi"], None, False, str(project), None, files, all_vars=True)
 
         assert during["present"] == ["client.p12", "kubeconfig", "server.pem"]
         assert result["files_restored"] == 3
@@ -228,7 +228,7 @@ def test_environment_variables_are_injected_alongside_the_files() -> None:
         captured = {}
         with fake_dialog(), stub_run(lambda _c, env, _w: captured.update(env)):
             mcp_server._run_with_env_impl(
-                ["echo", "hi"], None, False, str(project), None, [_levault(project)])
+                ["echo", "hi"], None, False, str(project), None, [_levault(project)], all_vars=True)
         assert captured.get("API_TOKEN") == SECRETS["API_TOKEN"]
 
 
@@ -236,7 +236,7 @@ def test_denial_leaves_nothing_on_disk() -> None:
     with workspace() as project:
         with fake_dialog(approve=False), stub_run():
             result = mcp_server._run_with_env_impl(
-                ["echo", "hi"], None, False, str(project), None, [_levault(project)])
+                ["echo", "hi"], None, False, str(project), None, [_levault(project)], all_vars=True)
         assert result["applied"] is False
         assert result["message"] == "Denied by user."
         assert not (project / "server.pem").exists()
@@ -256,7 +256,7 @@ def test_an_existing_file_at_the_restore_path_is_never_overwritten() -> None:
 
         with fake_dialog() as calls, stub_run():
             result = mcp_server._run_with_env_impl(
-                ["echo", "hi"], None, False, str(project), None, [_levault(project)])
+                ["echo", "hi"], None, False, str(project), None, [_levault(project)], all_vars=True)
 
         assert result.get("applied") is not True
         assert "already exists" in result["error"]
@@ -288,7 +288,7 @@ def test_a_file_appearing_while_the_prompt_is_open_is_not_overwritten() -> None:
         try:
             with stub_run():
                 result = mcp_server._run_with_env_impl(
-                    ["echo", "hi"], None, False, str(project), None, [_levault(project)])
+                    ["echo", "hi"], None, False, str(project), None, [_levault(project)], all_vars=True)
         finally:
             gui.unlock_for_run_dialog = original
 
@@ -304,7 +304,7 @@ def test_cleanup_touches_only_paths_this_run_created() -> None:
 
         with fake_dialog(), stub_run():
             mcp_server._run_with_env_impl(
-                ["echo", "hi"], None, False, str(project), None, [_levault(project)])
+                ["echo", "hi"], None, False, str(project), None, [_levault(project)], all_vars=True)
 
         assert bystander.read_bytes() == b"nothing to do with the vault"
 
@@ -319,7 +319,7 @@ def test_two_files_restoring_to_one_name_are_refused() -> None:
         with fake_dialog() as calls, stub_run():
             result = mcp_server._run_with_env_impl(
                 ["echo", "hi"], None, False, str(project), None,
-                [_levault(project), str(nested / "server.pem.levault")])
+                [_levault(project), str(nested / "server.pem.levault")], all_vars=True)
         assert result.get("applied") is not True
         assert "would both restore" in result["error"]
         assert calls == []
@@ -335,7 +335,7 @@ def test_background_with_files_is_refused_before_any_dialog() -> None:
     with workspace() as project:
         with fake_dialog() as calls, stub_run():
             result = mcp_server._run_with_env_impl(
-                ["echo", "hi"], None, True, str(project), None, [_levault(project)])
+                ["echo", "hi"], None, True, str(project), None, [_levault(project)], all_vars=True)
         assert "error" in result
         assert "background" in result["error"]
         assert calls == [], "a dialog opened for a request that must be refused"
@@ -359,7 +359,7 @@ def test_bad_file_arguments_are_refused_before_a_dialog_opens() -> None:
                           [""],
                           [123]):
                 result = mcp_server._run_with_env_impl(
-                    ["echo", "hi"], None, False, str(project), None, files)
+                    ["echo", "hi"], None, False, str(project), None, files, all_vars=True)
                 assert "error" in result, f"{files} was not refused"
         assert calls == [], "a dialog opened for a doomed request"
 
@@ -391,7 +391,7 @@ def test_a_files_run_never_grants_trust_even_if_the_dialog_says_so() -> None:
     with workspace() as project:
         with fake_dialog(trust_it=True), stub_run():
             mcp_server._run_with_env_impl(
-                ["echo", "hi"], None, False, str(project), None, [_levault(project)])
+                ["echo", "hi"], None, False, str(project), None, [_levault(project)], all_vars=True)
         assert trust._trusted == {}, (
             "a run that decrypts files to disk was granted an 8-hour trust")
 
@@ -400,12 +400,12 @@ def test_a_files_run_always_prompts_even_when_an_identical_one_is_trusted() -> N
     with workspace() as project:
         # First, trust the same command WITHOUT files.
         with fake_dialog(trust_it=True), stub_run():
-            mcp_server._run_with_env_impl(["echo", "hi"], None, False, str(project), None)
+            mcp_server._run_with_env_impl(["echo", "hi"], None, False, str(project), None, all_vars=True)
         assert trust._trusted, "the no-files run did not grant trust (test premise)"
 
         with fake_dialog() as calls, stub_run():
             mcp_server._run_with_env_impl(
-                ["echo", "hi"], None, False, str(project), None, [_levault(project)])
+                ["echo", "hi"], None, False, str(project), None, [_levault(project)], all_vars=True)
         assert len(calls) == 1, (
             "a files= run was auto-allowed by a grant made for a run without files")
         assert calls[0]["files"], "the dialog was not told which files it is approving"
@@ -440,7 +440,7 @@ def test_no_reserved_key_or_file_key_reaches_the_child_environment() -> None:
         with fake_dialog(), stub_run(lambda _c, env, _w: captured.update(env)):
             # only_vars=None is the full-vault path -- the one that would leak.
             mcp_server._run_with_env_impl(
-                ["echo", "hi"], None, False, str(project), None, [_levault(project)])
+                ["echo", "hi"], None, False, str(project), None, [_levault(project)], all_vars=True)
 
         assert captured, "the stub captured no environment (test is not exercising it)"
         assert not any(k.startswith("#") for k in captured), (
@@ -468,7 +468,7 @@ def test_the_reserved_key_guard_fires_when_forced() -> None:
         try:
             with stub_run():
                 result = mcp_server._run_with_env_impl(
-                    ["echo", "hi"], None, False, str(project), None)
+                    ["echo", "hi"], None, False, str(project), None, all_vars=True)
         finally:
             gui.unlock_for_run_dialog = original
 
@@ -487,7 +487,7 @@ def test_a_file_that_cannot_be_deleted_is_named_in_a_warning() -> None:
         try:
             with fake_dialog(), stub_run():
                 result = mcp_server._run_with_env_impl(
-                    ["echo", "hi"], None, False, str(project), None, [_levault(project)])
+                    ["echo", "hi"], None, False, str(project), None, [_levault(project)], all_vars=True)
         finally:
             store.secure_delete = original
 
@@ -514,7 +514,7 @@ def test_the_sigterm_handler_is_installed_for_a_files_only_run() -> None:
         try:
             with fake_dialog(), stub_run():
                 mcp_server._run_with_env_impl(
-                    ["echo", "hi"], None, False, str(project), None, [_levault(project)])
+                    ["echo", "hi"], None, False, str(project), None, [_levault(project)], all_vars=True)
         finally:
             mcp_server.signal.signal = real_signal
 
@@ -532,7 +532,7 @@ def test_an_interrupted_run_still_cleans_up() -> None:
         try:
             with fake_dialog():
                 result = mcp_server._run_with_env_impl(
-                    ["echo", "hi"], None, False, str(project), None, [_levault(project)])
+                    ["echo", "hi"], None, False, str(project), None, [_levault(project)], all_vars=True)
         finally:
             mcp_server._run_command = original
 
@@ -551,7 +551,7 @@ def test_a_command_that_fails_to_start_still_cleans_up() -> None:
         try:
             with fake_dialog():
                 result = mcp_server._run_with_env_impl(
-                    ["nonexistent"], None, False, str(project), None, [_levault(project)])
+                    ["nonexistent"], None, False, str(project), None, [_levault(project)], all_vars=True)
         finally:
             mcp_server._run_command = original
 
