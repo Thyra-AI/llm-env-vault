@@ -1,5 +1,5 @@
 """
-Regression suite for vault_lib/trust.py and the trust-cache wiring inside
+Regression suite for thyra_vault/trust.py and the trust-cache wiring inside
 mcp_server._run_with_env_impl.
 
 Covers, end to end, every finding from the adversarial code review of the
@@ -48,7 +48,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import mcp_server  # noqa: E402
-from vault_lib import gui, store, trust  # noqa: E402
+from thyra_vault import store, trust  # noqa: E402
+from thyra_vault import webui as gui
+from thyra_vault import uihelpers  # noqa: E402  # noqa: E402
 REPO_ROOT = Path(__file__).parent.parent  # noqa: E402
 
 TEST_PASSWORD = "regression-test-password-123"
@@ -533,17 +535,17 @@ def test_n1_denial_after_revocation_still_surfaces_the_reason() -> None:
 # ---------------------------------------------------------------------------
 
 def test_disclosure_matches_when_index_and_vault_agree() -> None:
-    assert gui._disclosure_mismatch(["A", "B"], ["A", "B"]) is None
-    assert gui._disclosure_mismatch([], []) is None
+    assert uihelpers._disclosure_mismatch(["A", "B"], ["A", "B"]) is None
+    assert uihelpers._disclosure_mismatch([], []) is None
 
 
 def test_disclosure_mismatch_detects_undisclosed_extra_secret() -> None:
-    msg = gui._disclosure_mismatch(["A"], ["A", "UNDISCLOSED"])
+    msg = uihelpers._disclosure_mismatch(["A"], ["A", "UNDISCLOSED"])
     assert msg is not None and "UNDISCLOSED" in msg
 
 
 def test_disclosure_mismatch_detects_disclosed_but_missing_secret() -> None:
-    msg = gui._disclosure_mismatch(["A", "GHOST"], ["A"])
+    msg = uihelpers._disclosure_mismatch(["A", "GHOST"], ["A"])
     assert msg is not None and "GHOST" in msg
 
 
@@ -746,7 +748,7 @@ def test_root_uses_plugin_data_dir_when_set() -> None:
     with tempfile.TemporaryDirectory(prefix="fake_plugin_data_") as data_dir:
         env = {**os.environ, "CLAUDE_PLUGIN_DATA": data_dir}
         proc = subprocess.run(
-            [sys.executable, "-c", "from vault_lib import store; print(store.ROOT)"],
+            [sys.executable, "-c", "from thyra_vault import store; print(store.ROOT)"],
             cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, check=True)
         root = proc.stdout.strip()
         expected = str(Path(data_dir).resolve() / "vault")
@@ -759,7 +761,7 @@ def test_root_uses_plugin_data_dir_when_set() -> None:
 def test_root_falls_back_to_module_location_without_plugin_data_dir() -> None:
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PLUGIN_DATA"}
     proc = subprocess.run(
-        [sys.executable, "-c", "from vault_lib import store; print(store.ROOT)"],
+        [sys.executable, "-c", "from thyra_vault import store; print(store.ROOT)"],
         cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, check=True)
     root = proc.stdout.strip()
     assert root == str(REPO_ROOT.resolve()), (
@@ -795,24 +797,24 @@ def test_load_index_rejects_duplicate_placeholder_numbers() -> None:
 
 def test_looks_like_plugin_cache_path_detects_the_real_layout() -> None:
     assert store._looks_like_plugin_cache_path(
-        Path.home() / ".claude" / "plugins" / "cache" / "llm-env-vault" /
-        "llm-env-vault" / "1.0.0" / "vault_lib" / "store.py")
-    assert not store._looks_like_plugin_cache_path(REPO_ROOT / "vault_lib" / "store.py")
+        Path.home() / ".claude" / "plugins" / "cache" / "thyra-vault" /
+        "thyra-vault" / "1.0.0" / "thyra_vault" / "store.py")
+    assert not store._looks_like_plugin_cache_path(REPO_ROOT / "thyra_vault" / "store.py")
 
 
 def test_create_secrets_vault_refuses_inside_plugin_cache_without_plugin_data() -> None:
     with tempfile.TemporaryDirectory(prefix="fake_repo_") as fake_repo:
-        fake_plugin_dir = Path(fake_repo) / "plugins" / "cache" / "llm-env-vault" / "1.0.0"
-        fake_vault_lib = fake_plugin_dir / "vault_lib"
-        fake_vault_lib.mkdir(parents=True)
-        for name in ("__init__.py", "store.py", "crypto.py", "procs.py"):
-            (fake_vault_lib / name).write_bytes((REPO_ROOT / "vault_lib" / name).read_bytes())
+        fake_plugin_dir = Path(fake_repo) / "plugins" / "cache" / "thyra-vault" / "1.0.0"
+        fake_thyra_vault = fake_plugin_dir / "thyra_vault"
+        fake_thyra_vault.mkdir(parents=True)
+        for name in ("__init__.py", "store.py", "crypto.py", "procs.py", "datadir.py"):
+            (fake_thyra_vault / name).write_bytes((REPO_ROOT / "thyra_vault" / name).read_bytes())
         (fake_plugin_dir / "mcp_server.py").touch()  # not imported, just makes the layout plausible
 
         env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PLUGIN_DATA"}
         proc = subprocess.run(
             [sys.executable, "-c",
-             "from vault_lib import store; store.create_secrets_vault('irrelevant-password')"],
+             "from thyra_vault import store; store.create_secrets_vault('irrelevant-password')"],
             cwd=str(fake_plugin_dir), env=env, capture_output=True, text=True)
         assert proc.returncode != 0, "REGRESSION (NEW-1 hardening): vault creation was not refused"
         assert "CLAUDE_PLUGIN_DATA" in proc.stderr and "plugins/cache" in proc.stderr.replace("\\", "/")
@@ -844,8 +846,8 @@ def _run_plugin_launcher_probe(env_overrides: dict, expr: str) -> str:
     return proc.stdout.strip()
 
 
-def test_requirements_selection_uses_lockfile_on_windows_when_present() -> None:
-    if sys.platform != "win32" or not (REPO_ROOT / "requirements-lock.txt").exists():
+def test_requirements_selection_uses_the_lockfile_on_every_platform_when_present() -> None:
+    if not (REPO_ROOT / "requirements-lock.txt").exists():
         return  # nothing to verify on a platform/checkout without the lockfile
     result = _run_plugin_launcher_probe({}, "plugin_launcher.REQUIREMENTS.name")
     assert result == "requirements-lock.txt"
@@ -1055,7 +1057,7 @@ def test_load_secrets_still_reads_an_older_unpadded_vault() -> None:
     called directly on unpadded JSON, exactly what save_secrets used to do."""
     with isolated_vault(secrets={}):
         import json
-        from vault_lib import crypto
+        from thyra_vault import crypto
         legacy_secrets = {"OLD_STYLE": "still-must-load-correctly"}
         salt = store.SALT_FILE.read_bytes()
         unpadded_token = crypto.encrypt(
@@ -1082,14 +1084,14 @@ def test_round_trips_across_every_possible_pad_length() -> None:
 
 # ---------------------------------------------------------------------------
 # Stale background-run log cleanup: opportunistic, best-effort deletion of
-# old llm-env-vault-run-*.log files from a prior session's background=True
+# old thyra-vault-run-*.log files from a prior session's background=True
 # calls -- previously never cleaned up at all (documented limitation).
 # ---------------------------------------------------------------------------
 
 def test_cleanup_stale_run_logs_removes_old_ones_keeps_recent_ones() -> None:
     with tempfile.TemporaryDirectory() as fake_temp:
-        old_path = Path(fake_temp) / "llm-env-vault-run-old.log"
-        recent_path = Path(fake_temp) / "llm-env-vault-run-recent.log"
+        old_path = Path(fake_temp) / "thyra-vault-run-old.log"
+        recent_path = Path(fake_temp) / "thyra-vault-run-recent.log"
         unrelated_path = Path(fake_temp) / "some-other-file.log"
         for p in (old_path, recent_path, unrelated_path):
             p.write_text("x")

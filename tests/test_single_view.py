@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 import mcp_server  # noqa: E402
-from vault_lib import legacy_swap, procs, singleview, store, trust  # noqa: E402
+from thyra_vault import legacy_swap, procs, singleview, store, trust  # noqa: E402
 from _vault_workspace import (INDEX, PLACEHOLDER_ENV, SECRETS, fake_dialog, stub_run,  # noqa: E402
                        workspace)
 
@@ -445,7 +445,7 @@ def test_a_probe_left_by_a_crash_does_not_disable_max_reads_forever() -> None:
         target = project / MATERIALIZED
         for stale in ("." + MATERIALIZED + ".oplock-probe",            # the 2.0.0 shape
                       "." + MATERIALIZED + ".deadbeef.oplock-probe"):  # a 2.0.1 survivor
-            (project / stale).write_bytes(b"# llm-env-vault oplock probe\n")
+            (project / stale).write_bytes(b"# thyra-vault oplock probe\n")
         # Backdate them: a sweep only removes probes old enough to be dead.
         old = time.time() - singleview._STALE_PROBE_SECONDS - 60
         for p in project.iterdir():
@@ -469,7 +469,7 @@ def test_the_sweep_never_removes_another_servers_live_probe() -> None:
     with workspace() as (project, _env_path):
         target = project / MATERIALIZED
         live = project / ("." + MATERIALIZED + ".cafebabe.oplock-probe")
-        live.write_bytes(b"# llm-env-vault oplock probe\n")   # another server, just now
+        live.write_bytes(b"# thyra-vault oplock probe\n")   # another server, just now
         assert singleview.self_test_for_new_file(str(target)) is None
         assert live.exists(), "a concurrent server's live probe was swept"
         # The window is flat and absurdly generous rather than derived from

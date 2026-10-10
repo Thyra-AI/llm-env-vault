@@ -15,7 +15,7 @@ They were generated once with:
 tests/test_vault_format.py::test_v1_fixture_decrypts_correctly reads these
 files and asserts the exact expected plaintext.  If that test starts failing
 it means someone edited the v1 frozen functions (new_salt, _derive_key,
-encrypt, decrypt, PBKDF2_ITERATIONS) in vault_lib/crypto.py — which is
+encrypt, decrypt, PBKDF2_ITERATIONS) in thyra_vault/crypto.py — which is
 explicitly forbidden by the module docstring.
 
 DO NOT DELETE OR REGENERATE THESE FILES.  They are a tripwire.

@@ -1,9 +1,9 @@
 ---
-description: Diagnose why llm-env-vault's tools aren't showing up
-allowed-tools: Glob, Read(~/.claude/**/provision.log), Bash(python --version), Bash(python3 --version), Bash(python -c "import tkinter; print('tkinter ok')"), mcp__plugin_llm-env-vault_llm-env-vault__vault_status
+description: Diagnose why thyra-vault's tools aren't showing up
+allowed-tools: Glob, Read(~/.claude/**/provision.log), Bash(python --version), Bash(python3 --version), mcp__plugin_thyra-vault_thyra-vault__vault_status
 ---
 
-# Diagnose llm-env-vault
+# Diagnose thyra-vault
 
 This command exists for one situation: **the MCP server did not start, so none of its tools are
 available.** When that happens there is nothing to ask — no tool call can report on the absence
@@ -14,7 +14,7 @@ Work through the checks below and report a single diagnosis at the end.
 
 ## 1. Are the tools actually present?
 
-State plainly whether the `llm-env-vault` MCP tools are available to you in this session
+State plainly whether the `thyra-vault` MCP tools are available to you in this session
 (`vault_status`, `add_secret`, `run_with_env`, and the rest).
 
 If they **are** present, the server is healthy. Say so, run `vault_status()` to confirm it
@@ -49,15 +49,15 @@ macOS and Linux**, where typically only `python3` exists and bare `python` is no
 Windows-first and needs a `python` on PATH. Report it as such and stop; the checks below will
 not add anything.
 
-## 4. Is tkinter available?
+## 4. Can a dialog be shown?
 
-```
-python -c "import tkinter; print('tkinter ok')"
-```
-
-Every operation that touches a real secret opens a native consent dialog, so a Python without
-tkinter makes the server start fine and then fail at the moment of use — with an error that
-looks nothing like "install a system package". On Debian/Ubuntu the fix is `python3-tk`.
+Every operation that touches a real secret opens a consent dialog, which is a small local
+browser page (in a Chromium-based browser — Chrome, Edge, Brave, Chromium — it opens as a small
+window; in any other browser it opens as a tab). So the server can start fine and then fail at
+the moment of use on a machine with **no display** (an SSH session, a container): nothing can
+open the page. Ask the user whether they are on such a machine. If so, the link to open is
+printed to the MCP server's log, and the dialog times out after three minutes if nobody opens
+it. Nothing needs to be installed for the dialogs themselves.
 
 ## 5. Known failure narratives
 
@@ -74,5 +74,5 @@ If the log or the checks above don't explain it, consider these two, both docume
 ## Reporting
 
 Give one clear diagnosis and one concrete next action. If several checks failed, lead with the
-one that is upstream of the others (no Python beats no tkinter). If everything passed and the
+one that is upstream of the others (no Python beats no display). If everything passed and the
 tools are still missing, say so explicitly and point at `provision.log` — do not invent a cause.

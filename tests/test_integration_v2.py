@@ -23,7 +23,8 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mcp_server  # noqa: E402
-from vault_lib import crypto, gui, store  # noqa: E402
+from thyra_vault import crypto, store  # noqa: E402
+from thyra_vault import webui as gui  # noqa: E402
 
 _STORE_PATHS = {
     "SALT_FILE": "vault.salt",
@@ -35,26 +36,22 @@ _STORE_PATHS = {
 }
 
 
-class _FakeLabel:
-    """Stands in for the Tk status label create_first_vault writes to."""
-
-    def config(self, **kwargs):
-        pass
-
-
-class _FakeRoot:
-    def update_idletasks(self):
-        pass
-
-
 def _first_run(password, offer_recovery):
-    """Mirror what the dialog now does: drill first (if offered), then create.
+    """What the first-run dialog does: the recovery drill first (if offered), then create.
 
-    The two are separate steps precisely so that declining the drill cannot
-    leave a recovery slot behind -- the key never reaches create_v2_vault.
+    The two are separate steps precisely so that declining the drill cannot leave a
+    recovery slot behind -- the key never reaches create_v2_vault.
     """
-    recovery_raw = gui.run_recovery_drill() if offer_recovery else None
-    gui.create_first_vault(password, recovery_raw, _FakeLabel(), _FakeRoot())
+    recovery_raw = None
+    if offer_recovery:
+        raw = crypto.new_recovery_key()
+        try:
+            if gui.show_recovery_key_dialog(crypto.format_recovery_key(bytes(raw)), ""):
+                recovery_raw = bytes(raw)
+        finally:
+            for k in range(len(raw)):
+                raw[k] = 0
+    store.create_v2_vault(password, recovery_raw=recovery_raw)
 
 
 @contextlib.contextmanager
@@ -66,7 +63,8 @@ def _empty_vault_dir():
     must not already exist. .resolve() matters on Windows, where mkdtemp
     hands back the 8.3 short form for long usernames.
     """
-    originals = {name: getattr(store, name) for name in _STORE_PATHS}
+    originals = {name: getattr(store, name) for name in _STORE_PATHS}
+
     originals["ROOT"] = store.ROOT
     orig_scrypt = crypto.SCRYPT_DEFAULT
     orig_show = gui.show_recovery_key_dialog

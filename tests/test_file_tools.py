@@ -29,8 +29,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import mcp_server  # noqa: E402
-import vault_lib.crypto as crypto  # noqa: E402
-from vault_lib import gui, store  # noqa: E402
+import thyra_vault.crypto as crypto  # noqa: E402
+from thyra_vault import store  # noqa: E402
+from thyra_vault import webui as gui  # noqa: E402
 
 TEST_PASSWORD = "file-tools-test-password-123"
 _FAST_PARAMS = crypto.ScryptParams(n=2 ** 12, r=8, p=1)

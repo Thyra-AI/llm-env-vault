@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""MCP server exposing llm-env-vault's operations as tools an AI coding
+"""MCP server exposing thyra-vault's operations as tools an AI coding
 assistant calls directly -- instead of shelling out to standalone
-scripts and parsing stdout. Every mutating tool still pops up the same
-Tkinter consent dialog as before; nothing is written to disk until a
-human clicks Allow and types the master password themselves. vault_lib
-(crypto, parsing, atomic writes, the dialogs) is unchanged -- this file
-only changes how those operations are invoked.
+scripts and parsing stdout. Every mutating tool opens a consent dialog (a
+small local browser window, see thyra_vault/webui); nothing is written to disk
+until a human clicks Allow and types the master password themselves.
+thyra_vault holds the crypto, parsing, atomic writes and the dialogs -- this
+file only exposes those operations as MCP tools.
 
 Run directly for local testing:
     python mcp_server.py
@@ -15,15 +15,18 @@ file and this venv's python.exe -- see README.md.
 """
 import sys
 
-# Set before importing vault_lib: when this runs as an installed plugin, the
+# Set before importing thyra_vault: when this runs as an installed plugin, the
 # import below resolves out of ${CLAUDE_PLUGIN_ROOT} -- a version-scoped
 # directory the plugin manager owns and treats as immutable. Without this,
-# Python drops a vault_lib/__pycache__ into it on every start. Must stay above
-# the vault_lib import; after it, it's a no-op.
+# Python drops a thyra_vault/__pycache__ into it on every start. Must stay above
+# the thyra_vault import; after it, it's a no-op.
 sys.dont_write_bytecode = True
 
 import base64
+import collections
+import json
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -35,10 +38,66 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from vault_lib import gui, legacy_swap, procs, singleview, store, trust
-from vault_lib.crypto import (WrongPassword, TooManyAttempts, WrongRecoveryKey,
+from thyra_vault import envvars, legacy_swap, procs, singleview, store, trust, webui
+from thyra_vault.crypto import (WrongPassword, TooManyAttempts, WrongRecoveryKey,
                               MalformedRecoveryKey, NoRecoverySlot, VaultCorrupted,
                               VaultTampered)
+
+# The consent dialogs: local browser pages served by thyra_vault/webui. Every tool
+# that needs the human calls one of the ``*_dialog`` functions and blocks until
+# they answer.
+
+
+class _DialogPacer:
+    """Wraps the dialog module and limits how fast an assistant can open consent
+    dialogs. Nothing else stops a hostile (or just stuck) assistant from looping
+    run_with_env / encrypt_file / add_secret and burying the human in windows until
+    they click Allow on something. Eight dialogs a minute is far above any real
+    use; past that the call fails with an explanation instead of opening a window.
+    """
+
+    WINDOW_SECONDS = 60.0
+    MAX_DIALOGS = 8
+
+    def __init__(self, inner):
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_stamps", collections.deque())
+
+    def _admit(self):
+        now = time.monotonic()
+        stamps = self._stamps
+        while stamps and now - stamps[0] > self.WINDOW_SECONDS:
+            stamps.popleft()
+        limit = self.MAX_DIALOGS
+        configured = envvars.get("DIALOG_LIMIT")
+        if configured is not None and configured.lstrip("-").isdigit():
+            limit = int(configured)  # 0 = unlimited (tests and CI); set by whoever starts the server
+        if limit > 0 and len(stamps) >= limit:
+            wait = int(self.WINDOW_SECONDS - (now - stamps[0])) + 1
+            raise RuntimeError(
+                f"Too many consent dialogs in a short time ({limit} in "
+                f"{int(self.WINDOW_SECONDS)} s). Not opening another one; try again in {wait} s. "
+                f"If you did not expect these requests, the assistant may be misbehaving.")
+        stamps.append(now)
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if not name.endswith("_dialog") or not callable(attr):
+            return attr
+
+        def paced(*args, **kwargs):
+            self._admit()
+            return attr(*args, **kwargs)
+        return paced
+
+    def __setattr__(self, name, value):
+        setattr(self._inner, name, value)
+
+    def __delattr__(self, name):
+        delattr(self._inner, name)
+
+
+gui = _DialogPacer(webui)
 
 # Standing policy handed to every client that connects, so it applies
 # unconditionally rather than depending on a skill trigger firing at the exact
@@ -51,10 +110,10 @@ seeing the real VALUES. To keep that guarantee:
 Their real values are not yours to see, and vault.enc is ciphertext anyway. \
 Call vault_status() to learn which variables exist.
 - Never ask the user to type or paste the master password (or any secret \
-value) into the chat. Every tool that needs it opens a native dialog the \
+value) into the chat. Every tool that needs it opens a dialog window the \
 human types into directly -- that is the only correct path.
 - Never ask the user to type or paste a recovery key into the chat. Recovery \
-keys are displayed and confirmed exclusively in a native dialog the human \
+keys are displayed and confirmed exclusively in a dialog window the human \
 reads from their printed copy -- the chat is never the right channel for a \
 recovery key, and a key entered into chat is immediately compromised.
 - When running a command with run_with_env, pass only_vars to scope the \
@@ -67,8 +126,8 @@ are left alone (they would shred unrelated output; the names are reported in \
 redaction_skipped), and a command that transforms what it prints can still \
 emit a real value. Do not echo run_with_env output back verbatim, and never \
 craft a command whose purpose is to get a value past the redactor.
-- Never read the background-run log file (the llm-env-vault-run-*.log path \
-returned when background=True) while the process is still running -- it \
+- Never read the background-run log file (the thyra-vault-run-*.log path \
+(llm-env-vault-run-*.log before the rename) returned when background=True) while the process is still running -- it \
 contains real secret values until the server redacts it in place once the \
 process exits. Wait for the process to finish before reading the log.
 - Never read a materialize target file -- it contains real secret values and \
@@ -101,7 +160,7 @@ the user verbatim, and wait for their instruction before running anything \
 else -- real values may still be on disk somewhere they need to look.
 """
 
-mcp = FastMCP("llm-env-vault", instructions=_AGENT_INSTRUCTIONS)
+mcp = FastMCP("thyra-vault", instructions=_AGENT_INSTRUCTIONS)
 
 # How old a background-run log has to be before opportunistic cleanup
 # deletes it. Generous on purpose -- this only ever removes a log from a
@@ -164,7 +223,8 @@ def _cleanup_stale_run_logs() -> None:
     try:
         temp_dir = Path(tempfile.gettempdir())
         cutoff = time.time() - _STALE_RUN_LOG_AGE_SECONDS
-        for log_path in temp_dir.glob("llm-env-vault-run-*.log"):
+        for log_path in (p for pattern in ("thyra-vault-run-*.log", "llm-env-vault-run-*.log")
+                         for p in temp_dir.glob(pattern)):
             try:
                 if log_path.stat().st_mtime < cutoff:
                     log_path.unlink()
@@ -181,12 +241,50 @@ def _cleanup_stale_run_logs() -> None:
 REDACT_MIN_VALUE_LEN = 8
 
 
+def _as_text(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value or ""
+
+
+def _redaction_forms(value: str) -> list:
+    """Every spelling of ``value`` a command is likely to print, longest first.
+
+    Exact; base64 and URL-safe base64 at all three byte alignments (a secret printed
+    inside a larger base64 stream does not encode to the same characters as the secret
+    alone, so only the characters that do not depend on the neighbouring bytes are
+    used); hex in both cases; JSON-escaped; percent-encoded with upper- and lower-case
+    hex, and with spaces as ``+``. Still a best-effort filter, not a boundary: a command
+    the human approved can print a value in any form it likes (see the tool docs).
+    """
+    raw = value.encode("utf-8")
+    forms = {value}
+    for pad in (0, 1, 2):
+        encoded = base64.b64encode(b"\x00" * pad + raw).decode("ascii").rstrip("=")
+        lead = (0, 2, 3)[pad]                      # characters that mix in the padding bytes
+        body = encoded[lead:]
+        if (pad + len(raw)) % 3:                   # the last character mixes in the NEXT byte
+            body = body[:-1]
+        if len(body) >= REDACT_MIN_VALUE_LEN:
+            forms.add(body)
+            forms.add(body.replace("+", "-").replace("/", "_"))
+    forms.add(raw.hex())
+    forms.add(raw.hex().upper())
+    forms.add(json.dumps(value)[1:-1])
+    forms.add(json.dumps(value, ensure_ascii=False)[1:-1])
+    quoted = urllib.parse.quote(value, safe="")
+    forms.add(quoted)
+    forms.add(re.sub(r"%[0-9A-F]{2}", lambda m: m.group().lower(), quoted))
+    forms.add(urllib.parse.quote_plus(value, safe=""))
+    return sorted((f for f in forms if len(f) >= REDACT_MIN_VALUE_LEN), key=lambda f: -len(f))
+
+
 def _redact_secrets(text: str, secrets: dict) -> tuple:
     """Replace every vault value in text with [REDACTED:VAR_NAME].
 
-    Matches the exact value, its base64-encoded form, and its
-    URL-percent-encoded form. Values shorter than REDACT_MIN_VALUE_LEN
-    are skipped to avoid substring-destroying false positives.
+    Matches the exact value and the other spellings in _redaction_forms (base64 at every
+    alignment, URL-safe base64, hex, JSON-escaped, percent-encoded). Values shorter than
+    REDACT_MIN_VALUE_LEN are skipped to avoid substring-destroying false positives.
 
     Returns (redacted_text, names_skipped_as_too_short).
     """
@@ -198,33 +296,17 @@ def _redact_secrets(text: str, secrets: dict) -> tuple:
             skipped.append(name)
             continue
         marker = f"[REDACTED:{name}]"
-        # Exact value
-        text = text.replace(value, marker)
-        # Base64-encoded form (e.g. as it might appear in an HTTP Authorization header)
-        b64 = base64.b64encode(value.encode("utf-8")).decode("ascii")
-        text = text.replace(b64, marker)
-        # URL-percent-encoded form (e.g. as it might appear in a connection string)
-        url_enc = urllib.parse.quote(value, safe="")
-        text = text.replace(url_enc, marker)
+        for form in _redaction_forms(value):
+            text = text.replace(form, marker)
     return text, skipped
 
 
-# GUI-opening tools are deliberately plain, synchronous functions -- NOT
-# offloaded to a worker thread via asyncio.to_thread. That was tried: it
-# does avoid freezing the event loop while a dialog sits open, but Tkinter
-# is not reliably safe to run outside whichever thread happens to own its
-# Tcl interpreter state, and moving dialogs onto asyncio's worker-thread
-# pool produced a real, reproducible `Tcl_AsyncDelete: async handler
-# deleted by the wrong thread` error the very first time this was tested
-# end-to-end. Given the pinned mcp 1.29.0 already runs sync tools inline
-# on the loop thread (verified against FuncMetadata.call_fn_with_arg_
-# validation), staying synchronous here isn't a regression -- it keeps
-# every Tk() instance on the one thread that has ever created one, which
-# is what actually matters. Trade-off: only one tool call can be in
-# flight while a dialog is open (no ping/cancellation/concurrent calls
-# until it's answered) -- acceptable for the single-agent, one-call-at-
-# a-time usage this is built for; a real fix would run dialogs in a
-# separate dedicated process instead.
+# Dialog-opening tools are deliberately plain, synchronous functions: the tool call
+# blocks while the human answers in the browser window, and the loopback server that
+# serves it runs on its own thread (thyra_vault/webui/server.py). Trade-off: only one
+# tool call can be in flight while a dialog is open (no ping, cancellation or
+# concurrent calls until it is answered) -- acceptable for the single-agent,
+# one-call-at-a-time usage this is built for.
 
 
 def _vault_status_impl() -> dict:
@@ -460,7 +542,7 @@ _GIT_EXE = _find_on_path("git")
 # switched off for the duration: no system or global config, hooks pointed
 # at an empty directory, fsmonitor forced off. The environment is built
 # from scratch rather than inherited so nothing else leaks in.
-_GIT_HOOKS_DIR = os.path.join(tempfile.gettempdir(), "llm-env-vault-no-hooks")
+_GIT_HOOKS_DIR = os.path.join(tempfile.gettempdir(), "thyra-vault-no-hooks")
 try:
     os.makedirs(_GIT_HOOKS_DIR, exist_ok=True)
 except OSError:
@@ -802,7 +884,7 @@ def _install_migrate_impl(target_path: str) -> dict:
             # values as new secrets. Refuse until the journal is readable.
             return {"applied": False,
                     "error": f"cannot tell whether {target} is currently swapped by another "
-                             f"llm-env-vault session ({live_error}) -- refusing to migrate "
+                             f"thyra-vault session ({live_error}) -- refusing to migrate "
                              f"it until swap.journal.json is readable."}
         live = live_all.get(os.path.normcase(str(target)))
         if live:
@@ -812,7 +894,7 @@ def _install_migrate_impl(target_path: str) -> dict:
             # restore. Refuse; the swap finishes on its own.
             return {"applied": False,
                     "error": f"{target} currently has real values swapped into it by "
-                             f"another llm-env-vault session (pid {live['pid']}) -- wait "
+                             f"another thyra-vault session (pid {live['pid']}) -- wait "
                              f"for that command to finish, then try again."}
 
         parsed = store.parse_env_file(target)
@@ -1103,7 +1185,7 @@ def _change_password_impl() -> dict:
     if new_key is not None:
         # The password change rotated the data encryption key and issued a new
         # recovery key -- the old printed recovery key is now permanently
-        # invalid.  Show the new key in a native dialog so the human can write
+        # invalid.  Show the new key in a dialog window so the human can write
         # it down; NEVER put the key in the tool result (MCP tool results
         # flow into the agent's context window and session logs).
         info = store.vault_info()
@@ -1137,7 +1219,7 @@ def change_password() -> dict:
     (vault is automatically restored to its previous state in that last
     case). For v2 vaults with a recovery slot the password change also
     rotates the data encryption key and issues a new recovery key --
-    a native dialog shows the new key so the human can write it down;
+    a dialog window shows the new key so the human can write it down;
     the key never appears in this tool's result."""
     return _change_password_impl()
 
@@ -1147,7 +1229,7 @@ def _manage_vault_impl() -> dict:
 
     gui.manage_vault_dialog() collects the action and all required parameters
     (passwords, flags) without exposing them to the agent.  This function drives
-    the vault I/O and routes any recovery key through a separate native dialog
+    the vault I/O and routes any recovery key through a separate dialog window
     so the key is never written into the tool result or the agent's context.
 
     Expected keys per action in the dialog response:
@@ -1380,14 +1462,14 @@ def _manage_vault_impl() -> dict:
 def manage_vault() -> dict:
     """Open the vault management dialog for password changes, recovery key
     setup and reissue, and v1-to-v2 format upgrades. All sensitive input
-    (passwords, recovery keys) is collected exclusively through native
-    dialogs; nothing is returned to the agent. A cancelled dialog is a
+    (passwords, recovery keys) is collected exclusively through dialog
+    windows; nothing is returned to the agent. A cancelled dialog is a
     clean no-op.
 
     Actions the human can choose:
       change_password  -- change the master password; on v2 vaults with a
                           recovery slot the data key is rotated and a new
-                          recovery key is shown in a separate native dialog.
+                          recovery key is shown in a separate dialog window.
       setup_recovery   -- add a recovery slot to a v2 vault that has none.
       reissue_recovery -- replace an existing recovery key (e.g. after it
                           was lost or potentially compromised).
@@ -1468,7 +1550,7 @@ def _recover_vault_impl() -> dict:
 @mcp.tool()
 def recover_vault() -> dict:
     """Regain access to the vault using the printed paper recovery key, when
-    the master password has been forgotten. Opens a dedicated native dialog
+    the master password has been forgotten. Opens a dedicated dialog window
     that collects the recovery key and a new master password; neither is ever
     passed through this tool.
 
@@ -1477,7 +1559,7 @@ def recover_vault() -> dict:
     why a forgotten password would otherwise be unrecoverable.
 
     Never ask the user to type or paste their recovery key into the chat. It
-    is a second full-power credential for the whole vault; the native dialog
+    is a second full-power credential for the whole vault; the dialog window
     is the only correct channel.
 
     The recovery key survives being used: the data key is rotated, but the
@@ -1698,14 +1780,42 @@ def _run_command(command: list, env: dict, cwd: Optional[str],
 MAX_READS_LIMIT = 1000
 
 
+def _shown_cwd(cwd) -> str:
+    """The folder the command will run in, as an absolute path the human can judge."""
+    try:
+        return os.path.abspath(cwd) if cwd else os.getcwd()
+    except OSError:
+        return str(cwd or "")
+
+
+def _shown_executable(command, cwd) -> Optional[str]:
+    """The file that argv[0] really resolves to (None when it is not a file)."""
+    try:
+        found = trust._resolve_argv0(command, cwd)
+    except Exception:  # noqa: BLE001 -- display only
+        found = None
+    return str(found) if found is not None else None
+
+
 def _run_with_env_impl(command: list, materialize: Optional[str], background: bool,
                         cwd: Optional[str], only_vars: Optional[list] = None,
                         files: Optional[list] = None,
                         timeout: Optional[int] = None,
                         max_reads: Optional[int] = None) -> dict:
-    return _with_swap_recovery(
+    result = _with_swap_recovery(
         lambda: _run_with_env_core(command, materialize, background, cwd, only_vars, files,
                                    timeout, max_reads))
+    # Re-baseline a trust grant's project fingerprint ONLY when the command really
+    # ran: the approved command's own output is not an edit by the assistant, but a
+    # denied or refused call must never adopt whatever the assistant changed meanwhile.
+    if isinstance(result, dict) and result.get("applied") and ("exit_code" in result or result.get("started")):
+        try:
+            trust.refresh_project_fingerprint(
+                trust.make_signature(command, cwd, only_vars, materialize, background, files, timeout, max_reads),
+                cwd)
+        except Exception:  # noqa: BLE001 -- bookkeeping must never fail the run
+            pass
+    return result
 
 
 def _run_with_env_core(command: list, materialize: Optional[str], background: bool,
@@ -1797,7 +1907,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
 
     # Trust is scoped to this exact (command, cwd, only_vars, materialize,
     # background) shape AND the content of every file named directly on
-    # the command line -- see vault_lib/trust.py. Everything it tracks
+    # the command line -- see thyra_vault/trust.py. Everything it tracks
     # lives only in this server process's memory; it's forgotten the
     # moment the process exits, same as if the feature didn't exist.
     signature = trust.make_signature(command, cwd, only_vars, materialize, background,
@@ -1848,6 +1958,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         # trust must bind to the file content they actually reviewed, not
         # to whatever it happens to contain the instant they click Allow.
         pre_hashes = trust.referenced_file_hashes(command, cwd)
+        pre_tree = trust.project_fingerprint(cwd)  # same reasoning: what they reviewed, not what they clicked
         # Determine what the trust grant will actually monitor, so we can
         # warn the human BEFORE they tick the trust checkbox -- not only in
         # the tool result they see afterward.
@@ -1875,7 +1986,9 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                                              only_vars=only_vars,
                                              trust_note=dialog_trust_note,
                                              files=file_pairs or None,
-                                             timeout=timeout, max_reads=max_reads)
+                                             timeout=timeout, max_reads=max_reads,
+                                             cwd=_shown_cwd(cwd),
+                                             executable=_shown_executable(command, cwd))
         raw_secrets = outcome["secrets"]
         if raw_secrets is None:
             result = {"applied": False, "message": "Denied by user."}
@@ -1886,7 +1999,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
             # The dialog hides the checkbox for a files run, so this should
             # already be False. Belt to that braces: a grant here would let a
             # later identical call decrypt a private key with no human present.
-            trust.trust(signature, pre_hashes)
+            trust.trust(signature, pre_hashes, pre_tree)
             # Cache only what was actually approved for this signature, not
             # the whole vault raw_secrets holds -- a command trusted with a
             # narrow only_vars must not leave every other secret resident
@@ -2058,7 +2171,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         # corrupt/kill the session for as long as it runs) or steal bytes
         # meant for this server. Redirect explicitly; never inherit.
         _cleanup_stale_run_logs()
-        log_fd, log_path = tempfile.mkstemp(suffix=".log", prefix="llm-env-vault-run-")
+        log_fd, log_path = tempfile.mkstemp(suffix=".log", prefix="thyra-vault-run-")
         os.close(log_fd)
         try:
             with open(log_path, "wb") as log_file:
@@ -2133,7 +2246,9 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         except subprocess.TimeoutExpired as e:
             # Unbound plain run hit its timeout: subprocess.run already killed
             # the direct child. Report it the same way a bound run does.
-            proc = procs.RunResult(None, e.stdout or "", e.stderr or "", True, "none")
+            # TimeoutExpired carries BYTES even for a text-mode run; redacting bytes
+            # with str.replace raised TypeError and lost the whole result.
+            proc = procs.RunResult(None, _as_text(e.stdout), _as_text(e.stderr), True, "none")
         except OSError as e:
             # Not returned from inside the try: the result must be built
             # AFTER the finally block below has cleaned the materialized
@@ -2373,6 +2488,6 @@ if __name__ == "__main__":
         print(_json.dumps(_startup_recovery or [{"message": "nothing to recover"}], indent=2))
         sys.exit(0)
     if _startup_recovery:
-        print(f"llm-env-vault: restored {len(_startup_recovery)} swapped file(s) left by a "
+        print(f"thyra-vault: restored {len(_startup_recovery)} swapped file(s) left by a "
               f"previous server -- details in the next tool result.", file=sys.stderr)
     mcp.run()

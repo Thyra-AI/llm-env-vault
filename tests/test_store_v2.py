@@ -1,5 +1,5 @@
 """
-Regression suite for the v2 storage layer additions to vault_lib/store.py.
+Regression suite for the v2 storage layer additions to thyra_vault/store.py.
 
 Covers the v2 AES-256-GCM/scrypt vault format introduced in 1.4.0:
 
@@ -40,7 +40,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from vault_lib import crypto, store  # noqa: E402
+from thyra_vault import crypto, store  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Monkeypatch SCRYPT_DEFAULT to n=2**12 for the entire module (speed).
@@ -309,7 +309,8 @@ def test_upgrade_v1_to_v2_preserves_secrets_and_keeps_salt() -> None:
 
         # Recovery key works too
         plaintext, _dek, _hdr = crypto.open_v2_with_recovery(data, rk_text)
-        recovered = json.loads(store._pkcs7_unpad_strict(plaintext))
+        recovered = {k: v for k, v in json.loads(store._pkcs7_unpad_strict(plaintext)).items()
+                     if not store.is_reserved_key(k)}  # #pad etc. are internal
         assert recovered == BASE_SECRETS, (
             f"REGRESSION: recovery key cannot read secrets after upgrade -- got {recovered!r}"
         )
@@ -401,7 +402,8 @@ def test_change_password_v2_rotates_dek_and_issues_new_recovery_key() -> None:
             plaintext, _dek, _hdr = crypto.open_v2_with_recovery(
                 store.SECRETS_FILE.read_bytes(), new_rk_text
             )
-            recovered = json.loads(store._pkcs7_unpad_strict(plaintext))
+            recovered = {k: v for k, v in json.loads(store._pkcs7_unpad_strict(plaintext)).items()
+                     if not store.is_reserved_key(k)}  # #pad etc. are internal
             assert recovered == BASE_SECRETS, (
                 f"REGRESSION: new recovery key cannot read secrets after change_password"
             )
@@ -505,7 +507,8 @@ def test_recover_with_recovery_key_restores_access() -> None:
             # deliberate; see recover_with_recovery_key's docstring.
             data = store.SECRETS_FILE.read_bytes()
             plaintext, _dek, _hdr = crypto.open_v2_with_recovery(data, orig_rk_text)
-            recovered = json.loads(store._pkcs7_unpad_strict(plaintext))
+            recovered = {k: v for k, v in json.loads(store._pkcs7_unpad_strict(plaintext)).items()
+                     if not store.is_reserved_key(k)}  # #pad etc. are internal
             assert recovered == BASE_SECRETS, (
                 f"REGRESSION: the original recovery key can no longer read the "
                 f"vault after being used once -- got {recovered!r}"
@@ -890,7 +893,8 @@ def test_reissue_recovery_key_invalidates_old_and_issues_new() -> None:
 
             # New key must work
             plaintext, _dek, _hdr = crypto.open_v2_with_recovery(data, new_rk_text)
-            recovered = json.loads(store._pkcs7_unpad_strict(plaintext))
+            recovered = {k: v for k, v in json.loads(store._pkcs7_unpad_strict(plaintext)).items()
+                     if not store.is_reserved_key(k)}  # #pad etc. are internal
             assert recovered == BASE_SECRETS, (
                 f"REGRESSION: new recovery key cannot read secrets -- got {recovered!r}"
             )

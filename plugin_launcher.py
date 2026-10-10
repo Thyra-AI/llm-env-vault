@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bootstrap launcher for llm-env-vault as a Claude Code plugin.
+"""Bootstrap launcher for thyra-vault as a Claude Code plugin.
 
 This is what .mcp.json actually runs (via bare `python`) instead of
 mcp_server.py directly. Reasons a launcher is needed at all:
@@ -47,14 +47,12 @@ DATA_DIR = Path(os.environ.get("CLAUDE_PLUGIN_DATA", PLUGIN_ROOT / ".venv-data")
 VENV_DIR = DATA_DIR / "venv"
 INSTALL_LOG = DATA_DIR / "provision.log"
 
-# The hash-pinned lockfile is Windows-only (the platform pywin32 -- a
-# transitive mcp[cli] dependency -- actually has wheels for, and this
-# project's tested/primary platform). Falls back to the unpinned
-# requirements.txt everywhere else rather than risk a hash-pinned file
-# that silently can't resolve on a platform it wasn't verified against.
+# Dependencies install from the hash-pinned, universal lockfile on EVERY platform (see the
+# header of requirements-lock.txt). requirements.txt is only the human-edited source the
+# lock is generated from, and the fallback if the lock file is missing (a dev checkout
+# that deleted it) -- that fallback is unpinned and unhashed.
 _LOCKFILE = PLUGIN_ROOT / "requirements-lock.txt"
-REQUIREMENTS = _LOCKFILE if sys.platform == "win32" and _LOCKFILE.exists() \
-    else PLUGIN_ROOT / "requirements.txt"
+REQUIREMENTS = _LOCKFILE if _LOCKFILE.exists() else PLUGIN_ROOT / "requirements.txt"
 
 STAMP_FILE = DATA_DIR / "requirements.sha256"
 # Written before an attempt starts (unlike STAMP_FILE, which is only
@@ -118,7 +116,7 @@ def _provision_lock():
     wait for it to finish (then re-check whether provisioning is even
     still needed -- see _ensure_venv), not duplicate the work.
 
-    Self-contained (no import from vault_lib, which has its own
+    Self-contained (no import from thyra_vault, which has its own
     dependencies plugin_launcher's whole job is to install in the first
     place -- it cannot import anything not-yet-installed itself)."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -196,7 +194,7 @@ def _run_logged(cmd: list[str], step: str) -> None:
             _log(result.stderr.rstrip())
         _log(f"FAILED ({step}) with exit code {result.returncode}")
         raise RuntimeError(
-            f"llm-env-vault: {step} failed (exit code {result.returncode}). "
+            f"thyra-vault: {step} failed (exit code {result.returncode}). "
             f"Full output in {INSTALL_LOG}."
         )
 
@@ -225,7 +223,7 @@ def _install_marker() -> str:
     Installed plugin (CLAUDE_PLUGIN_ROOT set): keyed on CLAUDE_PLUGIN_ROOT's
     own resolved path, NOT requirements.txt's content hash. A real `claude
     plugin update` always moves the plugin to a new version-scoped
-    directory -- that's the same fact behind vault_lib/store.py's ROOT
+    directory -- that's the same fact behind thyra_vault/store.py's ROOT
     relocation: an update orphans whatever was in the OLD version's
     directory precisely because it creates a new one. So a path change IS
     a genuine update event, and requirements.txt's content is replaced
@@ -348,7 +346,7 @@ def _provision(python: Path, current_marker: str) -> None:
     else:
         _log("No existing venv found -- first-time setup.")
 
-    print(f"[llm-env-vault] Setting up its Python environment in {VENV_DIR} "
+    print(f"[thyra-vault] Setting up its Python environment in {VENV_DIR} "
           f"(first run, or dependencies changed since last run) -- this "
           f"can take a little while the first time. Progress: {INSTALL_LOG}",
           file=sys.stderr, flush=True)

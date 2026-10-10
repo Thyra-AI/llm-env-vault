@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from _vault_workspace import TEST_PASSWORD, SECRETS, workspace  # noqa: E402
-from vault_lib import crypto, store  # noqa: E402
+from thyra_vault import crypto, store  # noqa: E402
 
 
 class _Clock:
@@ -177,3 +177,37 @@ def test_unknown_outcome_is_rejected(clock):
     with workspace(register=False):
         with pytest.raises(ValueError):
             store._finish_unlock_attempt("password", "okay")
+
+
+# --- a hand-edited attempts file must not stall or disarm the throttle --------
+
+def _write_state(state):
+    store._attempts_file().write_text(json.dumps(state), "utf-8")
+
+
+def test_an_absurd_failure_count_neither_hangs_nor_unlocks_early(clock):
+    with workspace():
+        _write_state({"password": {"failures": 4_000_000_000, "last": clock.now}})
+        started = time.perf_counter()
+        with pytest.raises(crypto.TooManyAttempts):
+            store.load_secrets(TEST_PASSWORD)
+        assert time.perf_counter() - started < 1.0
+        assert store._read_attempts()["password"]["failures"] <= 1_000
+
+
+def test_a_nan_timestamp_does_not_switch_the_cool_down_off(clock):
+    with workspace():
+        # json.dumps writes NaN as a bare literal that json.loads accepts.
+        store._attempts_file().write_text('{"password": {"failures": 8, "last": NaN}}', "utf-8")
+        with pytest.raises(crypto.TooManyAttempts):
+            store.load_secrets(TEST_PASSWORD)
+
+
+def test_infinite_and_boolean_fields_are_not_trusted(clock):
+    with workspace():
+        store._attempts_file().write_text(
+            '{"password": {"failures": true, "last": 1}, "recovery": {"failures": 3, "last": Infinity}}', "utf-8")
+        state = store._read_attempts()
+        assert "password" not in state                     # a bool is not a count
+        assert state["recovery"]["last"] == clock.now      # Infinity read as "now"
+        assert store.load_secrets(TEST_PASSWORD) == SECRETS  # and a normal unlock still works

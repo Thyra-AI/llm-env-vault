@@ -1,7 +1,7 @@
 ---
 description: Find every .env in this project and move its real values into the vault
 argument-hint: "[path to a .env or project dir — omit to scan the current project]"
-allowed-tools: Glob, Bash(git check-ignore:*), mcp__plugin_llm-env-vault_llm-env-vault__install_migrate, mcp__plugin_llm-env-vault_llm-env-vault__vault_status, mcp__plugin_llm-env-vault_llm-env-vault__resync_targets
+allowed-tools: Glob, Bash(git check-ignore:*), mcp__plugin_thyra-vault_thyra-vault__install_migrate, mcp__plugin_thyra-vault_thyra-vault__vault_status, mcp__plugin_thyra-vault_thyra-vault__resync_targets
 ---
 
 # Protect this project's .env files
@@ -12,9 +12,9 @@ still full of live credentials, so the discovery path must be structurally incap
 one into context. **Do not add a file-reading tool to that list.** If a step below seems to need
 one, the step is wrong.
 
-The `mcp__plugin_llm-env-vault_llm-env-vault__*` entries are the plugin-scoped names of the
+The `mcp__plugin_thyra-vault_thyra-vault__*` entries are the plugin-scoped names of the
 vault's own tools (a plugin-shipped server is named `plugin_<plugin>_<server>`); the bare
-`mcp__llm-env-vault__*` form belongs to a manually registered server and would match nothing here.
+`mcp__thyra-vault__*` form belongs to a manually registered server and would match nothing here.
 
 $ARGUMENTS
 
@@ -40,7 +40,7 @@ this command exists to prevent. If there are no candidates, say so and stop.
 
 Call `install_migrate(target_path=...)` on each candidate, **one at a time**.
 
-Do not try to summarise or pre-confirm what will move — the native dialog that `install_migrate`
+Do not try to summarise or pre-confirm what will move — the dialog that `install_migrate`
 opens already lists the variable names, flags collisions with other projects, and writes nothing
 until the human clicks Allow. That dialog is the confirmation surface. Adding your own is
 redundant at best and misleading at worst.

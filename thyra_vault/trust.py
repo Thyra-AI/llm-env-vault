@@ -38,6 +38,7 @@ entirely rather than silently serving pre-rotation values.
 import hashlib
 import os
 import shutil
+import stat
 import sys
 import time
 from pathlib import Path
@@ -200,7 +201,19 @@ def _resolve_argv0(command, cwd) -> Optional[Path]:
         # POSIX exec does not search cwd -- prepending it would mis-bind
         # drift detection to a decoy file in cwd.
         search_path = os.environ.get("PATH", "")
-    resolved = shutil.which(command[0], path=search_path)
+    program = command[0]
+    if os.sep in program or "/" in program or (os.altsep and os.altsep in program):
+        # `./run.sh` or `bin/tool`: a path, so the child finds it relative to ITS
+        # working directory. shutil.which would resolve it against this server's own
+        # cwd instead, and trust would be monitoring (and the dialog showing) the
+        # wrong file.
+        candidate = Path(program) if os.path.isabs(program) else base / program
+        try:
+            candidate = candidate.resolve()
+            return candidate if candidate.is_file() else None
+        except OSError:
+            return None
+    resolved = shutil.which(program, path=search_path)
     if not resolved:
         return None
     try:
@@ -501,9 +514,82 @@ def cached_secrets(signature) -> Optional[dict]:
     return {name: _deobfuscate(data, key) for name, data in _cached_secrets[signature].items()}
 
 
-def trust(signature, file_hashes: dict) -> None:
+# --- the project folder as a whole ---------------------------------------------
+#
+# Hashing argv0 and the files NAMED on the command line is not enough: `python
+# app.py`, `pytest`, `npm test`, `bash run.sh` and `make` all load code the command
+# line never mentions. Trust once, let the assistant edit any of those files, call
+# the same command again, and it used to run with the secrets and NO dialog. So a
+# grant is also bound to a fingerprint of the folder the command runs in (name,
+# size and mtime of every file), and any difference revokes it.
+#
+# The approved command's own output does not count as an edit: the fingerprint is
+# refreshed after a run that was actually executed (refresh_project_fingerprint),
+# never after a denied or refused one.
+#
+# Not covered, honestly: dependency and cache folders (they are skipped -- they are
+# huge and change by themselves), files outside the folder, and a change that keeps
+# a file's size AND mtime.
+PROJECT_SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache",
+                               ".pytest_cache", ".ruff_cache", ".tox", ".turbo", ".next", ".gradle"})
+_MAX_PROJECT_FILES = 20_000
+_PROJECT_BUDGET_SECONDS = 2.0
+
+
+def project_fingerprint(cwd) -> str:
+    """A digest of the folder the command will run in.
+
+    When the folder is too big to look at within the budget the digest is random,
+    so it never matches: such a command is simply asked about every time.
+    """
+    root = Path(cwd) if cwd else Path.cwd()
+    digest = hashlib.sha256()
+    deadline = time.monotonic() + _PROJECT_BUDGET_SECONDS
+    count = 0
+    stack = [root]
+    while stack:
+        here = stack.pop()
+        try:
+            with os.scandir(here) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError:
+            digest.update(b"E" + str(here).encode("utf-8", "replace") + b"\0")
+            continue
+        for entry in entries:
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            rel = os.path.relpath(entry.path, root)
+            if stat.S_ISDIR(st.st_mode):
+                if entry.name not in PROJECT_SKIP_DIRS:
+                    digest.update(b"D" + rel.encode("utf-8", "replace") + b"\0")
+                    stack.append(Path(entry.path))
+                continue
+            count += 1
+            if count > _MAX_PROJECT_FILES or time.monotonic() > deadline:
+                return "unbounded:" + os.urandom(8).hex()
+            link = ""
+            if stat.S_ISLNK(st.st_mode):
+                try:
+                    link = os.readlink(entry.path)
+                except OSError:
+                    link = "?"
+            digest.update(f"F{rel}\0{st.st_size}\0{st.st_mtime_ns}\0{link}\0".encode("utf-8", "replace"))
+    return digest.hexdigest()
+
+
+def refresh_project_fingerprint(signature, cwd) -> None:
+    """Re-baseline a live grant after the approved command itself ran."""
+    entry = _trusted.get(signature)
+    if entry is not None and entry.get("tree") is not None:
+        entry["tree"] = project_fingerprint(cwd)
+
+
+def trust(signature, file_hashes: dict, tree: Optional[str] = None) -> None:
     _trusted[signature] = {
         "hashes": file_hashes,
+        "tree": tree,
         "granted_wall": time.time(),
         "granted_mono": time.monotonic(),
     }
@@ -566,7 +652,13 @@ def check(signature, command, cwd, extra_paths=None):
     approved_hashes = entry["hashes"]
     current_hashes = referenced_file_hashes(command, cwd, extra_paths)
     if current_hashes == approved_hashes:
-        return True, None
+        approved_tree = entry.get("tree")
+        if approved_tree is None or project_fingerprint(cwd) == approved_tree:
+            return True, None
+        del _trusted[signature]
+        return False, ("Trust for this exact command was revoked -- files in the folder it runs in "
+                       "changed (or appeared/disappeared) since it was approved, and a command can "
+                       "load any of them. Re-approve to trust it again.")
 
     del _trusted[signature]
     # Parenthesized explicitly -- set `-` binds tighter than `|`, so

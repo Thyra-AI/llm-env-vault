@@ -4,7 +4,7 @@ Legacy swap fixtures -- captured from the real v1.7.1 writers.
 WHY THIS EXISTS
 ---------------
 `run_with_env(swap=)` is retired in 2.0.0. The RECOVERY half is kept (see
-vault_lib/legacy_swap.py) because a user can upgrade to 2.0 while a .env on
+thyra_vault/legacy_swap.py) because a user can upgrade to 2.0 while a .env on
 their disk still holds real values -- either a 1.6-1.7 server crashed
 mid-swap, or one is still running a command right now in another session.
 

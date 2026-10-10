@@ -1,5 +1,5 @@
 """
-Regression suite for the security-hardening additions to vault_lib/store.py.
+Regression suite for the security-hardening additions to thyra_vault/store.py.
 
 Covers two findings from the adversarial code review:
 
@@ -31,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from vault_lib import crypto, store  # noqa: E402
+from thyra_vault import crypto, store  # noqa: E402
 
 TEST_PASSWORD = "regression-test-password-123"
 NEW_PASSWORD = "brand-new-password-456"

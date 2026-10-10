@@ -19,9 +19,11 @@ import base64
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -31,7 +33,7 @@ from typing import Optional
 
 from secrets import token_hex as _token_hex
 
-from . import crypto, procs
+from . import crypto, datadir, procs
 
 # When installed as a Claude Code plugin, __file__ resolves inside a
 # version-scoped cache directory (e.g.
@@ -50,10 +52,20 @@ from . import crypto, procs
 # Falls back to the old next-to-the-module location for a manual/dev
 # install (running mcp_server.py directly, no CLAUDE_PLUGIN_DATA set),
 # which was never affected by plugin updates in the first place.
-_PLUGIN_DATA_DIR = os.environ.get("CLAUDE_PLUGIN_DATA")
-ROOT = (Path(_PLUGIN_DATA_DIR).resolve() / "vault") if _PLUGIN_DATA_DIR \
-    else Path(__file__).resolve().parent.parent
-ROOT.mkdir(parents=True, exist_ok=True)
+#
+# Resolution order -- THYRA_VAULT_HOME, CLAUDE_PLUGIN_DATA, the source checkout,
+# then the user's data directory for a package/frozen install -- lives in
+# datadir.py. _PLUGIN_DATA_DIR keeps its meaning for the guards below: "the
+# environment named the vault directory".
+_PLUGIN_DATA_DIR = datadir.explicit_location_given(os.environ) or None
+ROOT = datadir.current_root(Path(__file__))
+datadir.make_private_dir(ROOT)
+if not datadir.explicit_home_given(os.environ):
+    # A vault left by the plugin's old id (llm-env-vault) is copied in, once.
+    _adopted = datadir.adopt_legacy_vault(ROOT, os.environ.get("CLAUDE_PLUGIN_DATA"))
+    if _adopted:
+        print(f"Thyra Vault: copied your existing vault from {_adopted} (the original is untouched).",
+              file=sys.stderr)
 
 SALT_FILE = ROOT / "vault.salt"
 SECRETS_FILE = ROOT / "vault.enc"
@@ -74,7 +86,7 @@ FORMAT_FILE = ROOT / "vault.format.txt"
 # Serialises the ENTIRE read-modify-write of vault.enc across processes.
 # save_secrets' expect_fingerprint compare-and-swap is a TOCTOU check on its
 # own -- it compares the on-disk hash and only then calls os.replace, with no
-# lock in between. Within one process the Tkinter one-dialog-at-a-time rule
+# lock in between. Within one process the one-dialog-at-a-time rule
 # hides that, but two Claude Code sessions are two servers: both can read a
 # vault with no FMK, both mint one, both pass the fingerprint compare, and the
 # second write silently clobbers the first -- after the first has already
@@ -675,7 +687,14 @@ def _json_lock(lock_path, label: str):
             counts[key] -= 1
         return
 
-    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    # O_NOFOLLOW: a symlink swapped in at the lock path must not make us open
+    # (and flock) some other file; O_NONBLOCK: a FIFO there must not hang the
+    # open. Then insist on a regular file.
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_NONBLOCK", 0), 0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise RuntimeError(f"{label}: the lock path is not a regular file; refusing to use it.")
     try:
         try:
             import msvcrt as _msvcrt  # Windows only
@@ -836,6 +855,9 @@ def _looks_unterminated_quote(value: str) -> bool:
     return False
 
 
+_MAX_ENV_FILE_BYTES = 8 * 1024 * 1024
+
+
 def _read_raw(path: Path) -> str:
     """Reads text without translating line endings, so callers can
     preserve the file's original CRLF/LF/CR terminators on rewrite.
@@ -844,6 +866,14 @@ def _read_raw(path: Path) -> str:
     '\\ufeffFOO=bar', which doesn't match ENV_LINE_RE, so that variable
     would silently never be recognized as migratable.
     """
+    # The path can come from an agent-writable file (targets.json). A FIFO or a
+    # device there would hang the single-threaded server on open()/read(), and a
+    # huge file would exhaust memory: look before opening.
+    st = os.stat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError(f"{path.name} is not a regular file")
+    if st.st_size > _MAX_ENV_FILE_BYTES:
+        raise ValueError(f"{path.name} is too large to be an env file (over {_MAX_ENV_FILE_BYTES} bytes)")
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         return f.read()
 
@@ -990,6 +1020,18 @@ def _quote_style(raw_value: str) -> str:
     return ""
 
 
+def _has_vault_evidence(lines, managed_names, force_names, index, shapes) -> bool:
+    for line in lines:
+        if line.startswith(MANAGED_HEADER_PREFIX):
+            return True
+        m = ENV_LINE_RE.match(line)
+        if m and m.group("name") in managed_names and (
+                m.group("name") in force_names
+                or is_placeholder(m.group("name"), m.group("value"), index, shapes)):
+            return True
+    return False
+
+
 def sync_target_file(path: Path, index: dict, managed_names, force_names=None,
                      shapes=None) -> list:
     """Rewrite one external .env in place, touching only lines for
@@ -1043,6 +1085,19 @@ def sync_target_file(path: Path, index: dict, managed_names, force_names=None,
     # removals to begin with.
     if shapes is None:
         shapes = load_shapes()
+
+    # Only a file this vault has actually migrated is rewritten. targets.json is
+    # plaintext and agent-writable, so a forged entry pointing at ~/.bashrc or
+    # any other text file would otherwise get managed lines and a header appended
+    # with no password and no dialog. Evidence of ours: the managed header, or a
+    # managed variable whose line is a placeholder (or is being captured right
+    # now, which is what force_names means).
+    if not _has_vault_evidence(lines, managed_names, force_names, index, shapes):
+        raise ValueError(
+            f"Refusing to resync {path}: nothing in it shows this vault ever migrated it "
+            f"(no managed header, and none of its managed variables holds a placeholder). "
+            f"If it is a real target, run install_migrate on it so a human confirms it.")
+
     currently_live, would_be_removed = set(), set()
     for line in lines:
         m = ENV_LINE_RE.match(line)
@@ -1165,7 +1220,7 @@ def create_secrets_vault(password: str) -> None:
         )
     salt = crypto.new_salt()
     _atomic_write_bytes(SALT_FILE, salt)
-    save_secrets(password, {})
+    _write_body(password, {}, merge_reserved=True, creating=True)
 
 
 def render_env_text(secrets: dict) -> str:
@@ -1243,7 +1298,7 @@ def write_materialized_env(path: Path, secrets: dict) -> None:
 #                        agent could already rewrite wholesale.
 #
 # swap.journal.json and its lock are NOT here any more: nothing in 2.x writes
-# one, and the names live in vault_lib/legacy_swap.py, which is the only
+# one, and the names live in thyra_vault/legacy_swap.py, which is the only
 # thing that still reads them.
 
 STYLES_FILE_NAME = "target_styles.json"
@@ -1634,6 +1689,27 @@ def _carries_value(raw_value: str, entry: dict, raw_line: Optional[str] = None) 
 _PAD_BLOCK = 64
 
 
+PAD_KEY = RESERVED_KEY_PREFIX + "pad"
+_BUCKET_MIN = 4096
+
+
+def _serialize_body(body: dict) -> bytes:
+    """The body as JSON, padded to a size bucket (4 KiB, then powers of two).
+
+    Without this the file length tracked the content closely, and now that
+    personal items live in the same body it would tell a reader of the file how
+    much personal data there is. A reserved ``#pad`` entry (ignored everywhere,
+    like every reserved key) fills the body up to the bucket; any pad that came
+    in with the body is dropped and recomputed.
+    """
+    clean = {k: v for k, v in body.items() if k != PAD_KEY}
+    base = len(json.dumps({**clean, PAD_KEY: ""}).encode("utf-8"))
+    bucket = _BUCKET_MIN
+    while bucket < base:
+        bucket *= 2
+    return json.dumps({**clean, PAD_KEY: "0" * (bucket - base)}).encode("utf-8")
+
+
 def _pkcs7_pad(data: bytes, block_size: int = _PAD_BLOCK) -> bytes:
     pad_len = block_size - (len(data) % block_size)
     return data + bytes([pad_len]) * pad_len
@@ -1892,7 +1968,9 @@ def _attempts_file() -> Path:
 def _lockout_seconds(failures: int) -> int:
     if failures < _FREE_ATTEMPTS:
         return 0
-    return min(_BASE_LOCKOUT_SECONDS * 2 ** (failures - _FREE_ATTEMPTS),
+    # The exponent is capped: the count comes from an agent-writable file, and
+    # 2 ** 4_000_000_000 is a multi-second bignum that stalls every unlock.
+    return min(_BASE_LOCKOUT_SECONDS * 2 ** min(failures - _FREE_ATTEMPTS, 32),
                _MAX_LOCKOUT_SECONDS)
 
 
@@ -1911,9 +1989,16 @@ def _read_attempts() -> dict:
         for kind, rec in raw.items():
             if (isinstance(rec, dict)
                     and isinstance(rec.get("failures"), int)
-                    and isinstance(rec.get("last"), (int, float))):
-                out[kind] = {"failures": max(rec["failures"], 0),
-                             "last": float(rec["last"])}
+                    and not isinstance(rec.get("failures"), bool)
+                    and isinstance(rec.get("last"), (int, float))
+                    and not isinstance(rec.get("last"), bool)):
+                last = float(rec["last"])
+                if not math.isfinite(last):
+                    # NaN compares False with everything, which would skip the
+                    # cool-down altogether: read it as "just now" instead.
+                    last = time.time()
+                out[kind] = {"failures": min(max(rec["failures"], 0), 1_000),
+                             "last": last}
     return out
 
 
@@ -2057,7 +2142,7 @@ def _load_secrets_v1(password: str, token: bytes) -> dict:
 #
 #   1. Leaking.  run_with_env does env.update(secrets); Windows CreateProcess
 #      is happy to pass a "#"-prefixed name straight to the child.  A reserved
-#      key in that dict would also trip gui._disclosure_mismatch, which
+#      key in that dict would also trip uihelpers._disclosure_mismatch, which
 #      fail-safes by refusing every only_vars=None run.
 #   2. Dropping.  Every mutation here is load -> mutate -> save.  If any of
 #      those saves a variables-only dict, the FMK is deleted and every
@@ -2341,6 +2426,7 @@ def _write_body(
     expect_fingerprint: Optional[str] = None,
     *,
     merge_reserved: bool = False,
+    creating: bool = False,
 ) -> None:
     """Shared writer behind save_secrets and save_vault_body.
 
@@ -2365,7 +2451,7 @@ def _write_body(
     """
     with _vault_lock():
         _write_body_locked(password, body, expect_fingerprint,
-                            merge_reserved=merge_reserved)
+                            merge_reserved=merge_reserved, creating=creating)
 
 
 def _write_body_locked(
@@ -2374,6 +2460,7 @@ def _write_body_locked(
     expect_fingerprint: Optional[str] = None,
     *,
     merge_reserved: bool = False,
+    creating: bool = False,
 ) -> None:
     """_write_body's body, with the vault lock assumed already held."""
     # If vault.enc doesn't exist yet, this is first-time creation from
@@ -2381,10 +2468,17 @@ def _write_body_locked(
     # Fall through to the v1 path -- there's nothing to read yet, so there is
     # no prior body to merge and the smuggled-key check is all that applies.
     if not SECRETS_FILE.exists():
+        if not creating:
+            # vault.salt outlives an upgrade to v2. If vault.enc is gone, writing
+            # here would mint a brand-new v1 (PBKDF2) vault under the caller's
+            # password: a silent downgrade, with the old content already lost.
+            raise RuntimeError(
+                "vault.enc is missing. Refusing to create a new vault as a side effect of a "
+                "save -- restore vault.enc from a backup, or create a vault on purpose.")
         if merge_reserved:
             body = _merge_reserved({}, body)
         salt = SALT_FILE.read_bytes()
-        padded = _pkcs7_pad(json.dumps(body).encode("utf-8"))
+        padded = _pkcs7_pad(_serialize_body(body))
         token = crypto.encrypt(password, salt, padded)
         _atomic_write_bytes(SECRETS_FILE, token)
         return
@@ -2404,7 +2498,7 @@ def _write_body_locked(
             _pt, dek, header = crypto.open_v2_with_password(data, password)
         if merge_reserved:
             body = _merge_reserved(_decode_body(_pt, "v2 vault"), body)
-        padded = _pkcs7_pad(json.dumps(body).encode("utf-8"))
+        padded = _pkcs7_pad(_serialize_body(body))
         vault_id = _vault_id_from_header(header)
 
         # Determine if the password slot is below the floor and needs upgrading.
@@ -2448,7 +2542,7 @@ def _write_body_locked(
             except Exception:
                 prior = {}
             body = _merge_reserved(prior, body)
-        padded = _pkcs7_pad(json.dumps(body).encode("utf-8"))
+        padded = _pkcs7_pad(_serialize_body(body))
         salt = SALT_FILE.read_bytes()
         token = crypto.encrypt(password, salt, padded)
         _atomic_write_bytes(SECRETS_FILE, token)
@@ -2627,7 +2721,7 @@ def create_v2_vault(
             "unrecoverable; make sure you have exported all secrets first)."
         )
 
-    padded = _pkcs7_pad(json.dumps({}).encode("utf-8"))
+    padded = _pkcs7_pad(_serialize_body({}))
     envelope, _dek, _vault_id = crypto.build_v2_vault(
         password, padded, recovery_raw=recovery_raw
     )
@@ -2678,7 +2772,7 @@ def _upgrade_to_v2_locked(password: str, *, recovery: bool):
 
     recovery_raw: Optional[bytearray] = crypto.new_recovery_key() if recovery else None
 
-    padded = _pkcs7_pad(json.dumps(body).encode("utf-8"))
+    padded = _pkcs7_pad(_serialize_body(body))
     original_bytes = _backup_vault()
 
     envelope, _dek, _vault_id = crypto.build_v2_vault(

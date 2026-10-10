@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import mcp_server
-from vault_lib import store
+from thyra_vault import store
 
 
 def _write_temp_env(content: str) -> str:

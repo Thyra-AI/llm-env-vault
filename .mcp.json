@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "llm-env-vault": {
+    "thyra-vault": {
       "command": "python",
       "args": ["${CLAUDE_PLUGIN_ROOT}/plugin_launcher.py"]
     }

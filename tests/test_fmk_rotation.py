@@ -32,8 +32,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import mcp_server  # noqa: E402
-import vault_lib.crypto as crypto  # noqa: E402
-from vault_lib import gui, store  # noqa: E402
+import thyra_vault.crypto as crypto  # noqa: E402
+from thyra_vault import store  # noqa: E402
+from thyra_vault import webui as gui
+from thyra_vault import uihelpers  # noqa: E402  # noqa: E402
 
 TEST_PASSWORD = "rotation-test-password-123"
 _FAST_PARAMS = crypto.ScryptParams(n=2 ** 12, r=8, p=1)
@@ -437,18 +439,13 @@ def test_manage_vault_reports_a_wrong_password_without_leaking_detail() -> None:
 
 def test_the_file_actions_are_offered_only_when_files_exist() -> None:
     info = {"format": 2, "recovery_slot": True}
-    with_files = gui._applicable_manage_actions(info, 3)
+    with_files = uihelpers._applicable_manage_actions(info, 3)
     assert "rotate_file_key" in with_files and "retire_file_keys" in with_files
-    without = gui._applicable_manage_actions(info, 0)
+    without = uihelpers._applicable_manage_actions(info, 0)
     assert "rotate_file_key" not in without and "retire_file_keys" not in without
     # A v1 vault cannot encrypt files at all, so it must never offer either.
-    v1 = gui._applicable_manage_actions({"format": 1}, 3)
+    v1 = uihelpers._applicable_manage_actions({"format": 1}, 3)
     assert "rotate_file_key" not in v1 and "retire_file_keys" not in v1
-
-
-def test_both_file_actions_declare_the_password_result_key() -> None:
-    for action in ("rotate_file_key", "retire_file_keys"):
-        assert gui._manage_action_result_keys(action) == frozenset({"action", "password"})
 
 
 # ---------------------------------------------------------------------------

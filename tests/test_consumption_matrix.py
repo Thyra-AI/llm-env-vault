@@ -34,8 +34,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 import mcp_server  # noqa: E402
-import vault_lib.crypto as crypto  # noqa: E402
-from vault_lib import store, trust  # noqa: E402
+import thyra_vault.crypto as crypto  # noqa: E402
+from thyra_vault import store, trust  # noqa: E402
 from _vault_workspace import _isolate, _reset_trust, fake_dialog, TEST_PASSWORD, _FAST_PARAMS  # noqa: E402
 
 SECRETS = {

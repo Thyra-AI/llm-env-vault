@@ -210,6 +210,22 @@ def live_swaps() -> dict:
             if e["state"] == "active" and _entry_is_live(e)}
 
 
+RECOVERY_BACKUP_DIR = "swap-recovery"
+
+
+def _backup_before_recovery(path: Path, original: bytes):
+    """Copy ``original`` into <vault folder>/swap-recovery/. Returns (path, error)."""
+    try:
+        folder = store.ROOT / RECOVERY_BACKUP_DIR
+        folder.mkdir(mode=0o700, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        target = folder / f"{stamp}-{os.getpid()}-{path.name}"
+        store._atomic_write_bytes(target, original, mode=0o600)
+        return str(target), None
+    except OSError as exc:
+        return None, f"could not back up {path.name} before recovering it ({exc}); left unchanged"
+
+
 def recover_swap_file(path: Path, names, index: dict, started: float,
                       shapes: Optional[dict] = None) -> dict:
     """Crash recovery: the process that swapped `names` into `path` is gone,
@@ -273,6 +289,14 @@ def recover_swap_file(path: Path, names, index: dict, started: float,
             mode = stat.S_IMODE(path.stat().st_mode)
         except OSError:
             mode = 0o644
+        # The journal is plaintext and an assistant can write one, so "recover" can be
+        # asked to blank real values it has no way to verify were ever vaulted. Keep
+        # the file as it was, in the vault folder (0700), before changing anything.
+        backup, err = _backup_before_recovery(path, bom + b"".join(lines))
+        if err:
+            report["error"] = err
+            return report
+        report["backup"] = backup
         err = store._write_with_retries(path, bom + b"".join(out), mode, allow_in_place=True)
         if err:
             report["error"] = err
