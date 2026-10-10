@@ -42,8 +42,11 @@ import sys
 import time
 from pathlib import Path
 
-PLUGIN_ROOT = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", Path(__file__).resolve().parent))
-DATA_DIR = Path(os.environ.get("CLAUDE_PLUGIN_DATA", PLUGIN_ROOT / ".venv-data"))
+# An EMPTY variable counts as unset: Path("") is the current directory, and a venv created there
+# (what `--plugin-dir` mode or a command substituting an empty ${CLAUDE_PLUGIN_DATA} would do)
+# is the worst place for it.
+PLUGIN_ROOT = Path(os.environ.get("CLAUDE_PLUGIN_ROOT") or Path(__file__).resolve().parent)
+DATA_DIR = Path(os.environ.get("CLAUDE_PLUGIN_DATA") or PLUGIN_ROOT / ".venv-data")
 VENV_DIR = DATA_DIR / "venv"
 INSTALL_LOG = DATA_DIR / "provision.log"
 
@@ -434,7 +437,7 @@ def _require_data_dir_for_app() -> None:
     CLAUDE_PLUGIN_DATA, which Claude Code exports to the MCP server but not to a shell, so
     /thyra-vault:open passes it in explicitly. Refuse to guess: without it an installed plugin
     would open (or create) a different, empty vault."""
-    if "CLAUDE_PLUGIN_DATA" not in os.environ and _looks_like_plugin_cache(PLUGIN_ROOT):
+    if not os.environ.get("CLAUDE_PLUGIN_DATA") and _looks_like_plugin_cache(PLUGIN_ROOT):
         print("thyra-vault: run this through /thyra-vault:open in Claude Code (it passes the "
               "plugin's data directory, where your vault lives).", file=sys.stderr)
         sys.exit(2)

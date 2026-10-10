@@ -67,3 +67,28 @@ def test_the_open_command_does_not_grant_blanket_shell_access():
 def test_the_open_command_tells_the_assistant_to_stay_out_of_the_vault():
     flat = " ".join(COMMAND.split()).lower()   # the sentence wraps across lines
     assert "vault.enc" in flat and "do not try to operate the window" in flat
+
+
+def _probe(env_overrides, expression):
+    import os
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PLUGIN_DATA", "CLAUDE_PLUGIN_ROOT")}
+    env.update(env_overrides)
+    done = subprocess.run([sys.executable, "-c", f"import plugin_launcher; print({expression})"], cwd=str(REPO),
+                          env=env, capture_output=True, text=True, check=True)
+    return done.stdout.strip()
+
+
+def test_an_empty_data_directory_variable_is_treated_as_unset_not_as_the_current_directory():
+    """`--plugin-dir` mode may not export the data directory, and a command substituting it yields an empty
+    string. Path("") is the current directory: a venv created there would litter whatever folder is open."""
+    assert _probe({"CLAUDE_PLUGIN_DATA": ""}, "plugin_launcher.DATA_DIR.name") == ".venv-data"
+    assert _probe({"CLAUDE_PLUGIN_ROOT": ""}, "plugin_launcher.PLUGIN_ROOT == plugin_launcher.Path(plugin_launcher.__file__).resolve().parent") == "True"
+
+
+def test_an_empty_data_directory_is_refused_for_an_installed_plugin(monkeypatch, capsys):
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", "")
+    monkeypatch.setattr(plugin_launcher, "PLUGIN_ROOT",
+                        Path("/home/me/.claude/plugins/cache/thyra-vault/thyra-vault/3.0.0"))
+    with pytest.raises(SystemExit):
+        plugin_launcher._require_data_dir_for_app()
