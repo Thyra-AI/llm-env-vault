@@ -1,4 +1,4 @@
 {
   "includeCoAuthoredBy": false,
-  "disabledMcpjsonServers": ["llm-env-vault"]
+  "disabledMcpjsonServers": ["thyra-vault"]
 }
