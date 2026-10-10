@@ -6,6 +6,16 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The workflow only reads the repository; nothing here needs to push, comment or
+# publish, so the token gets no more than that.
+permissions:
+  contents: read
+
+env:
+  # mcp_server rate-limits consent dialogs (a defence against a looping assistant).
+  # The standalone test scripts below open far more than eight FAKE ones in one process.
+  THYRA_VAULT_DIALOG_LIMIT: "0"
+
 jobs:
   # The path users actually get: Windows, dependencies installed from the
   # hash-pinned lockfile via --require-hashes, exactly as plugin_launcher.py
@@ -14,9 +24,9 @@ jobs:
     name: tests (windows, hash-pinned lockfile)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.10"
 
@@ -35,16 +45,15 @@ jobs:
           python tests/test_install_migrate_robustness.py
           python tests/test_trust_hardening.py
           python tests/test_store_hardening.py
-          python tests/test_gui_helpers.py
+          python tests/test_uihelpers.py
           python tests/test_redaction.py
           python tests/test_crypto_v2.py
           python tests/test_vault_format.py
           python tests/test_store_v2.py
-          python tests/test_gui_v2.py
+          python tests/test_uihelpers_policy.py
           python tests/test_manage_vault.py
           python tests/test_integration_v2.py
           python tests/test_security_invariants.py
-          python tests/test_swap.py
           python tests/test_consumption_matrix.py
           python tests/test_hardening_161.py
           python tests/test_single_view.py
@@ -52,17 +61,10 @@ jobs:
       - name: Run under pytest
         run: python -m pytest -q
 
-      # tkinter is imported by vault_lib.gui at module scope; tk.Tk() is only
-      # called inside the dialog functions, which the suite monkeypatches. This
-      # asserts the import works headlessly -- if it ever stops, every
-      # secret-touching tool breaks at point of use rather than at startup.
-      - name: Assert tkinter imports headlessly
-        run: python -c "import tkinter; print('tkinter ok')"
 
-  # Broader Python compatibility, unpinned -- this mirrors what non-Windows
-  # installs get (see the dependency-pinning note in README's Security notes).
-  # Not the shipped path; a failure here is a compatibility signal, not a
-  # broken release.
+  # Broader Python compatibility against the NEWEST dependency releases, unpinned: an early
+  # warning when a new release of a dependency breaks us. Not the shipped path (that is the
+  # hash-locked install above); a failure here is a compatibility signal, not a broken release.
   tests-compat:
     name: tests (py${{ matrix.python-version }}, unpinned)
     runs-on: windows-latest
@@ -71,9 +73,9 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -91,14 +93,14 @@ jobs:
     name: validate plugin manifests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
 
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @anthropic-ai/claude-code@2.1.296
 
       - name: Validate plugin manifest
         run: claude plugin validate .claude-plugin/plugin.json --strict
@@ -114,3 +116,68 @@ jobs:
             exit 1
           fi
           echo "ship list clean"
+
+  # The hash-locked install is the shipped path on EVERY platform now, not just Windows:
+  # prove the universal lockfile resolves and the code that matters runs from it. (The
+  # full suite still has Windows-oriented tests, so this runs the platform-independent
+  # ones; the Windows job above runs everything.)
+  tests-lock-posix:
+    name: tests (${{ matrix.os }}, hash-pinned lockfile)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned dependencies
+        run: python -m pip install --require-hashes -r requirements-lock.txt
+
+      - name: Install pytest
+        run: python -m pip install pytest
+
+      - name: Run the platform-independent suites
+        run: >
+          python -m pytest -q
+          tests/test_crypto_v2.py tests/test_store_v2.py tests/test_vault_format.py
+          tests/test_unlock_throttle.py tests/test_items.py tests/test_datadir.py
+          tests/test_appflow.py tests/test_appflow_items.py tests/test_clipboard.py
+          tests/test_webui_flows.py tests/test_webui_server.py tests/test_mcp_over_browser.py
+          tests/test_security_review_fixes.py
+
+  # thyra_vault/web_dist is a committed build of web/. Rebuild it from the lockfile and
+  # fail if it differs, so the page that ships is provably the page in the source.
+  web-bundle-matches-source:
+    name: shipped page matches web/ source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "22"
+
+      - name: Install pnpm
+        run: npm install -g pnpm@10.15.1
+
+      - name: Install web dependencies (no install scripts)
+        working-directory: web
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Rebuild the page
+        working-directory: web
+        run: pnpm build:embed
+
+      - name: Fail if the committed page differs
+        run: |
+          if [ -n "$(git status --porcelain -- thyra_vault/web_dist)" ]; then
+            git status --porcelain -- thyra_vault/web_dist
+            echo "::error::thyra_vault/web_dist does not match a clean build of web/. Run 'pnpm build:embed' in web/ and commit."
+            exit 1
+          fi
+          echo "shipped page is exactly what web/ builds"
