@@ -8,7 +8,7 @@ What this tool promises, what it does not, and what changed when
 ## 1. The invariant
 
 **Real values live in `vault.enc` (ciphertext) and in the memory of a process a human
-explicitly unlocked via a native dialog the agent cannot see or type into. No file an agent can
+explicitly unlocked via a dialog. (Updated for the rename release: the dialog is now a page on a loopback port, not a native window, which is a weaker boundary: see the exception below. The agent still never receives the master password.) No file an agent can
 read holds a real value — placeholders only.**
 
 ### The standing exceptions, in full
@@ -22,7 +22,7 @@ human approves anything.
 | `files=` restored plaintext (a decrypted `.levault`) | 1.5.0 | one command | `finally`: secure_delete, survivors named | none — same |
 
 A third path is not an exception but is worth naming: a **background run's log**
-(`llm-env-vault-run-*.log`) holds whatever the command printed, unredacted, until the process
+(`thyra-vault-run-*.log`) holds whatever the command printed, unredacted, until the process
 exits and a watcher thread redacts it in place. If the server dies first, it stays unredacted.
 
 1.6.0–1.7.1 had a fourth: `swap`, which wrote real values into the project's **own registered
@@ -142,11 +142,11 @@ another session. Those need opposite treatment:
   reported as `legacy_swap_live` and left until the pid goes.
 
 Liveness is decided by pid **and** process start time, so a recycled pid is not mistaken for the
-original server; our own pid with a foreign server id is a dead predecessor. `vault_lib/
+original server; our own pid with a foreign server id is a dead predecessor. `thyra_vault/
 legacy_swap.py` is deprecated and scheduled for removal in 3.0.
 
 With no journal at all — deleted, or never written — nothing can restore the file automatically.
-Re-running `/llm-env-vault:protect` is the documented path: it treats the real values as real
+Re-running `/thyra-vault:protect` is the documented path: it treats the real values as real
 values and re-vaults them.
 
 ---
@@ -166,6 +166,15 @@ values and re-vaults them.
 - **Filesystem forensics.** A value that was ever on disk may persist in the USN journal, Volume
   Shadow Copy, a resident MFT record, the search indexer, AV quarantine or a sync client's
   storage. Rotate anything you believe was exposed; deleting the file is not erasure.
+- **The dialogs are pages on a loopback port, a weaker boundary than the native windows this release removed.**
+  A window no other process can reach cannot be driven by an agent; a page on `127.0.0.1` can be reached by
+  anything on the account that can open a socket, including an agent with a browser or shell tool. The launch
+  code (kept off the browser's command line by a private start page), the bearer token, the Host/Origin/
+  Fetch-Metadata checks, the unlock throttle and the short life of the listener make this hard and detectable,
+  not impossible: a process of the same user that reads the start page before the browser uses it can race the
+  human for the session, and a human who is shown a page they did not expect should close it. What a session
+  alone does NOT give an attacker is the master password, so nothing is unlocked by it. There is no longer a
+  setting that restores a native window. See `thyra_vault/webui/server.py` for the full list of defences.
 - **Trust is a convenience, not a boundary.** It lives in one process's memory and is forgotten
   on exit, but within a session it lets an approved command re-run without a dialog.
 

@@ -2,7 +2,7 @@
 
 ## Getting help
 
-- **Run `/llm-env-vault:doctor` first.** If the tools do not appear, or the server will not start,
+- **Run `/thyra-vault:doctor` first.** If the tools do not appear, or the server will not start,
   it runs the common checks (a `python` on `PATH`, the virtualenv, the dependency install) and
   reports one diagnosis. The README's Troubleshooting section covers the same ground.
 - **Bugs, questions and feature requests:** open an issue at

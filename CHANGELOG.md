@@ -1,11 +1,137 @@
 # Changelog
 
-All notable changes to llm-env-vault are documented here.
+All notable changes to Thyra Vault (the `llm-env-vault` plugin) are documented here.
 
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Note that
 `master` is the release channel: the marketplace entry uses a `"./"` source, which tracks the
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
+
+## [Unreleased]
+
+### Added
+
+- **Browser dialogs, as an alternative to the native window.** Every dialog (unlock and run, add,
+  remove, install, retype, encrypt, decrypt, abandon files, change password, recovery key,
+  recover, manage vault) can now open as a page in your browser, translated into English,
+  Italian, French, German, Spanish and European and Brazilian Portuguese, in light and dark. It
+  is chosen with `LLM_ENV_VAULT_UI` (`auto` by default: the native window where Tkinter and a
+  display exist, the browser otherwise; `tk`; `web`). This makes the plugin usable on a Python
+  without Tk and on a headless machine. See "Browser dialogs" in the README, including why it is
+  a weaker boundary than the native window and what the defences are.
+- **`python -m thyra_vault.webui_demo <dialog>`** to try any dialog against a throwaway vault.
+- **The Thyra Vault app** (`python -m thyra_vault.app`): a password-manager-style window the person opens (never an MCP tool): lock screen, searchable list with a type filter, add / edit / delete, password / passphrase / username generator, settings (language, theme, auto-lock, clipboard wipe, account security including recovery key), live in 7 languages and light/dark. A secret's value never reaches the page: Copy writes it to the OS clipboard from the server (`thyra_vault/clipboard.py`, fed on stdin) and wipes it after a delay if unchanged. The idle auto-lock is enforced server-side; preferences (`ui_prefs.json`) are validated and clamped so a hand-edited file cannot disable the timers. Try it with `python -m thyra_vault.webui_demo app`.
+- **Personal items** in the Thyra Vault app, like a password manager's: **Login, Card, Identity, Note and SSH key**
+  (plus the existing environment secrets), with a type filter, a folder, created/edited history, a read-only view with
+  hidden fields (reveal one field at a time, copy through the server clipboard with the usual wipe) and an edit form
+  pre-filled for the owner. Stored in ONE reserved key of the encrypted vault body (`#items`,
+  `thyra_vault/items.py`): titles are encrypted too, no plaintext file mentions them, every existing tool keeps
+  reading variables only, and `save_secrets` / `change_password` carry the items through untouched. They are never
+  exposed to an assistant (no MCP tool). The idle auto-lock is now enforced on EVERY screen, not just the list, so a
+  revealed field or an open form cannot keep the session alive. Reserved keys are already ignored for variables by 2.x
+  releases that keep the file key in one, so an older 2.x opening a vault with items still sees only its secrets
+  (not tested against every older release).
+- **Vault location** is resolved in `thyra_vault/datadir.py`: `THYRA_VAULT_HOME`, then
+  `CLAUDE_PLUGIN_DATA` (unchanged), then next to the module for a source checkout
+  (unchanged), then the user's data directory when running as an installed package or a
+  frozen executable (`~/.local/share/thyra-vault`, `~/Library/Application Support/Thyra
+  Vault`, `%LOCALAPPDATA%\Thyra Vault`). Without this, `uvx`/`pipx`/a PyInstaller build would
+  create the vault in a cache or temporary extraction directory that is discarded. A new vault
+  directory is created owner-only (0700). Existing installs resolve exactly as before.
+
+### Changed
+
+- **Everything is now called Thyra Vault** (it was `llm-env-vault`): plugin and MCP server id `thyra-vault`,
+  commands `/thyra-vault:protect` and `/thyra-vault:doctor`, Python package `thyra_vault` -> `thyra_vault`
+  (`python -m thyra_vault.app`), environment variables `THYRA_VAULT_*`, temp-file prefixes
+  `thyra-vault-run-*`. **Compatibility:** the old `LLM_ENV_VAULT_*` variables are still read (the new name wins
+  when both are set); old `llm-env-vault-run-*.log` files are still cleaned up; a vault left under the old
+  plugin id's data directory is COPIED to the new one on first start, once, never overwriting a vault and
+  never touching the original. **Deliberately not renamed:** the format identifiers inside `vault.enc` and
+  `.levault` headers and the key-derivation labels (changing them would make existing vaults and recovery
+  keys unreadable), the `# Managed by llm-env-vault` marker in migrated `.env` files, and the GitHub address.
+  To update an existing plugin install, reinstall under the new name (`claude plugin install thyra-vault@thyra-vault`).
+- The pure helpers in `thyra_vault/gui.py` (password policy, display sanitising, recovery-key
+  parsing, manage-menu logic) moved verbatim to `thyra_vault/uihelpers.py` so both dialog sets share
+  one copy. `gui` re-imports every name, so existing references are unchanged.
+- `mcp_server.py` obtains its dialog module from `thyra_vault/uibackend.py` instead of importing
+  `gui` directly.
+- README, PRIVACY and the security posture no longer say the plugin opens no listening port: the
+  optional browser dialog listens on `127.0.0.1` only while a dialog is open.
+
+### Removed
+
+- **The native Tkinter dialogs** (`thyra_vault/gui.py`, ~3 000 lines) and the switch that chose between them and the
+  browser dialogs (`thyra_vault/uibackend.py`, `THYRA_VAULT_UI` / `LLM_ENV_VAULT_UI`). There is now ONE dialog implementation: the
+  local browser pages in `web/` + `thyra_vault/webui/`. **This is a security trade, not just a cleanup:** a native window could
+  not be seen or driven by an AI agent; a page on a loopback port can be reached by anything on the account that can open a
+  socket. The defences (single-use code kept off the command line, bearer token, Host/Origin/Fetch-Metadata checks, unlock
+  throttle, short-lived listener) make that hard and visible, not impossible, and an attacker who wins a session still lacks the
+  master password. See "The dialogs" in the README and `docs/security-posture-2.0.0.md`. Python no longer needs `tkinter`.
+- The Tkinter-only tests (`tests/_tk_checks.py`, the dialog-construction sweep, the static checks on `gui.py`) and the
+  backend-selection tests; the pure-helper tests moved to `tests/test_uihelpers.py` / `test_uihelpers_policy.py`, and the
+  end-to-end MCP-over-browser tests to `tests/test_mcp_over_browser.py`. Security invariants that were about Tk code now
+  check the page (no save/print/download path for the recovery key, a wipe on its copy button, no HTML-injection sinks).
+- Dead code: `uihelpers._validate_password_fields` and `_manage_action_result_keys` (only the Tk dialogs used them),
+  `schema.with_error`, the dev-only mock **gallery** of the web app, six unused UI components (`blur-fade`, `kbd`,
+  `shimmer-text`, `shine-border`, `stepper`, `text-effect`), two unused molecules, and 21 unused translation keys.
+- `/thyra-vault:doctor` no longer checks for `tkinter`; it checks whether a dialog can be shown (a display and a browser).
+- CI: the tkinter import step, and a stale call to `tests/test_swap.py`, which no longer exists.
+
+### Security
+
+Fixes from a five-agent review (MCP boundary, loopback server, crypto/storage, app/clipboard, supply chain).
+Every item has a regression test in `tests/test_security_review_fixes.py` (or the suite named).
+
+- **Trusted-command cache bound to the working folder.** A grant is now also bound to a fingerprint of the folder the
+  command runs in, so "trust `pytest`, let the assistant edit a file it imports, run it again with no dialog" no longer
+  works; the dialog returns with the reason. The approved command's own output does not revoke it; a denied call never
+  re-baselines it. A relative `./run.sh` was resolved against the *server's* folder instead of the command's (so the wrong
+  file was monitored): fixed.
+- **Consent dialog** shows the absolute folder the command runs in and the real path of the program (native and
+  browser). The "forged index hides variables" claim was already covered by the post-unlock disclosure check; kept and tested.
+- **Forged state files.** `resync_targets`/`sync_target_file` only rewrite a file with evidence this vault migrated it (the
+  managed header, or a managed variable holding a placeholder / being captured now): a `targets.json` entry for `~/.bashrc`
+  no longer gets lines appended. The 1.x swap recovery copies the original into `<vault folder>/swap-recovery/` (0600) before
+  blanking anything, and leaves the file alone if it cannot.
+- **Unlock throttle file** (`vault.attempts.json`): the failure count is clamped and the exponent capped (a huge count stalled every
+  unlock for tens of seconds); `NaN`/`Infinity` timestamps and boolean fields no longer disarm the cool-down.
+- **Consent dialogs are rate-limited** (8 per 60 s; `THYRA_VAULT_DIALOG_LIMIT`, `0` = off for tests/CI).
+- **Loopback server.** Failed code attempts can no longer end a session that is already connected; unauthenticated requests are
+  refused before their body is read (and the connection closed); the unauthenticated body is capped at 4 KiB, authenticated at
+  1 MiB (an SSH key plus notes did not fit in 64 KiB); a stalled socket is dropped after 15 s; connection errors no longer print
+  tracebacks to stderr. The launch code is no longer in the browser's command line: the browser opens a private `file://` start
+  page that forwards to it and is deleted once the page connects (the one allowed cross-site request is that top-level page load).
+- **Crypto/storage.** The encrypted body is padded to 4 KiB then powers of two (a reserved `#pad` key), so the file length does not
+  reveal how many items you keep; a missing `vault.enc` is no longer silently replaced by a weaker v1 vault on the next save; lock
+  files are opened without following links, owner-only, regular files only (a symlink or FIFO there no longer redirects or hangs
+  the server); a FIFO or oversized file as an env target is refused before it is read.
+- **Migration from the old plugin id** only adopts a directory named `llm-env-vault-<marketplace>`, real directories and files owned
+  by you (no links), from a fixed list of file names, never overwrites an existing file, and cannot make importing the store fail.
+- **App.** The clipboard wipe survives closing the app (wiped on lock, quit, window close and at exit; a second copy of the same text
+  restarts one timer instead of letting the first wipe early); the generator's copy goes through the same server-side wipe; the idle
+  lock covers the manage/recovery screens, uses wall-clock time and treats a clock set back as idle; the raw recovery key is dropped
+  from memory after the vault is created; `ui_prefs.json` no longer accepts booleans/floats as numbers.
+- **`run_with_env`.** The output redactor also catches a secret inside a larger base64 stream (all three alignments), URL-safe
+  base64, hex, JSON-escaped and percent-encoded spellings; a timed-out run no longer crashes on bytes output.
+- **Supply chain.** `requirements-lock.txt` is now a hash-pinned *universal* lock installed with `--require-hashes` on every
+  platform (it was Windows-only; macOS and Linux installed unpinned), without the unused `mcp[cli]` extra; CI actions pinned by commit,
+  least-privilege token, the Claude Code CLI pinned, a Linux/macOS job installs from the lock, a job rebuilds `web/` and fails if the
+  shipped `thyra_vault/web_dist` differs; `shadcn` pinned; `shadcn-add.mjs` rejects dependency names that are not plain packages.
+
+Known and NOT fixed (documented in the README's Security notes): real values are readable by processes of your own user while a
+command runs (materialized file, a background run's log until it exits, `/proc/<pid>/environ`); the redactor does not cover values
+under 8 characters or arbitrary encodings; editing a personal item pre-fills its hidden fields; the recovery-key copy button wipes
+only while its page is open; the start page can still be read by another process of your own user in the instant before the page
+connects; a screen already sent to the page stays visible until the next action or the page's own timer. The plaintext state files are
+treated as untrusted rather than authenticated (a MAC would need a key an assistant running as you could read as well).
+
+### Notes
+
+- The browser UI's source is in `web/` (Turborepo: Vite, React, shadcn/ui). Its production build is
+  committed as readable text in `thyra_vault/web_dist/`, so installing the plugin needs no Node.
+- An update to a secret no longer shows the current value in the browser dialog; decrypted values
+  are not sent to the page.
 
 ## [2.2.1] — 2026-10-07
 

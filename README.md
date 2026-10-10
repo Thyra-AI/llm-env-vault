@@ -1,10 +1,12 @@
-# llm-env-vault
+# Thyra Vault
 
 **Keep your real `.env` secrets out of your AI coding agent's reach — without breaking your workflow.**
 
-llm-env-vault is an MCP server that replaces the secret values in your `.env` files with harmless numbered placeholders, stores the real values in a password-encrypted local vault, and lets you run real commands with real secrets injected — each time gated by a native GUI password prompt that only *you* can answer.
+Thyra Vault (`thyra-vault`) is an MCP server that replaces the secret values in your `.env` files with harmless numbered placeholders, stores the real values in a password-encrypted local vault, and lets you run real commands with real secrets injected — each time gated by a password prompt, in a small window on your own machine, that only *you* can answer.
 
 Your AI agent sees `DATABASE_URL="value 3"`. Your app, when you deliberately run it through the vault, sees the real thing.
+
+> **Naming.** The product is called **Thyra Vault** (it was `llm-env-vault`). The plugin id is `thyra-vault`, its commands are `/thyra-vault:…`, the Python package is `thyra_vault` and the environment variables are `THYRA_VAULT_*`. **Existing installs keep working:** the old `LLM_ENV_VAULT_*` variables are still read, and on first start the plugin copies a vault left under the old plugin id into its new data directory (the original is never touched). The GitHub repository keeps its current address until it is renamed there. The on-disk format identifiers (`llm-env-vault` inside the vault and encrypted-file headers, the `# Managed by llm-env-vault` marker in migrated `.env` files) are deliberately **unchanged**: they take part in key derivation and in recognising files you already migrated, so renaming them would lock you out.
 
 ---
 
@@ -12,11 +14,11 @@ Your AI agent sees `DATABASE_URL="value 3"`. Your app, when you deliberately run
 
 AI coding agents (Claude Code, Cursor, and friends) routinely read your project files — including `.env`. Every API key, database password, and token in those files ends up in the model's context, in transcripts, possibly in logs. Telling the agent "don't read `.env`" is a suggestion, not a control.
 
-llm-env-vault takes a different approach: **the real values simply aren't in any file the agent can read.** The files it *can* read contain only placeholders. Real values live in an encrypted vault (`vault.enc`) that can only be opened by typing your master password into a GUI dialog — a dialog the agent cannot see or type into.
+thyra-vault takes a different approach: **the real values simply aren't in any file the agent can read.** The files it *can* read contain only placeholders. Real values live in an encrypted vault (`vault.enc`) that can only be opened by typing your master password into a GUI dialog — a dialog the agent cannot see or type into.
 
 ### What is MCP?
 
-[MCP (Model Context Protocol)](https://modelcontextprotocol.io/) is an open standard that lets AI assistants call external tools. An MCP *server* is a small local program that exposes tools; the assistant can invoke them, but only through the tool interface. llm-env-vault is an MCP server: the agent can *request* things like "run this command with secrets injected," but the human-facing password dialog is what actually authorizes it.
+[MCP (Model Context Protocol)](https://modelcontextprotocol.io/) is an open standard that lets AI assistants call external tools. An MCP *server* is a small local program that exposes tools; the assistant can invoke them, but only through the tool interface. thyra-vault is an MCP server: the agent can *request* things like "run this command with secrets injected," but the human-facing password dialog is what actually authorizes it.
 
 ---
 
@@ -79,29 +81,29 @@ The repo is a real Claude Code plugin and doubles as its own single-plugin marke
 
 ```
 /plugin marketplace add Thyra-AI/llm-env-vault
-/plugin install llm-env-vault@llm-env-vault
+/plugin install thyra-vault@thyra-vault
 ```
 
 Or non-interactively:
 
 ```bash
 claude plugin marketplace add Thyra-AI/llm-env-vault
-claude plugin install llm-env-vault@llm-env-vault --scope user
+claude plugin install thyra-vault@thyra-vault --scope user
 ```
 
 `--scope user` (the default) makes it available in **every** project you open — which is the point, since it protects other projects' `.env` files, not just this repo's.
 
-**Platform support: Windows is the tested and supported platform.** That's where the test suite runs and the only platform where dependencies install from the hash-pinned lockfile. The plugin's `.mcp.json` launches the launcher with a bare `python`, so on macOS and Linux you need a **`python`** on your PATH — `python3` alone is not enough, and if that's all you have the server fails to start with an unhelpful "MCP server not connected". Everything else is cross-platform (the dialogs are stdlib Tkinter), but treat non-Windows as untested. `/llm-env-vault:doctor` diagnoses exactly this case.
+**Platform support: Windows is the tested and supported platform.** That's where the test suite runs and the only platform where dependencies install from the hash-pinned lockfile. The plugin's `.mcp.json` launches the launcher with a bare `python`, so on macOS and Linux you need a **`python`** on your PATH — `python3` alone is not enough, and if that's all you have the server fails to start with an unhelpful "MCP server not connected". Everything else is cross-platform (the dialogs are local browser pages), but treat non-Windows as untested. `/thyra-vault:doctor` diagnoses exactly this case.
 
-**Restart Claude Code Desktop (CCD) after installing.** A running CCD session doesn't pick up newly-registered MCP servers automatically — restart CCD (or reload the window) after `/plugin install`, or `llm-env-vault`'s tools won't show up as available yet.
+**Restart Claude Code Desktop (CCD) after installing.** A running CCD session doesn't pick up newly-registered MCP servers automatically — restart CCD (or reload the window) after `/plugin install`, or `thyra-vault`'s tools won't show up as available yet.
 
-**First run is slower on purpose:** Claude Code auto-installs Node.js plugin dependencies but has no equivalent for Python, so the plugin ships a launcher (`plugin_launcher.py`) that, on first run, creates a venv in the plugin's persistent data directory (`${CLAUDE_PLUGIN_DATA}`, survives updates), installs dependencies into it (from `requirements-lock.txt` on Windows — hash-pinned via `pip install --require-hashes` — or `requirements.txt` elsewhere), and then execs the real server from that venv. A stamp file means it only reinstalls when the plugin is actually updated (a new version-scoped install directory) — every subsequent run is instant, and a plain local edit to the requirements file doesn't trigger anything on its own. The only prerequisite is a `python` on your PATH — see the platform note above, since on macOS/Linux that specifically means `python` and not just `python3`.
+**First run is slower on purpose:** Claude Code auto-installs Node.js plugin dependencies but has no equivalent for Python, so the plugin ships a launcher (`plugin_launcher.py`) that, on first run, creates a venv in the plugin's persistent data directory (`${CLAUDE_PLUGIN_DATA}`, survives updates), installs dependencies into it (from `requirements-lock.txt`, a hash-pinned universal lockfile, via `--require-hashes` on every platform), and then execs the real server from that venv. A stamp file means it only reinstalls when the plugin is actually updated (a new version-scoped install directory) — every subsequent run is instant, and a plain local edit to the requirements file doesn't trigger anything on its own. The only prerequisite is a `python` on your PATH — see the platform note above, since on macOS/Linux that specifically means `python` and not just `python3`.
 
 Update / remove like any plugin:
 
 ```bash
-claude plugin update llm-env-vault@llm-env-vault
-claude plugin uninstall llm-env-vault@llm-env-vault
+claude plugin update thyra-vault@thyra-vault
+claude plugin uninstall thyra-vault@thyra-vault
 ```
 
 ### Manual setup
@@ -119,9 +121,9 @@ Then point your MCP client's standard `mcpServers` config at the venv's Python r
 ```json
 {
   "mcpServers": {
-    "llm-env-vault": {
-      "command": "C:\\path\\to\\llm-env-vault\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\path\\to\\llm-env-vault\\mcp_server.py"]
+    "thyra-vault": {
+      "command": "C:\\path\\to\\thyra-vault\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\path\\to\\thyra-vault\\mcp_server.py"]
     }
   }
 }
@@ -130,7 +132,7 @@ Then point your MCP client's standard `mcpServers` config at the venv's Python r
 For Claude Code specifically:
 
 ```bash
-claude mcp add llm-env-vault --scope user -- "C:\path\to\llm-env-vault\.venv\Scripts\python.exe" "C:\path\to\llm-env-vault\mcp_server.py"
+claude mcp add thyra-vault --scope user -- "C:\path\to\thyra-vault\.venv\Scripts\python.exe" "C:\path\to\thyra-vault\mcp_server.py"
 ```
 
 You can also run it directly with no client for local testing: `python mcp_server.py`.
@@ -143,19 +145,20 @@ Stated plainly, so you can decide whether to install it. Everything below was ch
 
 **What runs on your machine**
 
-- **One local MCP server process**, started by Claude Code over stdio (`python plugin_launcher.py`, which hands off to `mcp_server.py`). It talks only to Claude Code through that pipe; it opens no listening port and no network connection of its own.
-- **`plugin_launcher.py`**, on first run and again after a real plugin update: creates a virtualenv under `${CLAUDE_PLUGIN_DATA}/venv` and installs `cryptography` and `mcp[cli]` (plus their dependencies) from **PyPI** with `pip` — or with `uv` if one is on your `PATH`. On Windows this uses the hash-pinned `requirements-lock.txt` with `--require-hashes`; on macOS and Linux it uses the unpinned `requirements.txt`. Its output is logged to `${CLAUDE_PLUGIN_DATA}/provision.log`.
-- **Native Tkinter dialogs** (the Python standard library) for every password prompt and confirmation. They are local windows only.
+- **One local MCP server process**, started by Claude Code over stdio (`python plugin_launcher.py`, which hands off to `mcp_server.py`). It talks only to Claude Code through that pipe and makes no outbound network connection of its own. It opens no listening port while idle; the one exception is a dialog, described under [The dialogs](#the-dialogs), which listens on `127.0.0.1` only, only while it is open.
+- **`plugin_launcher.py`**, on first run and again after a real plugin update: creates a virtualenv under `${CLAUDE_PLUGIN_DATA}/venv` and installs `cryptography` and `mcp` (plus their dependencies) from **PyPI** with `pip` — or with `uv` if one is on your `PATH` — from the hash-pinned `requirements-lock.txt` with `--require-hashes`, on every platform. Its output is logged to `${CLAUDE_PLUGIN_DATA}/provision.log`.
+- **The Thyra Vault app**, only when you run `python -m thyra_vault.app` yourself ([details](#the-thyra-vault-app-you-open-it)): the same loopback page, plus a clipboard write through your OS clipboard tool when you press Copy.
+- **The dialogs**, for every password prompt and confirmation, are small local web pages served from a loopback-only port on your own machine for as long as the dialog is open (see [The dialogs](#the-dialogs)). They need a browser (a Chromium-based one gives a small app window, any other opens a tab) and a display.
 - **Commands you approve.** `run_with_env` runs the command the agent proposes, with real values injected, only after you click Allow in a dialog. That command is yours: whatever network access *it* makes is outside this plugin's control. The plugin also runs `git` locally (read-only status queries, with hooks disabled) to tell whether a file is tracked or ignored.
 
 **What it reads and writes**
 
 - **Vault files** (see the table above) under `${CLAUDE_PLUGIN_DATA}/vault` for the plugin, or next to the repo for a manual setup — `vault.enc`, `vault.salt`, the placeholder index, and the small bookkeeping files listed there.
 - **Your `.env` files**, only the ones you migrate with `install_migrate`: read to import values, rewritten to hold placeholders. **Files you encrypt** with `encrypt_file` are replaced by a `.levault` next to them; `decrypt_file` and the `files` option of `run_with_env` write plaintext back out, behind a dialog.
-- **Your OS temp directory:** a log for each `background=True` run (`llm-env-vault-run-*.log`, redacted in place when the process exits, stale ones deleted automatically) and an empty directory used to disable git hooks. During a `materialize` run a target file holding real values exists only while the command runs.
+- **Your OS temp directory:** a log for each `background=True` run (`thyra-vault-run-*.log`, redacted in place when the process exits, stale ones deleted automatically) and an empty directory used to disable git hooks. During a `materialize` run a target file holding real values exists only while the command runs.
 - **Memory only:** the master password (in a dialog, for one prompt) and the 8-hour "trusted command" cache. Neither is written to disk.
 
-**Network traffic.** The only network access in this plugin's own code is the dependency install from PyPI described above (and the install tool's own package index requests). The server code contains no HTTP, socket or URL-fetching calls, and nothing is sent to the plugin's authors or any third party. **There is no telemetry, analytics, crash reporting or update check.** Updates happen only when you run `claude plugin update`. See [PRIVACY.md](PRIVACY.md) for the data-handling statement and [SUPPORT.md](SUPPORT.md) for how to get help or report a security issue.
+**Network traffic.** The only network access in this plugin's own code is the dependency install from PyPI described above (and the install tool's own package index requests). The server code makes no outbound HTTP, socket or URL-fetching calls. Its only socket is the optional browser dialog's listener, bound to `127.0.0.1` (never reachable from another machine) and closed when the dialog ends. Nothing is sent to the plugin's authors or any third party. **There is no telemetry, analytics, crash reporting or update check.** Updates happen only when you run `claude plugin update`. See [PRIVACY.md](PRIVACY.md) for the data-handling statement and [SUPPORT.md](SUPPORT.md) for how to get help or report a security issue.
 
 ---
 
@@ -173,7 +176,7 @@ Stated plainly, so you can decide whether to install it. Everything below was ch
 
 ## Tools
 
-All GUI dialogs run synchronously on the server's main thread by design (Tkinter isn't safe off its owning thread), so only one dialog/tool call is in flight at a time — fine for the single-agent, one-call-at-a-time usage this is built for.
+A dialog blocks its tool call until you answer (the loopback server that serves the page runs on its own thread), so only one dialog/tool call is in flight at a time — fine for the single-agent, one-call-at-a-time usage this is built for.
 
 ### `vault_status()`
 
@@ -219,7 +222,7 @@ written before the change and deleted once read-back verification passes.
 **Recovery key setup:** generates 160 bits of entropy, displayed as `RK1` plus 8 groups of 4 Crockford
 base32 characters and a 4-character checksum. A 4-character slot id makes a stale printout
 identifiable. The setup ceremony requires re-entering the full key from paper before it is accepted.
-Shown only in a native dialog with no copy, save, or print controls.
+Shown only in a dialog, with no save or print control (its one copy button wipes the clipboard again on a timer).
 
 **v1 → v2 upgrade:** rewrites `vault.enc` with the versioned header, AES-256-GCM body, and envelope
 encryption. See [Vault format upgrade](#vault-format-upgrade-v1--v2) below for the full implications.
@@ -377,7 +380,7 @@ If a pre-2.0 server crashed while it had real values swapped into a `.env`, 2.0 
 that up: the journal is restored on server start, by the next tool call in any session, or with
 `python mcp_server.py --recover`. A pre-2.0 server that is *still running* is left alone and
 reported as `legacy_swap_live` until it exits. With no journal at all, re-run
-`/llm-env-vault:protect`, which treats the real values as real values and re-vaults them.
+`/thyra-vault:protect`, which treats the real values as real values and re-vaults them.
 
 ### Which consumers need which mode
 
@@ -562,7 +565,7 @@ stronger KDF and AES-256-GCM authentication, or to enable the recovery key.
 Two slash commands ship with the plugin. Everything else is done by asking normally — the tools
 above are the interface, and wrapping each one in a command would just make it longer to type.
 
-### `/llm-env-vault:protect`
+### `/thyra-vault:protect`
 
 Finds every `.env` in the current project and walks them through `install_migrate` one at a time.
 This exists because `install_migrate` takes one path and does no discovery of its own — and
@@ -572,10 +575,10 @@ every file-reading tool, so its discovery path *cannot* read a candidate's conte
 to. It reports paths, migrates each one behind the usual dialog, resyncs if more than one file
 moved, and tells you which now-placeholder-only files are safe to commit.
 
-### `/llm-env-vault:doctor`
+### `/thyra-vault:doctor`
 
 Diagnoses a server that didn't start: checks whether the tools are present at all, finds and reads
-`provision.log`, verifies there's a usable `python` on PATH and that it has `tkinter`, and
+`provision.log`, verifies there's a usable `python` on PATH, that a dialog can be shown (a display and a browser), and
 explains the two known startup failures (provisioning interrupted by a startup timeout, and CCD
 not restarted after install). This is the one thing that can't be a tool — when provisioning
 fails, every tool disappears, and nothing that runs *through* the server can report on the
@@ -590,6 +593,8 @@ Check it, click Allow once, and identical future calls auto-run with no dialog. 
 a machine suspend nor a clock adjustment extends it.
 
 **"Exact" means exact.** The full argument list, `cwd`, `only_vars`, `materialize`, `background` and `files` together form the trusted signature — change any one and a fresh Allow is required. `only_vars=[]` and `only_vars` omitted are deliberately different signatures even though both are falsy in Python, because they authorize very different exposure.
+
+**Trust is also bound to the folder the command runs in.** Hashing the program and the files named on the command line is not enough: `python app.py`, `pytest`, `npm test`, `bash run.sh` and `make` all load code the command line never mentions, so "trust once, let the assistant edit a file it imports, run the same command again" used to run with your secrets and no dialog. A grant now also records a fingerprint of the working folder (name, size and modification time of every file, plus link targets), and any difference revokes it and brings the dialog back, with the reason. The command's own output does not count as an edit: the fingerprint is re-taken after a run that really happened, never after a denied one. Not covered, honestly: dependency and cache folders (`node_modules`, `.venv`, `.git`, `__pycache__`, ... are skipped), files outside the folder, and a change that keeps a file's size *and* timestamp. A folder too big to look at quickly (over 20 000 files) is simply asked about every time. The dialog also shows the folder it runs in and the real path of the program, since a relative `./run.sh` resolves against a folder the assistant chooses.
 
 **A run that decrypts files is never trusted.** If `files` is non-empty the checkbox isn't even
 offered, and trust is never consulted — you are asked every single time. An 8-hour unattended grant
@@ -629,7 +634,7 @@ boundaries of the tracking, surfaced in the trust note when they apply:
   setup, a shell builtin), it isn't drift-monitored — the trust-grant note says so explicitly
   when it applies.
 
-**The vault matters too.** Adding, removing, or rotating any secret drops the *entire* trust cache immediately — the cached decrypted values a trusted command would inject are now stale. The next trusted run needs the password again. Cached values are also scoped to exactly what each trusted command was approved to see (a command trusted with a narrow `only_vars` doesn't leave the rest of the vault resident in memory too) and kept obfuscated in memory, not as plain, greppable text — see `vault_lib/trust.py`'s own comments for exactly what that obfuscation does and doesn't protect against (short version: it raises the bar against passive exposure like crash dumps, not against a targeted attacker who can already read this process's memory).
+**The vault matters too.** Adding, removing, or rotating any secret drops the *entire* trust cache immediately — the cached decrypted values a trusted command would inject are now stale. The next trusted run needs the password again. Cached values are also scoped to exactly what each trusted command was approved to see (a command trusted with a narrow `only_vars` doesn't leave the rest of the vault resident in memory too) and kept obfuscated in memory, not as plain, greppable text — see `thyra_vault/trust.py`'s own comments for exactly what that obfuscation does and doesn't protect against (short version: it raises the bar against passive exposure like crash dumps, not against a targeted attacker who can already read this process's memory).
 
 **This is a convenience feature, not a security boundary — deliberately.** Everything is
 time-limited (8-hour TTL), in-memory, and gone on restart. Making it survive a restart with zero prompts would require persisting something capable of decrypting the vault (the password, the derived key, or equivalent), which breaks the one real invariant this project is built on: the master password never touches disk. Any persisted equivalent would ultimately be usable in plaintext-equivalent form by any process running under your OS account — the same account the AI agent runs as. Against an actively malicious agent with local code execution, no purely local/software mechanism is a real boundary; genuine protection there would need a separate, more-privileged OS principal gated by hardware-backed human presence (e.g. Windows Hello), which is out of scope. Use trusted commands to stop re-typing your password; don't rely on them to stop an agent already working against you.
@@ -638,17 +643,67 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
 
 ---
 
+## The dialogs
+
+Every prompt that touches a secret is a dialog: a small **local web page** (translated into English, Italian, French, German, Spanish and both Portuguese variants, light and dark). When a tool needs you, the server starts a one-shot web server on `127.0.0.1`, opens your browser at it (in a Chromium-based browser — Chrome, Edge, Brave, Chromium — as a small app window with its own throwaway profile; in any other browser as a tab), and waits. You type into the page; the vault work happens inside the server process, and when you finish (or close the window) the server goes away. The page never holds vault logic: it only draws the screens Python sends it.
+
+Earlier releases also had native Tkinter windows, which an AI agent could neither see nor drive. They are gone: there is now one dialog implementation, and it lives on a local port. **That is a weaker boundary than a window no other process can reach, and you should know it.** A page on a local port can be reached by anything on your machine that can open a socket, including an assistant with a browser or shell tool. The defences make that hard and visible, not impossible:
+
+- bound to `127.0.0.1` on a random port, closed when the dialog ends or its window goes silent;
+- a **single-use launch code** in the URL `#fragment` (never sent to any server), swapped once for a session token; a second use fails loudly, so a raced link shows up as an error page. The browser is not started with that URL on its command line (which any process could read in the process list): it is given a tiny local start page (`file://`, in a private temp folder, deleted the moment the page connects) that forwards to it. Another process **of your own user** could still read that file in the instant before the page connects, so this narrows the window rather than closing it; failed code attempts never end a session that is already connected;
+- every API call needs that token; `Host`, `Origin` and `Sec-Fetch-Site` are checked (DNS-rebinding and cross-site requests are refused); request bodies must be JSON; there are no CORS headers;
+- passwords and decrypted values are never put in a URL, a log line or a response; the page is shown a secret only where the dialog exists to show it (the recovery key you are about to write down);
+- a strict `Content-Security-Policy`, no third-party scripts or fonts, and a build you can read: the shipped page in `thyra_vault/web_dist/` is unminified text, built from `web/` (a CI job rebuilds it and fails if it differs).
+
+What an attacker who wins the race for a session still cannot do: unlock anything without your master password, which the unlock throttle (a doubling cool-down after five wrong attempts) protects from guessing through the page. It can deny you the dialog, and it can use a session you have already unlocked. If an assistant with a shell or browser tool is part of your threat model, treat the master password and the unlocked window accordingly, and do not leave the app unlocked.
+
+Environment: `THYRA_VAULT_NO_BROWSER=1` prints the link instead of opening anything (for a headless machine, open it from another one); `THYRA_VAULT_WINDOW=tab` forces a tab instead of an app window; `THYRA_VAULT_WEB_ASSETS=<dir>` serves another build of the page.
+
+Try the dialogs without an assistant, against a throwaway vault in a temporary directory:
+
+```bash
+python -m thyra_vault.webui_demo --list
+python -m thyra_vault.webui_demo unlock-run     # the demo master password is printed
+```
+
+Rebuilding the page needs Node and pnpm and is only for development: `cd web && pnpm install && pnpm build:embed` (see `web/README.md`). Users of the plugin never need either.
+
+## The Thyra Vault app (you open it)
+
+Separate from the dialogs an assistant triggers, there is an app **you** open: a small window in the style of a password-manager popup, with a lock screen, your secrets as a searchable list (filter by type), add / edit / delete, a password and passphrase generator, and settings (language, theme, auto-lock, clipboard wipe, account security).
+
+```bash
+python -m thyra_vault.app            # your real vault
+python -m thyra_vault.app --where    # print the vault folder and exit
+python -m thyra_vault.webui_demo app # a throwaway demo vault (the demo password is printed)
+```
+
+It is a command you run, **not an MCP tool**, on purpose: the app can put a secret on your clipboard, and an assistant must not be able to open it.
+
+- **Besides environment secrets, it holds personal items**: logins, cards, identities, notes and SSH keys (each with its own fields, a folder and created/edited times). They are for **you only**: they live encrypted inside `vault.enc` (one reserved key in the body, so even their titles are encrypted), they are never in the plaintext index, no MCP tool can list, read or change them, and `run_with_env` cannot see them. A hidden field (a password, a card number, a note's text, a private key) reaches the page **only after you press the eye on that one field**, and is forgotten when you leave the item, lock, or the idle limit passes. Editing an item pre-fills its form for you, the one other time an item's text is sent. Copy still goes through the server's clipboard write.
+- **A value never reaches the page** for an environment secret. The list shows names, placeholder numbers, a type guessed from the name and the files a secret is used in. "Copy" asks the server to write the value to your system clipboard (`wl-copy`, `xclip`/`xsel`, `pbcopy` or PowerShell, fed on stdin, never on a command line) and to wipe it again after 10 s to 2 min (default 30 s), only if the clipboard still holds it. There is no "show value". If no clipboard tool is installed the app says so and copies nothing (on Linux: `wl-clipboard` or `xclip`). Any program that can read the clipboard can read the value while it is there, and Windows clipboard history may keep a copy this app cannot erase.
+- **It locks itself** after 15 minutes without input by default (1 to 60). The server enforces this too, so stopping the page's timer does not keep the vault open; the master password and the decrypted values are dropped on lock.
+- **Writes are safe to interleave**: every change re-decrypts the vault first, so it never overwrites something another process saved meanwhile.
+- **Preferences** (`ui_prefs.json` next to the vault) are plaintext, like the index. Every value is checked against a fixed list or clamped, so a hand-edited file cannot switch the lock or the clipboard wipe off.
+- The caveats in [The dialogs](#the-dialogs) apply here too: it is a loopback page.
+
+### Where the vault lives
+
+`THYRA_VAULT_HOME` if set; else `${CLAUDE_PLUGIN_DATA}/vault` (the plugin, unchanged); else next to the code for a source checkout (unchanged); else your user data directory when running as an installed package or a frozen executable: `~/.local/share/thyra-vault`, `~/Library/Application Support/Thyra Vault` or `%LOCALAPPDATA%\Thyra Vault`. A newly created vault directory is owner-only (0700).
+
+---
+
 ## Security notes
 
 - **Threat model:** protects against an AI agent (or anyone with filesystem read access) harvesting real values from files. Does **not** protect against someone who already has your master password, or an agent granted the ability to type into GUI windows on your behalf (e.g. computer-use tooling) — don't grant that.
-- **"The agent can edit this tool's own source" is a sharper non-boundary than it sounds — mitigated, not eliminated.** `plugin_launcher.py` used to re-run `pip install -r requirements.txt` automatically whenever that file's content hash changed, on every server start — meaning an agent with filesystem write access to an *installed* plugin's `requirements.txt` (the same access the "don't protect against editing source" threat model already excludes) could get it silently pip-installed on the very next restart, with no real `claude plugin update` involved. Two reductions, both confirmed by a red-team audit: (1) the installed-plugin trigger is now keyed on `CLAUDE_PLUGIN_ROOT`'s own path, not the requirements content — a real update always moves the plugin to a new version-scoped directory, so editing `requirements.txt` alone no longer triggers anything; (2) on Windows, dependencies install from `requirements-lock.txt`, a hash-pinned lockfile (every package and transitive dependency pinned to an exact version with sha256 hashes for every published artifact) via `pip install --require-hashes`, closing the separate supply-chain risk of a compromised/typosquatted PyPI upload being pulled in silently. Neither makes "an agent can edit this tool's own source" a real boundary — an agent with that access can still edit `plugin_launcher.py` itself, or any other file — but both shrink the auto-triggered, no-real-event attack surface that existed on top of it.
-- **Dependency pinning is Windows-only.** The hash-pinned `requirements-lock.txt` described above is scoped to Windows, because `pywin32` (a transitive `mcp[cli]` dependency) only publishes wheels there and a lockfile that can't resolve is worse than none. On macOS and Linux the launcher installs from the unpinned `requirements.txt` instead, so **those installs get no hash verification** and the supply-chain mitigation above does not apply to them. This is the concrete security cost of the Windows-first scoping, not just a packaging detail.
+- **"The agent can edit this tool's own source" is a sharper non-boundary than it sounds — mitigated, not eliminated.** `plugin_launcher.py` used to re-run `pip install -r requirements.txt` automatically whenever that file's content hash changed, on every server start — meaning an agent with filesystem write access to an *installed* plugin's `requirements.txt` (the same access the "don't protect against editing source" threat model already excludes) could get it silently pip-installed on the very next restart, with no real `claude plugin update` involved. Two reductions, both confirmed by a red-team audit: (1) the installed-plugin trigger is now keyed on `CLAUDE_PLUGIN_ROOT`'s own path, not the requirements content — a real update always moves the plugin to a new version-scoped directory, so editing `requirements.txt` alone no longer triggers anything; (2) dependencies install from `requirements-lock.txt`, a hash-pinned lockfile (every package and transitive dependency pinned to an exact version with sha256 hashes for every published artifact) via `pip install --require-hashes`, closing the separate supply-chain risk of a compromised/typosquatted PyPI upload being pulled in silently. Neither makes "an agent can edit this tool's own source" a real boundary — an agent with that access can still edit `plugin_launcher.py` itself, or any other file — but both shrink the auto-triggered, no-real-event attack surface that existed on top of it.
+- **Dependencies are hash-pinned on every platform now.** `requirements-lock.txt` is a universal lockfile (environment markers for Windows-only and old-Python-only packages, resolved for Python 3.10 and newer), installed with `--require-hashes` by the launcher. It used to be Windows-only; macOS and Linux installed unpinned. The `[cli]` extra of `mcp` (typer, rich, ...) is no longer installed because the server does not use it. The lock is regenerated by hand (command in its header) and the full suite is run from an environment installed from it. Not covered: the tools you use to install (`pip`, `uv`), and a lockfile only protects against a package changing after it was locked, not against a package that was already malicious then.
 - **Assume `vault.enc` is exfiltratable, and pick your password accordingly.** An agent — or
   anyone with filesystem read access — can copy `vault.enc`. Decryption then depends entirely on
   the master password, and that attack happens offline where no dialog stands in the way. The
   enforced minimum is only **5 characters**, chosen deliberately for memorability: the adversary
-  this tool is built against is an AI agent, which cannot see or drive the native dialog and so
-  cannot attack the password at all, while a password you cannot remember is a certain, permanent
+  this tool is built against is an AI agent, which never sees the password and can guess only through
+  the dialog, where the throttle bounds it, while a password you cannot remember is a certain, permanent
   loss of the vault. That trade only holds while the ciphertext stays on your machine. **A short
   user-chosen password falls to a wordlist in seconds once the file is copied off it**, no matter
   how strong the KDF — so if that is a scenario you care about, choose a long passphrase of your
@@ -727,14 +782,25 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
   HMAC), frozen and unchanged. If `vault.salt` exists but `vault.enc` doesn't, the code refuses to
   regenerate a new salt — that would permanently brick any surviving `vault.enc` backup.
 
+- **What the five-agent security review found, and what was done** (CHANGELOG has the list). Worth knowing in one place:
+  - *Plaintext state an assistant can write* (`vault_index.json`, `targets.json`, `files.json`, `placeholder_shapes.json`, `vault.attempts.json`, `ui_prefs.json`, the swap journal) is never trusted: the attempts file is clamped (a huge count or a `NaN` can no longer stall or disarm the unlock throttle), preferences are validated, and a forged target can no longer make `resync_targets` rewrite an arbitrary file (it only touches a file with evidence this vault migrated it) or the old swap recovery blank a `.env` (it now keeps the original in `<vault folder>/swap-recovery/` first).
+  - *Consent dialogs are rate-limited* (8 a minute by default; `THYRA_VAULT_DIALOG_LIMIT`, 0 = unlimited, is set by whoever starts the server, not by the assistant), so a looping assistant cannot bury you in windows until you click Allow on something.
+  - *The vault file's length* no longer tracks its content: the encrypted body is padded to 4 KiB, then powers of two, because personal items share it.
+  - *Idle auto-lock* is enforced on every app screen, uses wall-clock time (a laptop's sleep counts) and treats a clock set backwards as idle. A screen already sent to the page stays visible until the next action or the page's own timer; the server only refuses what happens next.
+  - *Clipboard:* a copied value is wiped on a timer, when you lock, and when the app exits or its window is closed (the timer used to die with the process). The recovery-key "copy" button still wipes only while its page is open.
+  - *Editing a personal item pre-fills its hidden fields* for you (an unconditional reveal of that item, by design); env secrets are never pre-filled.
+  - *Output redaction* now also covers base64 at every alignment (a secret inside a larger base64 stream), URL-safe base64, hex, JSON-escaped and percent-encoded spellings. It is still a filter, not a boundary: values shorter than 8 characters are not redacted, and a command you approved can print a value in any form it likes.
+  - *While a command runs, its real values are readable by processes of your own user* (the materialized file, a background run's unredacted log until it exits, `/proc/<pid>/environ`). The assistant is such a process if it has a shell. That is inherent in handing a program a secret, not something this tool can prevent; the dialog is the control.
+  - *After the rename, permissions you granted to the old tool names do not carry over* (`mcp__plugin_llm-env-vault_*` matches nothing now). Remove the old allow rules from your settings; they would only matter if some other plugin were named `llm-env-vault`.
+
 ## Known limitations
 
 - **Mode 0600 is not a real guarantee on Windows.** `os.chmod` there can only toggle the read-only attribute; the vault and any materialized file inherit their directory's ACL. On a shared machine, keep the vault (and any `materialize` target) somewhere only your account can read.
 - **`resync_targets` needs no password and trusts `targets.json`/`vault_index.json`.** Both are validated on read (types, names, no control characters), but a sufficiently crafted plaintext file could still point it at an unintended path. Treat write access to this repo's directory as equivalent to write access to the vault.
 - **`resync_targets`' line-matcher isn't multi-line-aware** (unlike `install_migrate`'s initial parser). A managed variable name that also appears inside an unrelated real multi-line value in the same file (a PEM body, embedded JSON) could get that line incorrectly rewritten.
 - **A resync normalizes the whole file's line endings** to its dominant terminator and ensures a trailing newline, even when nothing else changed — harmless to meaning, but can show up as a full-file diff under strict VCS line-ending settings.
-- **Background run logs linger for up to 7 days.** Each `background=True` call leaves an `llm-env-vault-run-*.log` file in the system temp directory. These are reaped opportunistically once they're older than 7 days, but only when a later run happens to trigger the sweep — so a log can sit there indefinitely if you stop using the tool. Since a log can contain the process's real environment if the command prints its config, clear old ones out yourself if that matters to you.
-- **Windows is the only tested platform.** The suite runs on Windows and dependencies are hash-pinned only there (see Security notes). The code is stdlib-portable and the dialogs are plain Tkinter, but macOS and Linux are untested — and the plugin's `.mcp.json` launches a bare `python`, which many such systems don't provide at all. Run `/llm-env-vault:doctor` if the tools don't appear.
+- **Background run logs linger for up to 7 days.** Each `background=True` call leaves an `thyra-vault-run-*.log` file in the system temp directory. These are reaped opportunistically once they're older than 7 days, but only when a later run happens to trigger the sweep — so a log can sit there indefinitely if you stop using the tool. Since a log can contain the process's real environment if the command prints its config, clear old ones out yourself if that matters to you.
+- **Windows is the only tested platform.** The suite runs on Windows; the platform-independent suites also run on Linux and macOS in CI, installed from the hash-pinned lockfile. The code is stdlib-portable and the dialogs are local web pages, but macOS and Linux are untested — and the plugin's `.mcp.json` launches a bare `python`, which many such systems don't provide at all. Run `/thyra-vault:doctor` if the tools don't appear.
 - **One dialog at a time.** GUI prompts run on the server's main thread; concurrent tool calls
   queue behind an open dialog.
 - **The master password and decrypted vault values are Python `str` objects, and CPython provides
@@ -790,7 +856,7 @@ One more honest limit: an auto-allowed run hashes referenced files, then runs th
 
 ## Troubleshooting
 
-Run `/llm-env-vault:doctor` first — it performs every check below and reports one diagnosis.
+Run `/thyra-vault:doctor` first — it performs every check below and reports one diagnosis.
 
 **The tools don't appear at all.** In order of likelihood:
 
@@ -804,9 +870,10 @@ Run `/llm-env-vault:doctor` first — it performs every check below and reports 
    detects this and rebuilds on the next start, so restart and give it time. `provision.log` in
    the plugin's data directory records every attempt, including full pip output.
 
-**The tools appear, but anything touching a secret fails.** Almost always a Python without
-`tkinter` — the consent dialogs are Tkinter, so the server starts fine and then fails at the
-moment of use. `python -c "import tkinter"` confirms it; on Debian/Ubuntu install `python3-tk`.
+**The tools appear, but anything touching a secret fails or nothing opens.** Almost always a machine
+with no display (an SSH session, a container): the dialogs are local browser pages and nothing can show
+them. Set `THYRA_VAULT_NO_BROWSER=1` and the link is printed instead of opened; open it from a browser on
+that machine. The dialog gives up after three minutes if nobody opens the link.
 
 **A trusted command started prompting again.** That's by design: trust is revoked when a file the
 command references changes, when the executable itself changes, or when the vault's contents
@@ -820,15 +887,17 @@ plus additional pytest-only files:
 - `tests/test_trust.py` — trusted-commands / drift-detection feature, vault storage and padding
   behaviour, and plugin-launcher venv provisioning logic. Includes two true end-to-end tests that
   spawn a real child process and assert secret injection on both the fresh-unlock and auto-allowed
-  paths. Fully isolates the real vault (temp dir, no real Tkinter window).
+  paths. Fully isolates the real vault (temp dir, no real window).
 - `tests/test_install_migrate_robustness.py` — OSError robustness (UNC paths, nonexistent paths,
   physical drive paths all return clean error dicts), `sync_target_file`'s mass-removal guard, and
   assertion that credential-shaped text is redacted rather than leaked in parse warnings.
-- `tests/test_trust_hardening.py`, `tests/test_store_hardening.py`, `tests/test_gui_helpers.py`,
+- `tests/test_webui_flows.py`, `tests/test_webui_server.py`, `tests/test_mcp_over_browser.py` — the browser dialogs: every dialog's logic driven as a generator (and asserted never to put a password or secret in a screen), the loopback server's security surface over real HTTP, backend selection, and a real MCP tool run end to end through a simulated browser. Pytest-only.
+- `tests/test_appflow.py`, `tests/test_clipboard.py`, `tests/test_datadir.py` — the Thyra Vault app (lock/unlock, copy never puts a value in a screen, add / edit / delete, server-enforced auto-lock, validated preferences, change password in place), the server-side clipboard (stdin only, wipe only if unchanged) and where the vault lives. Pytest-only.
+- `tests/test_trust_hardening.py`, `tests/test_store_hardening.py`, `tests/test_uihelpers.py`,
   `tests/test_redaction.py` — 1.3.0 security-hardening coverage: TTL enforcement, output
   redaction, dialog sanitizers, and store scoping.
 - `tests/test_crypto_v2.py`, `tests/test_vault_format.py`, `tests/test_store_v2.py`,
-  `tests/test_gui_v2.py`, `tests/test_manage_vault.py`, `tests/test_integration_v2.py` — 1.4.0
+  `tests/test_uihelpers_policy.py`, `tests/test_manage_vault.py`, `tests/test_integration_v2.py` — 1.4.0
   coverage: v2 format round-trips, AES-256-GCM authentication, scrypt KDF, envelope encryption,
   DEK rotation, recovery key setup and use, manage_vault / recover_vault flows, and end-to-end
   tests across both format versions.
