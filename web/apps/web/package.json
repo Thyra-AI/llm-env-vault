@@ -1,0 +1,32 @@
+{
+  "name": "web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "lint": "oxlint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@workspace/i18n": "workspace:*",
+    "@workspace/ui": "workspace:*",
+    "lucide-react": "^0.545.0",
+    "motion": "^12.43.0",
+    "react": "^19",
+    "react-dom": "^19",
+    "sonner": "^2.0.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^5",
+    "oxlint": "^1",
+    "typescript": "~5.9.0",
+    "vite": "^7"
+  }
+}

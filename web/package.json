@@ -1,0 +1,16 @@
+{
+  "name": "thyra-vault-web",
+  "private": true,
+  "packageManager": "pnpm@10.15.1",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "build:embed": "turbo build --filter=web && node scripts/embed.mjs"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.0",
+    "typescript": "~5.9.0"
+  }
+}

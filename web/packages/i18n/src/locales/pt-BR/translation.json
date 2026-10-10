@@ -1,0 +1,449 @@
+{
+  "app": {
+    "name": "Thyra Vault"
+  },
+  "common": {
+    "cancel": "Cancelar",
+    "back": "Voltar",
+    "continue": "Continuar",
+    "allow": "Permitir",
+    "deny": "Negar",
+    "copy": "Copiar",
+    "copied": "Copiado",
+    "show": "Mostrar valor",
+    "hide": "Ocultar valor",
+    "working": "Processando…",
+    "step": "Etapa {{current}} de {{total}}",
+    "language": "Idioma",
+    "theme": "Tema",
+    "light": "Claro",
+    "dark": "Escuro",
+    "system": "Sistema",
+    "close": "Fechar"
+  },
+  "fields": {
+    "masterPassword": "Senha mestra",
+    "confirmPassword": "Confirmar senha",
+    "currentPassword": "Senha atual",
+    "newPassword": "Nova senha (mínimo de {{min}} caracteres)",
+    "confirmNewPassword": "Confirmar nova senha",
+    "recoveryKey": "Chave de recuperação",
+    "command": "Comando",
+    "realValue": "Valor real de {{name}}",
+    "encryptedFile": "Arquivo criptografado",
+    "fileToEncrypt": "Arquivo a criptografar",
+    "encryptedCopy": "A cópia criptografada será gravada em",
+    "restoredTo": "O conteúdo real será gravado em",
+    "sizePerms": "Tamanho {{size}} · Permissões {{mode}}",
+    "permsRestored": "Tamanho {{size}} · Permissões restauradas para {{mode}}"
+  },
+  "errors": {
+    "minLength": "Use pelo menos {{min}} caracteres.",
+    "addPartial": "Salvo no cofre, mas não foi possível atualizar o vault_index.json ou o llm.env: {{message}}. O valor real já está no cofre. Corrija o problema e execute add_secret de novo (ou sync_llm_env) para vinculá-lo a um marcador.",
+    "changedWhileOpen": "{{name}} mudou no cofre enquanto este diálogo estava aberto. Volte e digite a senha novamente para continuar.",
+    "checkWritten": "Marque a caixa para confirmar que você anotou a chave.",
+    "commonPassword": "Esta é uma das senhas mais usadas no mundo. Quem copiar o vault.enc a adivinharia em segundos, por mais forte que seja a criptografia. Escolha outra.",
+    "confirmRequired": "Marque a caixa para confirmar que estes arquivos não existem mais.",
+    "currentEmpty": "Digite a sua senha atual.",
+    "decryptFailed": "Falha ao descriptografar: {{message}}",
+    "decryptPath": "Não foi possível descriptografar {{path}}: {{message}}",
+    "emptyPassword": "Digite uma senha.",
+    "encryptFailed": "Falha ao criptografar: {{message}}",
+    "installPartial": "Salvo no cofre, mas não foi possível reescrever {{file}}: {{message}}. Os valores reais estão seguros. Corrija o problema e execute resync_targets.",
+    "keyInternal": "Erro interno ao verificar a chave. Entre em contato com o suporte.",
+    "keyMismatch": "A chave digitada não corresponde à exibida acima. Confira o que digitou: cada caractere precisa coincidir.",
+    "keyUnexpected": "Não foi possível verificar a chave (erro inesperado).",
+    "leftoverIntact": "A cópia criptografada foi gravada e verificada, mas o original {{name}} não pôde ser removido (talvez esteja aberto em outro programa). Ele ainda contém o segredo real: feche o que o está segurando e exclua-o você mesmo. Seus dados estão seguros de qualquer forma: o arquivo .levault está completo e verificado.",
+    "leftoverOverwritten": "A cópia criptografada foi gravada e verificada. O original {{name}} foi sobrescrito com bytes aleatórios, mas não pôde ser excluído (talvez esteja aberto em outro programa). Ele não contém mais o seu segredo; quem contém é o arquivo .levault. Exclua o resto você mesmo.",
+    "newMismatch": "As novas senhas não coincidem.",
+    "noneInVault": "Nenhuma dessas variáveis está neste cofre.",
+    "passwordMismatch": "As senhas não coincidem.",
+    "recordTypes": "Não foi possível registrar os tipos: {{message}}",
+    "recoveryEmpty": "Digite a chave de recuperação.",
+    "recoveryUnexpected": "Não foi possível verificar a chave de recuperação (erro inesperado).",
+    "reenterKey": "Digite novamente a chave de recuperação a partir do seu papel.",
+    "removePartial": "O segredo já foi removido do cofre (isso não pode ser desfeito), mas o vault_index.json ou o llm.env não puderam ser atualizados: {{message}}. Eles ainda mostram um marcador para um valor que não existe mais. Execute remove_secret de novo para limpar, ou edite o vault_index.json manualmente.",
+    "saveFailed": "Não foi possível salvar: {{message}}",
+    "sidecarMismatch": "{{name}} já existe e não contém o conteúdo atual deste arquivo. Resolva isso manualmente: um dos dois arquivos não é o que você pensa.",
+    "valueEmpty": "Digite o valor do segredo.",
+    "vault": "Erro do cofre: {{message}}"
+  },
+  "unlockRun": {
+    "title": "Desbloquear o cofre para executar o comando",
+    "expose_one": "Vai expor {{count}} variável a este comando.",
+    "expose_other": "Vai expor {{count}} variáveis a este comando.",
+    "output": "A saída deste comando é devolvida ao assistente de IA.",
+    "files_one": "Também descriptografa {{count}} arquivo no disco até o comando terminar.",
+    "files_other": "Também descriptografa {{count}} arquivos no disco até o comando terminar.",
+    "notRedacted": "O conteúdo dos arquivos não é ocultado na saída do comando.",
+    "trust": "Confiar neste comando exato pelas próximas {{hours}} horas (ele roda sem perguntar até lá, ou até este servidor reiniciar, o que vier primeiro)",
+    "submit": "Desbloquear e executar",
+    "filesCleanup": "(excluídos assim que o comando terminar)",
+    "materialize": "Também grava valores secretos reais no disco durante a execução do comando",
+    "materializeExit": "(arquivo excluído assim que o comando terminar)",
+    "materializeOnce": "(esvaziado após as primeiras {{count}} aberturas do arquivo, pelo comando ou, quando não dá para distinguir o leitor, por qualquer programa, ou quando o comando terminar, o que vier primeiro; aberturas detectadas por outros programas aparecem no resultado, e o arquivo é excluído de qualquer forma)",
+    "noTrustFiles": "Esta execução descriptografa arquivos no disco, então não pode ser confiável para reutilização. Você será perguntado todas as vezes.",
+    "cwd": "Roda em",
+    "executable": "Programa"
+  },
+  "setup": {
+    "title": "Crie seu cofre",
+    "intro": "Ainda não existe um cofre. Escolha uma senha mestra (mínimo de {{min}} caracteres).",
+    "recovery": "Configurar uma chave de recuperação em papel (opcional, aumenta a superfície de ataque)"
+  },
+  "confirmAdd": {
+    "title": "Confirmar alteração",
+    "proposal": "Adicionar segredo de {{name}}",
+    "note": "O valor real abaixo é criptografado e nunca é mostrado à IA.",
+    "override": "{{name}} substitui uma variável do sistema e pode afetar comandos posteriores.",
+    "llmEnvReads": "llm.env conterá",
+    "proposalAdd": "Adicionar o segredo de {{name}}",
+    "proposalUpdate": "Atualizar o segredo de {{name}}",
+    "replaces": "Já existe um valor. O novo o substitui; o atual não é mostrado aqui."
+  },
+  "confirmRemove": {
+    "title": "Confirmar remoção",
+    "proposal": "Remover segredo de {{name}}",
+    "irreversible": "Isso não pode ser desfeito. O valor real é apagado do cofre.",
+    "allow": "Permitir remoção",
+    "llmEnvEntry": "Esta entrada do llm.env será excluída"
+  },
+  "typed": {
+    "title": "Confirmar marcadores tipados",
+    "description": "Cada linha ficará exatamente assim em todos os arquivos registrados.",
+    "leaks": "Isso revela o tipo de cada valor, e o esquema de uma URL, a qualquer coisa que possa ler o arquivo, inclusive o assistente de IA: {{kinds}}. Nunca revela o conteúdo."
+  },
+  "install": {
+    "overwrite": "{{count}} nomes são usados por outro projeto e vão sobrescrever o valor dele no cofre.",
+    "cancelNote": "Negar, ou fechar esta janela, cancela tudo.",
+    "aboutMigrate_one": "Você vai migrar {{count}} variável de:",
+    "aboutMigrate_other": "Você vai migrar {{count}} variáveis de:",
+    "aboutRegister": "Você vai registrar para futuros resync_targets:",
+    "confirmMigration": "Confirmar a migração",
+    "confirmRegistration": "Confirmar o registro",
+    "migrateWill": "Permitir vai (1) criptografar no vault.enc os {{count}} valores reais abaixo, legíveis só com a sua senha mestra, e (2) reescrever o arquivo para que cada linha vire VAR=\"value N\". Esse marcador é tudo o que um assistente de IA verá.",
+    "overwriteWarning": "{{count}} nome(s) acima já são usados por outro projeto registrado. Continuar sobrescreve o valor desse projeto no cofre: {{names}}",
+    "overwrites": "sobrescreve o valor usado por {{path}}",
+    "registerWill": "Nenhum segredo novo para migrar. Permitir vai registrar {{file}} para que futuras chamadas de resync_targets o mantenham sincronizado para as variáveis abaixo.",
+    "sensitiveWarning": "{{names}} substituem variáveis de ambiente do sistema ou de execução. Qualquer comando que o run_with_env iniciar depois verá o valor do cofre em vez do valor real do sistema.",
+    "variables": "Variáveis"
+  },
+  "encrypt": {
+    "title": "Confirmar criptografia do arquivo",
+    "destroyed": "O ARQUIVO ORIGINAL SERÁ DESTRUÍDO. Depois que a cópia criptografada for gravada e verificada, {{name}} é sobrescrito com bytes aleatórios e excluído. O único caminho de volta é a senha mestra deste cofre ou a chave de recuperação.",
+    "durabilityCaveat": "Se o vault.enc desta máquina for perdido, este arquivo não poderá ser recuperado. A chave de recuperação sozinha não basta: ela só funciona junto com o vault.enc. Faça backup desse arquivo.",
+    "gitSafe": "O arquivo .levault é apenas texto cifrado e pode ser commitado no git com segurança. O nome dele, porém, revela o nome do arquivo original.",
+    "overwriteCaveat": "A sobrescrita é feita no melhor esforço. Em SSDs e sistemas de arquivos com journaling, os bytes originais podem continuar em áreas que este programa não alcança (nivelamento de desgaste, cópias de sombra, backups, arquivos de swap). Se este arquivo já foi exposto, troque a credencial: não conte com esta exclusão.",
+    "resume": "Já existe uma cópia criptografada deste arquivo, verificada como idêntica ao conteúdo atual: uma execução anterior foi interrompida antes de o original ser destruído. Só falta a exclusão abaixo.",
+    "resumeTitle": "Concluir a criptografia do arquivo",
+    "unlockTitle": "Desbloquear o cofre para criptografar um arquivo"
+  },
+  "decrypt": {
+    "title": "Confirmar descriptografia do arquivo",
+    "warn": "Isso grava um segredo real no disco de forma permanente e não é limpo depois. O assistente de IA pode ver este caminho e foi instruído a não ler o arquivo, mas essa instrução não é imposta.",
+    "leftInPlace": "O arquivo .levault continua onde está; isso não o remove do cofre.",
+    "renamed": "Este arquivo foi criptografado como {{name}}, mas será restaurado com o nome acima. O nome de saída vem do nome do arquivo .levault, não do que há dentro dele.",
+    "unlockTitle": "Desbloquear o cofre para descriptografar um arquivo"
+  },
+  "abandon": {
+    "title": "Abandonar os arquivos inacessíveis?",
+    "warning": "{{count}} arquivos foram criptografados com uma chave antiga. Aposentá-la os torna ilegíveis para sempre, inclusive cópias em backups e no histórico do git.",
+    "confirm": "Esses arquivos estão perdidos para sempre. Abandoná-los.",
+    "action": "Abandonar e aposentar",
+    "onlyIf": "Continue somente se tiver certeza de que estes arquivos não existem mais em lugar nenhum:",
+    "otherwise": "Se algum deles ainda puder existir, cancele: torne-o acessível e execute a rotação novamente."
+  },
+  "changePassword": {
+    "title": "Alterar a senha mestra",
+    "submit": "Alterar senha"
+  },
+  "recoveryKey": {
+    "title": "Guarde sua chave de recuperação",
+    "copy": "Copiar (apagada em {{seconds}} s)",
+    "written": "Anotei em papel",
+    "confirm": "Confirmar: eu a tenho",
+    "groups": "Grupos de 4 caracteres separados por hífens. O último grupo é o checksum.",
+    "later": "Vou configurar depois",
+    "reentry": "Digite novamente a chave completa a partir do seu papel",
+    "slot": "ID do slot: {{id}}. Confira se corresponde a alguma impressão salva para saber se ela está desatualizada.",
+    "steps": "1. Escreva a chave completa no papel e marque a caixa. 2. Digite novamente a chave COMPLETA a partir do seu papel para confirmar que foi copiada corretamente. Conferir só alguns caracteres não prova nada.",
+    "warning": "Depois que esta página fechar, a chave não poderá ser exibida de novo. Anote-a no papel e guarde em local seguro: é a única forma de recuperar o acesso se você esquecer a senha mestra."
+  },
+  "recover": {
+    "title": "Recuperar o acesso",
+    "submit": "Recuperar",
+    "warning": "Use isto somente se esqueceu a senha mestra. Sua chave de recuperação em papel permite definir uma nova."
+  },
+  "manage": {
+    "title": "Gerenciar cofre",
+    "confirm": {
+      "reissue_recovery": "Reemitir chave de recuperação",
+      "retire_file_keys": "Aposentar chaves antigas",
+      "rotate_file_key": "Renovar chave dos arquivos",
+      "setup_recovery": "Criar chave de recuperação",
+      "upgrade_v2": "Atualizar para v2"
+    },
+    "format": "Formato: v{{version}}",
+    "infoSetupRecovery": "Uma chave de recuperação em papel permite redefinir a senha mestra se você a esquecer. Ela realmente aumenta a superfície de ataque: quem encontrar o papel pode redefinir a sua senha. Um cofre só com senha também é uma escolha válida e segura.",
+    "noActions": "Nenhuma ação disponível para o estado atual do cofre.",
+    "recoveryActive": "Slot de recuperação: ativo · id do slot: {{id}} · criado em: {{created}}",
+    "recoveryNone": "Slot de recuperação: não configurado",
+    "titles": {
+      "change_password": "Alterar a senha mestra",
+      "reissue_recovery": "Reemitir a chave de recuperação",
+      "retire_file_keys": "Aposentar chaves antigas de arquivos",
+      "rotate_file_key": "Renovar a chave dos arquivos criptografados",
+      "setup_recovery": "Criar a chave de recuperação em papel",
+      "upgrade_v2": "Atualizar o cofre para v2"
+    },
+    "warnReissue": "Isso gera uma nova chave de recuperação. A sua chave de papel antiga deixa de funcionar imediatamente.",
+    "warnRetire": "Isso exclui permanentemente do cofre todas as chaves antigas de arquivos. Qualquer arquivo .levault ainda criptografado com uma delas, inclusive cópias em outras máquinas, em backups ou no histórico do git, fica permanentemente ilegível. É recusado a menos que todo arquivo registrado já tenha sido migrado para a chave atual e esteja legível agora. Arquivos que o cofre nunca conheceu não podem ser verificados.",
+    "warnRotate": "Alterar a senha mestra NÃO altera a chave que protege os seus arquivos criptografados. Isso é proposital, e é por isso que um .levault commitado no git continua funcionando. Renove essa chave aqui se acreditar que ela pode ter sido exposta. Todo arquivo criptografado que esta máquina encontrar ({{count}} registrados) é recriptografado com uma chave nova. Arquivos ausentes são ignorados e continuam funcionando com a chave antiga, que é mantida. Nada fica ilegível até que você aposente as chaves antigas separadamente.",
+    "warnUpgrade": "Depois da atualização, versões mais antigas deste plugin não conseguirão mais abrir o cofre. Uma versão antiga informa \"Senha incorreta\" mesmo com a senha certa. Não há perda de dados, mas assusta se você não espera. Atualize apenas se todas as suas instalações estiverem em dia."
+  },
+  "strength": {
+    "label": "Força da senha",
+    "weak": "Fraca",
+    "fair": "Razoável",
+    "strong": "Forte"
+  },
+  "toast": {
+    "copied": "Copiado para a área de transferência"
+  },
+  "add": {
+    "aboutAdd": "Você vai adicionar o segredo de {{name}}.",
+    "aboutUpdate": "Você vai atualizar o segredo de {{name}}."
+  },
+  "remove": {
+    "about": "Você vai remover o segredo de {{name}}."
+  },
+  "retype": {
+    "about": "Você vai dar um tipo a {{count}} marcadores, para que um .env só com marcadores possa ser interpretado pelo app que o lê.",
+    "why": "A senha mestra é necessária porque o tipo de um valor só pode ser lido a partir do valor real."
+  },
+  "unlock": {
+    "title": "Desbloquear o cofre"
+  },
+  "done": {
+    "approved": "Pronto",
+    "declined": "Cancelado. Nada foi alterado.",
+    "timeout": "Este diálogo expirou. Nada foi alterado.",
+    "closed": "Este diálogo foi fechado. Nada foi alterado.",
+    "error": "Algo deu errado. Veja os detalhes no seu assistente.",
+    "hint": "Você pode fechar esta aba e voltar ao seu assistente."
+  },
+  "session": {
+    "invalid": "Este link já foi usado ou não é mais válido. Peça ao seu assistente para abrir o diálogo novamente.",
+    "none": "Abra esta página pelo link que o seu assistente fornecer.",
+    "loading": "Conectando…"
+  },
+  "vaultApp": {
+    "title": "Cofre",
+    "lock": {
+      "title": "Seu cofre está bloqueado",
+      "createTitle": "Crie seu cofre",
+      "unlock": "Desbloquear",
+      "createAction": "Criar cofre",
+      "recover": "Recuperar com a chave de recuperação",
+      "or": "ou",
+      "auto": "Bloqueado por inatividade."
+    },
+    "tabs": {
+      "vault": "Cofre",
+      "generator": "Gerador",
+      "settings": "Configurações"
+    },
+    "menu": {
+      "account": "Conta",
+      "close": "Fechar o app"
+    },
+    "vault": {
+      "add": "Adicionar",
+      "search": "Buscar",
+      "type": "Tipo",
+      "allTypes": "Todos os tipos",
+      "emptyTitle": "Ainda não há segredos",
+      "emptyHint": "Adicione seu primeiro segredo para começar.",
+      "noMatch": "Nenhum resultado",
+      "noMatchHint": "Tente outra busca ou outro tipo.",
+      "count_one": "{{count}} item",
+      "count_other": "{{count}} itens",
+      "copy": "Copiar valor",
+      "more": "Mais opções",
+      "edit": "Editar",
+      "copyName": "Copiar nome",
+      "delete": "Excluir",
+      "placeholder": "Marcador {{n}}",
+      "notUsed": "Ainda não usado em nenhum arquivo",
+      "open": "Abrir"
+    },
+    "types": {
+      "apiKey": "Chave de API",
+      "token": "Token",
+      "password": "Senha",
+      "url": "URL",
+      "database": "Banco de dados",
+      "other": "Outro",
+      "secret": "Segredo",
+      "login": "Login",
+      "card": "Cartão",
+      "identity": "Identidade",
+      "note": "Nota",
+      "ssh": "Chave SSH"
+    },
+    "toast": {
+      "saved": "Salvo.",
+      "deleted": "Excluído.",
+      "copied": "Copiado. A área de transferência será limpa em {{seconds}} s.",
+      "copy_unavailable": "Nenhuma ferramenta de área de transferência encontrada. Instale wl-clipboard ou xclip.",
+      "copy_failed": "Não foi possível copiar.",
+      "nameCopied": "Nome copiado."
+    },
+    "form": {
+      "addTitle": "Novo segredo",
+      "editTitle": "Editar segredo",
+      "editing": "Digite um novo valor para {{name}}. O valor atual nunca é exibido.",
+      "name": "Nome",
+      "value": "Valor",
+      "save": "Salvar",
+      "nameInvalid": "Use letras, dígitos e sublinhados, começando por uma letra ou um sublinhado.",
+      "nameExists": "Já existe um segredo chamado {{name}}. Edite-o em vez disso.",
+      "sensitiveAck": "{{name}} altera o comportamento dos programas. Pressione Salvar de novo para confirmar."
+    },
+    "generator": {
+      "password": "Senha",
+      "passphrase": "Frase de acesso",
+      "username": "Nome de usuário",
+      "options": "Opções",
+      "length": "Comprimento",
+      "lengthHint": "O valor tem de estar entre {{min}} e {{max}}.",
+      "include": "Incluir",
+      "minNumbers": "Mínimo de números",
+      "minSpecial": "Mínimo de especiais",
+      "avoidAmbiguous": "Evitar caracteres ambíguos",
+      "words": "Número de palavras",
+      "separator": "Separador de palavras",
+      "capitalize": "Maiúscula inicial",
+      "includeNumber": "Incluir número",
+      "regenerate": "Gerar novamente",
+      "copy": "Copiar",
+      "copied": "Copiado."
+    },
+    "settings": {
+      "accountSecurity": "Segurança da conta",
+      "vaultOptions": "Opções do cofre",
+      "appearance": "Aparência",
+      "about": "Sobre",
+      "lockNow": "Bloquear agora",
+      "autoLock": "Bloquear após inatividade",
+      "autoLockHint": "O cofre bloqueia após este tempo sem atividade.",
+      "minutes_one": "{{count}} minuto",
+      "minutes_other": "{{count}} minutos",
+      "clipboardClear": "Limpar a área de transferência",
+      "clipboardHint": "Um segredo copiado é removido da área de transferência após este tempo.",
+      "seconds_one": "{{count}} segundo",
+      "seconds_other": "{{count}} segundos",
+      "version": "Versão",
+      "format": "Formato do cofre",
+      "secrets": "Itens",
+      "recoveryKey": "Chave de recuperação",
+      "recoveryOn": "Configurada",
+      "recoveryOff": "Não configurada",
+      "location": "Pasta do cofre",
+      "noRecovery": "Nenhuma chave de recuperação configurada.",
+      "noRecoveryAction": "Adicione uma em Segurança da conta."
+    },
+    "result": {
+      "keyMistyped": "Esta chave de recuperação parece mal escrita (a soma de verificação não corresponde). Compare com a sua cópia impressa.",
+      "keyWrong": "Esta chave de recuperação não é válida para este cofre. Se a senha mudou desde a impressão, a chave antiga já não funciona.",
+      "noRecoverySlot": "Este cofre não tem chave de recuperação, então não pode ser recuperado sem a senha mestra.",
+      "damaged": "O arquivo do cofre está danificado ou foi adulterado. Restaure-o a partir de uma cópia de segurança.",
+      "restored": "A operação não foi concluída. O cofre voltou ao estado anterior.",
+      "recovered": "Acesso recuperado. A sua chave de recuperação atual continua funcionando.",
+      "keyNotConfirmed": "A nova chave de recuperação não foi confirmada e não pode voltar a ser mostrada. Emita uma nova em Segurança da conta.",
+      "passwordChanged": "Senha mestra alterada.",
+      "keyIssued": "Chave de recuperação emitida.",
+      "upgraded": "Cofre atualizado para o formato v2.",
+      "rotated": "Chave de arquivos girada. {{count}} arquivo(s) recifrado(s).",
+      "rotatedPartial": "{{count}} arquivo(s) não foram girados e ainda usam a chave antiga.",
+      "retired": "{{count}} chave(s) de arquivos antiga(s) retirada(s).",
+      "nothingToRetire": "Nada para retirar.",
+      "noVault": "Nenhum cofre encontrado."
+    },
+    "item": {
+      "chooseTitle": "Adicionar um item",
+      "chooseHint": "Os segredos ficam disponíveis para o seu assistente de IA como marcadores. Tudo o resto é só para você e nunca lhe é mostrado.",
+      "about": {
+        "secret": "Uma variável de ambiente que o assistente pode usar sem a ver",
+        "login": "Um usuário e uma senha para um site",
+        "card": "Um cartão de pagamento",
+        "identity": "Seu nome, endereço e contatos",
+        "note": "Texto livre, como um código de recuperação ou uma configuração",
+        "ssh": "Uma chave SSH privada e pública"
+      },
+      "add": {
+        "login": "Novo login",
+        "card": "Novo cartão",
+        "identity": "Nova identidade",
+        "note": "Nova nota",
+        "ssh": "Nova chave SSH"
+      },
+      "edit": {
+        "login": "Editar login",
+        "card": "Editar cartão",
+        "identity": "Editar identidade",
+        "note": "Editar nota",
+        "ssh": "Editar chave SSH"
+      },
+      "view": {
+        "login": "Ver login",
+        "card": "Ver cartão",
+        "identity": "Ver identidade",
+        "note": "Ver nota",
+        "ssh": "Ver chave SSH"
+      },
+      "name": "Nome",
+      "noFolder": "Sem pasta",
+      "history": "Histórico do item",
+      "lastEdited": "Última edição",
+      "created": "Criado",
+      "noFields": "Este item ainda não tem conteúdo.",
+      "deleteTitle": "Excluir item",
+      "deleteBody": "Excluir {{name}}? Esta ação não pode ser desfeita.",
+      "corrupted": "Os itens guardados estão num formato que esta versão não entende. Os seus segredos não foram tocados.",
+      "invalid": "{{message}}"
+    },
+    "fields": {
+      "notes": "Notas",
+      "folder": "Pasta",
+      "username": "Nome de usuário",
+      "password": "Senha",
+      "uri": "Site",
+      "holder": "Titular do cartão",
+      "brand": "Marca",
+      "number": "Número do cartão",
+      "expMonth": "Mês de validade",
+      "expYear": "Ano de validade",
+      "code": "Código de segurança",
+      "title": "Título",
+      "firstName": "Nome",
+      "middleName": "Nome do meio",
+      "lastName": "Sobrenome",
+      "email": "E-mail",
+      "phone": "Telefone",
+      "company": "Empresa",
+      "address1": "Endereço 1",
+      "address2": "Endereço 2",
+      "city": "Cidade",
+      "state": "Estado / província",
+      "postalCode": "CEP",
+      "country": "País",
+      "ssn": "CPF / número de seguro social",
+      "passport": "Número do passaporte",
+      "license": "Número da CNH",
+      "privateKey": "Chave privada",
+      "publicKey": "Chave pública",
+      "passphrase": "Frase secreta"
+    }
+  }
+}

@@ -1,0 +1,449 @@
+{
+  "app": {
+    "name": "Thyra Vault"
+  },
+  "common": {
+    "cancel": "Abbrechen",
+    "back": "Zurück",
+    "continue": "Weiter",
+    "allow": "Erlauben",
+    "deny": "Ablehnen",
+    "copy": "Kopieren",
+    "copied": "Kopiert",
+    "show": "Wert anzeigen",
+    "hide": "Wert verbergen",
+    "working": "Wird verarbeitet…",
+    "step": "Schritt {{current}} von {{total}}",
+    "language": "Sprache",
+    "theme": "Design",
+    "light": "Hell",
+    "dark": "Dunkel",
+    "system": "System",
+    "close": "Schließen"
+  },
+  "fields": {
+    "masterPassword": "Master-Passwort",
+    "confirmPassword": "Passwort bestätigen",
+    "currentPassword": "Aktuelles Passwort",
+    "newPassword": "Neues Passwort (mindestens {{min}} Zeichen)",
+    "confirmNewPassword": "Neues Passwort bestätigen",
+    "recoveryKey": "Wiederherstellungsschlüssel",
+    "command": "Befehl",
+    "realValue": "Echter Wert für {{name}}",
+    "encryptedFile": "Verschlüsselte Datei",
+    "fileToEncrypt": "Zu verschlüsselnde Datei",
+    "encryptedCopy": "Die verschlüsselte Kopie wird geschrieben nach",
+    "restoredTo": "Der echte Inhalt wird geschrieben nach",
+    "sizePerms": "Größe {{size}} · Berechtigungen {{mode}}",
+    "permsRestored": "Größe {{size}} · Berechtigungen werden auf {{mode}} zurückgesetzt"
+  },
+  "errors": {
+    "minLength": "Verwende mindestens {{min}} Zeichen.",
+    "addPartial": "Im Tresor gespeichert, aber vault_index.json oder llm.env konnten nicht aktualisiert werden: {{message}}. Der echte Wert liegt jetzt im Tresor. Behebe das Problem und führe add_secret (oder sync_llm_env) erneut aus, um ihn mit einem Platzhalter zu verknüpfen.",
+    "changedWhileOpen": "{{name}} hat sich im Tresor geändert, während dieses Fenster offen war. Gehe zurück und gib das Passwort erneut ein.",
+    "checkWritten": "Setze den Haken, um zu bestätigen, dass du den Schlüssel notiert hast.",
+    "commonPassword": "Das ist eines der weltweit am häufigsten verwendeten Passwörter. Wer vault.enc kopiert, errät es binnen Sekunden, egal wie stark die Verschlüsselung ist. Wähle ein anderes.",
+    "confirmRequired": "Setze den Haken, um zu bestätigen, dass diese Dateien nicht mehr existieren.",
+    "currentEmpty": "Gib dein aktuelles Passwort ein.",
+    "decryptFailed": "Entschlüsselung fehlgeschlagen: {{message}}",
+    "decryptPath": "{{path}} konnte nicht entschlüsselt werden: {{message}}",
+    "emptyPassword": "Gib ein Passwort ein.",
+    "encryptFailed": "Verschlüsselung fehlgeschlagen: {{message}}",
+    "installPartial": "Im Tresor gespeichert, aber {{file}} konnte nicht neu geschrieben werden: {{message}}. Die echten Werte sind sicher. Behebe das Problem und führe resync_targets aus.",
+    "keyInternal": "Interner Fehler bei der Schlüsselprüfung. Wende dich an den Support.",
+    "keyMismatch": "Der eingegebene Schlüssel stimmt nicht mit dem oben angezeigten überein. Prüfe deine Eingabe: Jedes Zeichen muss passen.",
+    "keyUnexpected": "Der Schlüssel konnte nicht geprüft werden (unerwarteter Fehler).",
+    "leftoverIntact": "Die verschlüsselte Kopie wurde geschrieben und geprüft, aber das Original {{name}} konnte nicht entfernt werden (es ist evtl. in einem anderen Programm geöffnet). Es enthält noch das echte Geheimnis: Schließe, was es blockiert, und lösche es selbst. Deine Daten sind in jedem Fall sicher; die .levault-Datei ist vollständig und geprüft.",
+    "leftoverOverwritten": "Die verschlüsselte Kopie wurde geschrieben und geprüft. Das Original {{name}} wurde mit Zufallsbytes überschrieben, konnte aber nicht gelöscht werden (es ist evtl. in einem anderen Programm geöffnet). Es enthält dein Geheimnis nicht mehr, die .levault-Datei schon. Lösche den Rest selbst.",
+    "newMismatch": "Die neuen Passwörter stimmen nicht überein.",
+    "noneInVault": "Keine dieser Variablen befindet sich in diesem Tresor.",
+    "passwordMismatch": "Die Passwörter stimmen nicht überein.",
+    "recordTypes": "Die Typen konnten nicht gespeichert werden: {{message}}",
+    "recoveryEmpty": "Gib den Wiederherstellungsschlüssel ein.",
+    "recoveryUnexpected": "Der Wiederherstellungsschlüssel konnte nicht geprüft werden (unerwarteter Fehler).",
+    "reenterKey": "Gib den Wiederherstellungsschlüssel von deinem Papier erneut ein.",
+    "removePartial": "Das Geheimnis wurde bereits aus dem Tresor entfernt (nicht rückgängig zu machen), aber vault_index.json oder llm.env konnten nicht aktualisiert werden: {{message}}. Sie zeigen noch einen Platzhalter für einen Wert, den es nicht mehr gibt. Führe remove_secret erneut aus, um das aufzuräumen, oder bearbeite vault_index.json von Hand.",
+    "saveFailed": "Speichern fehlgeschlagen: {{message}}",
+    "sidecarMismatch": "{{name}} existiert bereits und enthält nicht den aktuellen Inhalt dieser Datei. Kläre das von Hand: Eine der beiden Dateien ist nicht das, was du denkst.",
+    "valueEmpty": "Gib den Wert des Geheimnisses ein.",
+    "vault": "Tresorfehler: {{message}}"
+  },
+  "unlockRun": {
+    "title": "Tresor entsperren und Befehl ausführen",
+    "expose_one": "Stellt {{count}} Variable für diesen Befehl bereit.",
+    "expose_other": "Stellt {{count}} Variablen für diesen Befehl bereit.",
+    "output": "Die Ausgabe dieses Befehls geht an den KI-Assistenten.",
+    "files_one": "Entschlüsselt außerdem {{count}} Datei auf die Festplatte, bis der Befehl endet.",
+    "files_other": "Entschlüsselt außerdem {{count}} Dateien auf die Festplatte, bis der Befehl endet.",
+    "notRedacted": "Dateiinhalte werden in der Ausgabe des Befehls nicht geschwärzt.",
+    "trust": "Diesem genauen Befehl für die nächsten {{hours}} Stunden vertrauen (er läuft bis dahin ohne Rückfrage, oder bis dieser Server neu startet, je nachdem, was zuerst eintritt)",
+    "submit": "Entsperren und ausführen",
+    "filesCleanup": "(werden gelöscht, sobald der Befehl endet)",
+    "materialize": "Schreibt außerdem echte geheime Werte für die Laufzeit des Befehls auf die Festplatte",
+    "materializeExit": "(Datei wird gelöscht, sobald der Befehl endet)",
+    "materializeOnce": "(geleert nach den ersten {{count}} Öffnungen der Datei durch den Befehl oder, wenn sich der Leser nicht unterscheiden lässt, durch ein beliebiges Programm, oder wenn der Befehl endet, je nachdem, was zuerst eintritt; erkannte Öffnungen durch andere Programme stehen im Ergebnis, und die Datei wird in jedem Fall gelöscht)",
+    "noTrustFiles": "Dieser Lauf entschlüsselt Dateien auf die Festplatte, daher kann ihm nicht für spätere Wiederverwendung vertraut werden. Du wirst jedes Mal erneut gefragt.",
+    "cwd": "Läuft in",
+    "executable": "Programm"
+  },
+  "setup": {
+    "title": "Tresor erstellen",
+    "intro": "Es gibt noch keinen Tresor. Wähle ein Master-Passwort (mindestens {{min}} Zeichen).",
+    "recovery": "Wiederherstellungsschlüssel auf Papier einrichten (optional, vergrößert die Angriffsfläche)"
+  },
+  "confirmAdd": {
+    "title": "Änderung bestätigen",
+    "proposal": "Geheimnis für {{name}} hinzufügen",
+    "note": "Der echte Wert unten wird verschlüsselt und der KI nie angezeigt.",
+    "override": "{{name}} überschreibt eine Systemvariable und kann spätere Befehle beeinflussen.",
+    "llmEnvReads": "llm.env wird enthalten",
+    "proposalAdd": "Geheimnis für {{name}} hinzufügen",
+    "proposalUpdate": "Geheimnis für {{name}} aktualisieren",
+    "replaces": "Es gibt bereits einen Wert. Der neue ersetzt ihn; der aktuelle wird hier nicht angezeigt."
+  },
+  "confirmRemove": {
+    "title": "Entfernen bestätigen",
+    "proposal": "Geheimnis für {{name}} entfernen",
+    "irreversible": "Das lässt sich nicht rückgängig machen. Der echte Wert wird aus dem Tresor gelöscht.",
+    "allow": "Entfernen erlauben",
+    "llmEnvEntry": "Dieser llm.env-Eintrag wird gelöscht"
+  },
+  "typed": {
+    "title": "Typisierte Platzhalter bestätigen",
+    "description": "Jede Zeile lautet in allen registrierten Dateien genau so.",
+    "leaks": "Dies verrät den Typ jedes Werts und das Schema einer URL an alles, was die Datei lesen kann, auch den KI-Assistenten: {{kinds}}. Der Inhalt wird nie verraten."
+  },
+  "install": {
+    "overwrite": "{{count}} Namen werden von einem anderen Projekt verwendet und überschreiben dessen Tresorwert.",
+    "cancelNote": "Ablehnen oder das Schließen dieses Fensters bricht alles ab.",
+    "aboutMigrate_one": "{{count}} Variable wird migriert aus:",
+    "aboutMigrate_other": "{{count}} Variablen werden migriert aus:",
+    "aboutRegister": "Registrierung für künftige resync_targets-Aufrufe:",
+    "confirmMigration": "Migration bestätigen",
+    "confirmRegistration": "Registrierung bestätigen",
+    "migrateWill": "Erlauben wird (1) die {{count}} echten Werte unten in vault.enc verschlüsseln, lesbar nur mit deinem Master-Passwort, und (2) die Datei so umschreiben, dass jede Zeile zu VAR=\"value N\" wird. Dieser Platzhalter ist alles, was ein KI-Assistent je sieht.",
+    "overwriteWarning": "{{count}} Name(n) oben werden bereits von einem anderen registrierten Projekt verwendet. Fortfahren überschreibt den Tresorwert dieses Projekts: {{names}}",
+    "overwrites": "überschreibt den Wert, den {{path}} verwendet",
+    "registerWill": "Keine neuen Geheimnisse zu migrieren. Erlauben registriert {{file}}, damit künftige resync_targets-Aufrufe sie für die Variablen unten synchron halten.",
+    "sensitiveWarning": "{{names}} überschreiben System- oder Laufzeit-Umgebungsvariablen. Jeder später von run_with_env gestartete Befehl sieht den Tresorwert statt des echten Systemwerts.",
+    "variables": "Variablen"
+  },
+  "encrypt": {
+    "title": "Dateiverschlüsselung bestätigen",
+    "destroyed": "DIE ORIGINALDATEI WIRD ZERSTÖRT. Nachdem die verschlüsselte Kopie geschrieben und geprüft wurde, wird {{name}} mit Zufallsbytes überschrieben und gelöscht. Der einzige Weg zurück ist das Master-Passwort dieses Tresors oder sein Wiederherstellungsschlüssel.",
+    "durabilityCaveat": "Geht vault.enc auf diesem Rechner verloren, ist diese Datei nicht wiederherstellbar. Der Wiederherstellungsschlüssel allein genügt nicht: Er funktioniert nur zusammen mit vault.enc. Sichere diese Datei.",
+    "gitSafe": "Die .levault-Datei ist reiner Geheimtext und kann bedenkenlos in git committet werden. Ihr Dateiname verrät aber den ursprünglichen Dateinamen.",
+    "overwriteCaveat": "Das Überschreiben erfolgt nach bestem Bemühen. Auf SSDs und Dateisystemen mit Journal können die Originalbytes in Speicherbereichen bleiben, die dieses Programm nicht erreicht (Wear-Leveling, Schattenkopien, Backups, Auslagerungsdateien). Wurde die Datei je offengelegt, rotiere die Zugangsdaten und verlasse dich nicht auf diese Löschung.",
+    "resume": "Eine verschlüsselte Kopie dieser Datei existiert bereits und enthält nachweislich genau den aktuellen Inhalt: Ein früherer Lauf wurde unterbrochen, bevor das Original zerstört werden konnte. Es bleibt nur das Löschen unten.",
+    "resumeTitle": "Verschlüsselung der Datei abschließen",
+    "unlockTitle": "Tresor entsperren, um eine Datei zu verschlüsseln"
+  },
+  "decrypt": {
+    "title": "Dateientschlüsselung bestätigen",
+    "warn": "Dies schreibt ein echtes Geheimnis dauerhaft auf die Festplatte und wird nicht aufgeräumt. Der KI-Assistent kann diesen Pfad sehen und wurde angewiesen, die Datei nicht zu lesen, aber das wird nicht erzwungen.",
+    "leftInPlace": "Die .levault-Datei bleibt bestehen; die Aktion entfernt die Datei nicht aus dem Tresor.",
+    "renamed": "Die Datei wurde als {{name}} verschlüsselt, wird aber unter dem oben genannten Namen wiederhergestellt. Der Zielname stammt aus dem Namen der .levault-Datei, nicht aus ihrem Inhalt.",
+    "unlockTitle": "Tresor entsperren, um eine Datei zu entschlüsseln"
+  },
+  "abandon": {
+    "title": "Nicht erreichbare Dateien aufgeben?",
+    "warning": "{{count}} Dateien wurden mit einem alten Schlüssel verschlüsselt. Wird er stillgelegt, sind sie dauerhaft unlesbar, auch Kopien in Backups und im Git-Verlauf.",
+    "confirm": "Diese Dateien sind für immer verloren. Aufgeben.",
+    "action": "Aufgeben und stilllegen",
+    "onlyIf": "Fahre nur fort, wenn du sicher bist, dass diese Dateien nirgends mehr existieren:",
+    "otherwise": "Falls eine davon noch existieren könnte, brich ab: Mache sie erreichbar und führe die Rotation erneut aus."
+  },
+  "changePassword": {
+    "title": "Master-Passwort ändern",
+    "submit": "Passwort ändern"
+  },
+  "recoveryKey": {
+    "title": "Wiederherstellungsschlüssel sichern",
+    "copy": "Kopieren (wird in {{seconds}} s gelöscht)",
+    "written": "Ich habe ihn auf Papier notiert",
+    "confirm": "Bestätigen: Ich habe ihn",
+    "groups": "Gruppen zu je 4 Zeichen, durch Bindestriche getrennt. Die letzte Gruppe ist die Prüfsumme.",
+    "later": "Ich richte ihn später ein",
+    "reentry": "Gib den vollständigen Schlüssel von deinem Papier erneut ein",
+    "slot": "Slot-ID: {{id}}. Prüfe, ob sie zu einem gespeicherten Ausdruck passt, um zu erkennen, ob dieser veraltet ist.",
+    "steps": "1. Schreibe den vollständigen Schlüssel auf Papier und setze dann den Haken. 2. Gib den VOLLSTÄNDIGEN Schlüssel von deinem Papier erneut ein, um zu bestätigen, dass er richtig abgeschrieben wurde. Nur wenige Zeichen zu prüfen beweist nichts.",
+    "warning": "Sobald diese Seite geschlossen ist, kann der Schlüssel nicht erneut angezeigt werden. Schreibe ihn auf Papier und bewahre ihn sicher auf: Er ist der einzige Weg zurück, wenn du dein Master-Passwort vergisst."
+  },
+  "recover": {
+    "title": "Zugriff wiederherstellen",
+    "submit": "Wiederherstellen",
+    "warning": "Verwende dies nur, wenn du dein Master-Passwort vergessen hast. Mit deinem Papier-Wiederherstellungsschlüssel kannst du ein neues festlegen."
+  },
+  "manage": {
+    "title": "Tresor verwalten",
+    "confirm": {
+      "reissue_recovery": "Wiederherstellungsschlüssel neu ausstellen",
+      "retire_file_keys": "Alte Schlüssel stilllegen",
+      "rotate_file_key": "Dateischlüssel erneuern",
+      "setup_recovery": "Wiederherstellungsschlüssel einrichten",
+      "upgrade_v2": "Auf v2 aktualisieren"
+    },
+    "format": "Format: v{{version}}",
+    "infoSetupRecovery": "Ein Wiederherstellungsschlüssel auf Papier erlaubt es, das Master-Passwort zurückzusetzen, falls du es vergisst. Er vergrößert die Angriffsfläche tatsächlich: Wer das Papier findet, kann dein Passwort zurücksetzen. Ein Tresor nur mit Passwort ist ebenfalls eine gültige und sichere Wahl.",
+    "noActions": "Für den aktuellen Tresorzustand sind keine Aktionen verfügbar.",
+    "recoveryActive": "Wiederherstellungs-Slot: aktiv · Slot-ID: {{id}} · erstellt: {{created}}",
+    "recoveryNone": "Wiederherstellungs-Slot: nicht eingerichtet",
+    "titles": {
+      "change_password": "Master-Passwort ändern",
+      "reissue_recovery": "Wiederherstellungsschlüssel neu ausstellen",
+      "retire_file_keys": "Alte Dateischlüssel stilllegen",
+      "rotate_file_key": "Schlüssel verschlüsselter Dateien erneuern",
+      "setup_recovery": "Wiederherstellungsschlüssel auf Papier einrichten",
+      "upgrade_v2": "Tresor auf v2 aktualisieren"
+    },
+    "warnReissue": "Es wird ein neuer Wiederherstellungsschlüssel erzeugt. Dein alter Papierschlüssel funktioniert sofort nicht mehr.",
+    "warnRetire": "Dies löscht alle alten Dateischlüssel dauerhaft aus dem Tresor. Jede .levault-Datei, die noch mit einem davon verschlüsselt ist, auch Kopien auf anderen Rechnern, in Backups oder im git-Verlauf, wird dauerhaft unlesbar. Es wird abgelehnt, solange nicht jede registrierte Datei bereits auf den aktuellen Schlüssel umgestellt und jetzt lesbar ist. Dateien, die dem Tresor nie bekannt gemacht wurden, können nicht geprüft werden.",
+    "warnRotate": "Das Ändern deines Master-Passworts ändert NICHT den Schlüssel, der deine verschlüsselten Dateien schützt. Das ist Absicht und der Grund, warum eine in git committete .levault weiter funktioniert. Erneuere diesen Schlüssel hier, wenn du glaubst, dass er offengelegt wurde. Jede verschlüsselte Datei, die dieser Rechner findet ({{count}} registriert), wird unter einem neuen Schlüssel neu verschlüsselt. Fehlende Dateien werden übersprungen und funktionieren weiter mit dem alten Schlüssel, der behalten wird. Nichts wird unlesbar, bis du die alten Schlüssel gesondert stilllegst.",
+    "warnUpgrade": "Nach dem Upgrade können ältere Versionen dieses Plugins den Tresor nicht mehr öffnen. Ein älterer Build meldet \"Falsches Passwort\" bei richtigem Passwort. Es gehen keine Daten verloren, aber es ist beunruhigend, wenn man es nicht erwartet. Aktualisiere nur, wenn alle deine Installationen aktuell sind."
+  },
+  "strength": {
+    "label": "Passwortstärke",
+    "weak": "Schwach",
+    "fair": "Mittel",
+    "strong": "Stark"
+  },
+  "toast": {
+    "copied": "In die Zwischenablage kopiert"
+  },
+  "add": {
+    "aboutAdd": "Das Geheimnis für {{name}} wird hinzugefügt.",
+    "aboutUpdate": "Das Geheimnis für {{name}} wird aktualisiert."
+  },
+  "remove": {
+    "about": "Das Geheimnis für {{name}} wird entfernt."
+  },
+  "retype": {
+    "about": "{{count}} Platzhalter erhalten einen Typ, damit eine .env nur mit Platzhaltern von der lesenden App geparst werden kann.",
+    "why": "Das Master-Passwort wird benötigt, weil sich der Typ eines Werts nur am echten Wert ablesen lässt."
+  },
+  "unlock": {
+    "title": "Tresor entsperren"
+  },
+  "done": {
+    "approved": "Erledigt",
+    "declined": "Abgebrochen. Es wurde nichts geändert.",
+    "timeout": "Dieses Fenster ist abgelaufen. Es wurde nichts geändert.",
+    "closed": "Dieses Fenster wurde geschlossen. Es wurde nichts geändert.",
+    "error": "Etwas ist schiefgelaufen. Details findest du in deinem Assistenten.",
+    "hint": "Du kannst diesen Tab schließen und zu deinem Assistenten zurückkehren."
+  },
+  "session": {
+    "invalid": "Dieser Link wurde bereits verwendet oder ist nicht mehr gültig. Bitte deinen Assistenten, das Fenster erneut zu öffnen.",
+    "none": "Öffne diese Seite über den Link deines Assistenten.",
+    "loading": "Verbindung wird hergestellt…"
+  },
+  "vaultApp": {
+    "title": "Tresor",
+    "lock": {
+      "title": "Ihr Tresor ist gesperrt",
+      "createTitle": "Tresor erstellen",
+      "unlock": "Entsperren",
+      "createAction": "Tresor erstellen",
+      "recover": "Mit Wiederherstellungsschlüssel wiederherstellen",
+      "or": "oder",
+      "auto": "Wegen Inaktivität gesperrt."
+    },
+    "tabs": {
+      "vault": "Tresor",
+      "generator": "Generator",
+      "settings": "Einstellungen"
+    },
+    "menu": {
+      "account": "Konto",
+      "close": "App schließen"
+    },
+    "vault": {
+      "add": "Hinzufügen",
+      "search": "Suchen",
+      "type": "Typ",
+      "allTypes": "Alle Typen",
+      "emptyTitle": "Noch keine Geheimnisse",
+      "emptyHint": "Fügen Sie Ihr erstes Geheimnis hinzu, um zu beginnen.",
+      "noMatch": "Keine Treffer",
+      "noMatchHint": "Versuchen Sie eine andere Suche oder einen anderen Typ.",
+      "count_one": "{{count}} Eintrag",
+      "count_other": "{{count}} Einträge",
+      "copy": "Wert kopieren",
+      "more": "Weitere Optionen",
+      "edit": "Bearbeiten",
+      "copyName": "Namen kopieren",
+      "delete": "Löschen",
+      "placeholder": "Platzhalter {{n}}",
+      "notUsed": "In keiner Datei verwendet",
+      "open": "Öffnen"
+    },
+    "types": {
+      "apiKey": "API-Schlüssel",
+      "token": "Token",
+      "password": "Passwort",
+      "url": "URL",
+      "database": "Datenbank",
+      "other": "Sonstiges",
+      "secret": "Geheimnis",
+      "login": "Zugangsdaten",
+      "card": "Karte",
+      "identity": "Identität",
+      "note": "Notiz",
+      "ssh": "SSH-Schlüssel"
+    },
+    "toast": {
+      "saved": "Gespeichert.",
+      "deleted": "Gelöscht.",
+      "copied": "Kopiert. Die Zwischenablage wird in {{seconds}} s geleert.",
+      "copy_unavailable": "Kein Zwischenablage-Werkzeug gefunden. Installieren Sie wl-clipboard oder xclip.",
+      "copy_failed": "Kopieren nicht möglich.",
+      "nameCopied": "Name kopiert."
+    },
+    "form": {
+      "addTitle": "Neues Geheimnis",
+      "editTitle": "Geheimnis bearbeiten",
+      "editing": "Geben Sie einen neuen Wert für {{name}} ein. Der aktuelle Wert wird nie angezeigt.",
+      "name": "Name",
+      "value": "Wert",
+      "save": "Speichern",
+      "nameInvalid": "Verwenden Sie Buchstaben, Ziffern und Unterstriche, beginnend mit einem Buchstaben oder Unterstrich.",
+      "nameExists": "Ein Geheimnis namens {{name}} existiert bereits. Bearbeiten Sie es stattdessen.",
+      "sensitiveAck": "{{name}} verändert das Verhalten von Programmen. Drücken Sie zur Bestätigung erneut Speichern."
+    },
+    "generator": {
+      "password": "Passwort",
+      "passphrase": "Passphrase",
+      "username": "Benutzername",
+      "options": "Optionen",
+      "length": "Länge",
+      "lengthHint": "Der Wert muss zwischen {{min}} und {{max}} liegen.",
+      "include": "Einschließen",
+      "minNumbers": "Mindestanzahl Ziffern",
+      "minSpecial": "Mindestanzahl Sonderzeichen",
+      "avoidAmbiguous": "Mehrdeutige Zeichen vermeiden",
+      "words": "Anzahl der Wörter",
+      "separator": "Worttrennzeichen",
+      "capitalize": "Großschreiben",
+      "includeNumber": "Zahl einfügen",
+      "regenerate": "Neu erzeugen",
+      "copy": "Kopieren",
+      "copied": "Kopiert."
+    },
+    "settings": {
+      "accountSecurity": "Kontosicherheit",
+      "vaultOptions": "Tresor-Optionen",
+      "appearance": "Darstellung",
+      "about": "Info",
+      "lockNow": "Jetzt sperren",
+      "autoLock": "Nach Inaktivität sperren",
+      "autoLockHint": "Der Tresor sperrt sich nach dieser Zeit ohne Aktivität.",
+      "minutes_one": "{{count}} Minute",
+      "minutes_other": "{{count}} Minuten",
+      "clipboardClear": "Zwischenablage leeren",
+      "clipboardHint": "Ein kopiertes Geheimnis wird nach dieser Zeit aus der Zwischenablage entfernt.",
+      "seconds_one": "{{count}} Sekunde",
+      "seconds_other": "{{count}} Sekunden",
+      "version": "Version",
+      "format": "Tresor-Format",
+      "secrets": "Einträge",
+      "recoveryKey": "Wiederherstellungsschlüssel",
+      "recoveryOn": "Eingerichtet",
+      "recoveryOff": "Nicht eingerichtet",
+      "location": "Tresor-Ordner",
+      "noRecovery": "Es ist kein Wiederherstellungsschlüssel eingerichtet.",
+      "noRecoveryAction": "Richten Sie einen unter Kontosicherheit ein."
+    },
+    "result": {
+      "keyMistyped": "Dieser Wiederherstellungsschlüssel wurde wohl falsch eingegeben (die Prüfsumme stimmt nicht). Vergleichen Sie ihn mit Ihrem Ausdruck.",
+      "keyWrong": "Dieser Wiederherstellungsschlüssel gilt nicht für diesen Tresor. Wurde das Passwort seit dem Ausdruck geändert, funktioniert der alte Schlüssel nicht mehr.",
+      "noRecoverySlot": "Dieser Tresor hat keinen Wiederherstellungsschlüssel und kann ohne das Master-Passwort nicht wiederhergestellt werden.",
+      "damaged": "Die Tresor-Datei ist beschädigt oder wurde manipuliert. Stellen Sie sie aus einer Sicherung wieder her.",
+      "restored": "Der Vorgang wurde nicht abgeschlossen. Der Tresor wurde in den vorherigen Zustand zurückversetzt.",
+      "recovered": "Zugriff wiederhergestellt. Ihr bisheriger Wiederherstellungsschlüssel funktioniert weiterhin.",
+      "keyNotConfirmed": "Der neue Wiederherstellungsschlüssel wurde nicht bestätigt und kann nicht erneut angezeigt werden. Stellen Sie unter Kontosicherheit einen neuen aus.",
+      "passwordChanged": "Master-Passwort geändert.",
+      "keyIssued": "Wiederherstellungsschlüssel ausgestellt.",
+      "upgraded": "Tresor auf das v2-Format aktualisiert.",
+      "rotated": "Dateischlüssel rotiert. {{count}} Datei(en) neu verschlüsselt.",
+      "rotatedPartial": "{{count}} Datei(en) wurden nicht rotiert und verwenden noch den alten Schlüssel.",
+      "retired": "{{count}} alte(r) Dateischlüssel zurückgezogen.",
+      "nothingToRetire": "Nichts zurückzuziehen.",
+      "noVault": "Kein Tresor gefunden."
+    },
+    "item": {
+      "chooseTitle": "Eintrag hinzufügen",
+      "chooseHint": "Geheimnisse stehen Ihrem KI-Assistenten als Platzhalter zur Verfügung. Alles andere ist nur für Sie und wird ihm nie gezeigt.",
+      "about": {
+        "secret": "Eine Umgebungsvariable, die der Assistent nutzen kann, ohne sie zu sehen",
+        "login": "Benutzername und Passwort für eine Website",
+        "card": "Eine Zahlungskarte",
+        "identity": "Ihr Name, Ihre Adresse und Kontaktdaten",
+        "note": "Freitext, etwa ein Wiederherstellungscode oder eine Konfiguration",
+        "ssh": "Ein privater und ein öffentlicher SSH-Schlüssel"
+      },
+      "add": {
+        "login": "Neue Zugangsdaten",
+        "card": "Neue Karte",
+        "identity": "Neue Identität",
+        "note": "Neue Notiz",
+        "ssh": "Neuer SSH-Schlüssel"
+      },
+      "edit": {
+        "login": "Zugangsdaten bearbeiten",
+        "card": "Karte bearbeiten",
+        "identity": "Identität bearbeiten",
+        "note": "Notiz bearbeiten",
+        "ssh": "SSH-Schlüssel bearbeiten"
+      },
+      "view": {
+        "login": "Zugangsdaten ansehen",
+        "card": "Karte ansehen",
+        "identity": "Identität ansehen",
+        "note": "Notiz ansehen",
+        "ssh": "SSH-Schlüssel ansehen"
+      },
+      "name": "Name",
+      "noFolder": "Kein Ordner",
+      "history": "Verlauf des Eintrags",
+      "lastEdited": "Zuletzt bearbeitet",
+      "created": "Erstellt",
+      "noFields": "Dieser Eintrag hat noch keinen Inhalt.",
+      "deleteTitle": "Eintrag löschen",
+      "deleteBody": "{{name}} löschen? Das lässt sich nicht rückgängig machen.",
+      "corrupted": "Die gespeicherten Einträge liegen in einem Format vor, das diese Version nicht versteht. Ihre Geheimnisse sind unberührt.",
+      "invalid": "{{message}}"
+    },
+    "fields": {
+      "notes": "Notizen",
+      "folder": "Ordner",
+      "username": "Benutzername",
+      "password": "Passwort",
+      "uri": "Website",
+      "holder": "Name des Karteninhabers",
+      "brand": "Marke",
+      "number": "Kartennummer",
+      "expMonth": "Ablaufmonat",
+      "expYear": "Ablaufjahr",
+      "code": "Sicherheitscode",
+      "title": "Titel",
+      "firstName": "Vorname",
+      "middleName": "Zweiter Vorname",
+      "lastName": "Nachname",
+      "email": "E-Mail",
+      "phone": "Telefon",
+      "company": "Firma",
+      "address1": "Adresse 1",
+      "address2": "Adresse 2",
+      "city": "Stadt",
+      "state": "Bundesland / Provinz",
+      "postalCode": "Postleitzahl",
+      "country": "Land",
+      "ssn": "Sozialversicherungsnummer",
+      "passport": "Reisepassnummer",
+      "license": "Führerscheinnummer",
+      "privateKey": "Privater Schlüssel",
+      "publicKey": "Öffentlicher Schlüssel",
+      "passphrase": "Passphrase"
+    }
+  }
+}

@@ -1,0 +1,449 @@
+{
+  "app": {
+    "name": "Thyra Vault"
+  },
+  "common": {
+    "cancel": "Annulla",
+    "back": "Indietro",
+    "continue": "Continua",
+    "allow": "Consenti",
+    "deny": "Nega",
+    "copy": "Copia",
+    "copied": "Copiato",
+    "show": "Mostra valore",
+    "hide": "Nascondi valore",
+    "working": "Operazione in corso…",
+    "step": "Passaggio {{current}} di {{total}}",
+    "language": "Lingua",
+    "theme": "Tema",
+    "light": "Chiaro",
+    "dark": "Scuro",
+    "system": "Sistema",
+    "close": "Chiudi"
+  },
+  "fields": {
+    "masterPassword": "Password principale",
+    "confirmPassword": "Conferma password",
+    "currentPassword": "Password attuale",
+    "newPassword": "Nuova password (almeno {{min}} caratteri)",
+    "confirmNewPassword": "Conferma la nuova password",
+    "recoveryKey": "Chiave di recupero",
+    "command": "Comando",
+    "realValue": "Valore reale per {{name}}",
+    "encryptedFile": "File cifrato",
+    "fileToEncrypt": "File da cifrare",
+    "encryptedCopy": "La copia cifrata sarà scritta in",
+    "restoredTo": "Il contenuto reale sarà scritto in",
+    "sizePerms": "Dimensione {{size}} · Permessi {{mode}}",
+    "permsRestored": "Dimensione {{size}} · Permessi ripristinati a {{mode}}"
+  },
+  "errors": {
+    "minLength": "Usa almeno {{min}} caratteri.",
+    "addPartial": "Salvato nel vault, ma non è stato possibile aggiornare vault_index.json o llm.env: {{message}}. Il valore reale ora è nel vault. Risolvi il problema ed esegui di nuovo add_secret (o sync_llm_env) per collegarlo a un segnaposto.",
+    "changedWhileOpen": "{{name}} è cambiato nel vault mentre questa finestra era aperta. Torna indietro e reinserisci la password per continuare.",
+    "checkWritten": "Spunta la casella per confermare di aver annotato la chiave.",
+    "commonPassword": "È una delle password più usate al mondo. Chiunque copi vault.enc la indovinerebbe in pochi secondi, per quanto sia forte la cifratura. Scegline un'altra.",
+    "confirmRequired": "Spunta la casella per confermare che questi file non esistono più.",
+    "currentEmpty": "Inserisci la password attuale.",
+    "decryptFailed": "Decifratura non riuscita: {{message}}",
+    "decryptPath": "Impossibile decifrare {{path}}: {{message}}",
+    "emptyPassword": "Inserisci una password.",
+    "encryptFailed": "Cifratura non riuscita: {{message}}",
+    "installPartial": "Salvato nel vault, ma non è stato possibile riscrivere {{file}}: {{message}}. I valori reali sono al sicuro. Risolvi il problema ed esegui resync_targets.",
+    "keyInternal": "Errore interno durante la verifica della chiave. Contatta il supporto.",
+    "keyMismatch": "La chiave inserita non corrisponde a quella mostrata sopra. Controlla ciò che hai scritto: ogni carattere deve coincidere.",
+    "keyUnexpected": "Impossibile verificare la chiave (errore imprevisto).",
+    "leftoverIntact": "La copia cifrata è stata scritta e verificata, ma non è stato possibile rimuovere l'originale {{name}} (potrebbe essere aperto in un altro programma). Contiene ancora il segreto reale: chiudi ciò che lo tiene aperto ed eliminalo tu. I tuoi dati sono comunque al sicuro: il file .levault è completo e verificato.",
+    "leftoverOverwritten": "La copia cifrata è stata scritta e verificata. L'originale {{name}} è stato sovrascritto con byte casuali ma non è stato possibile eliminarlo (potrebbe essere aperto in un altro programma). Non contiene più il tuo segreto: ce l'ha il file .levault. Elimina tu il residuo.",
+    "newMismatch": "Le nuove password non coincidono.",
+    "noneInVault": "Nessuna di queste variabili è presente in questo vault.",
+    "passwordMismatch": "Le password non coincidono.",
+    "recordTypes": "Impossibile registrare i tipi: {{message}}",
+    "recoveryEmpty": "Inserisci la chiave di recupero.",
+    "recoveryUnexpected": "Impossibile verificare la chiave di recupero (errore imprevisto).",
+    "reenterKey": "Reinserisci la chiave di recupero dal tuo foglio.",
+    "removePartial": "Il segreto è già stato rimosso dal vault (non si può annullare), ma non è stato possibile aggiornare vault_index.json o llm.env: {{message}}. Mostrano ancora un segnaposto per un valore che non esiste più. Esegui di nuovo remove_secret per ripulire, oppure modifica vault_index.json a mano.",
+    "saveFailed": "Impossibile salvare: {{message}}",
+    "sidecarMismatch": "{{name}} esiste già e non contiene il contenuto attuale di questo file. Risolvi a mano: uno dei due file non è ciò che pensi.",
+    "valueEmpty": "Inserisci il valore del segreto.",
+    "vault": "Errore del vault: {{message}}"
+  },
+  "unlockRun": {
+    "title": "Sblocca il vault per eseguire il comando",
+    "expose_one": "Esporrà {{count}} variabile a questo comando.",
+    "expose_other": "Esporrà {{count}} variabili a questo comando.",
+    "output": "L'output di questo comando viene restituito all'assistente AI.",
+    "files_one": "Decifra anche {{count}} file su disco finché il comando non termina.",
+    "files_other": "Decifra anche {{count}} file su disco finché il comando non termina.",
+    "notRedacted": "Il contenuto dei file non viene oscurato nell'output del comando.",
+    "trust": "Considera attendibile questo comando esatto per le prossime {{hours}} ore (parte senza richiesta fino ad allora, o finché questo server non si riavvia)",
+    "submit": "Sblocca ed esegui",
+    "filesCleanup": "(eliminati non appena il comando termina)",
+    "materialize": "Scrive anche valori segreti reali su disco per tutta la durata del comando",
+    "materializeExit": "(file eliminato non appena il comando termina)",
+    "materializeOnce": "(svuotato dopo le prime {{count}} aperture del file, da parte del comando o, quando non si distingue chi legge, di qualsiasi programma, oppure alla fine del comando, a seconda di cosa avviene prima; le aperture rilevate da altri programmi sono elencate nel risultato e il file viene comunque eliminato)",
+    "noTrustFiles": "Questa esecuzione decifra file su disco, quindi non può essere considerata attendibile per usi futuri. Ti verrà chiesto ogni volta.",
+    "cwd": "Eseguito in",
+    "executable": "Programma"
+  },
+  "setup": {
+    "title": "Crea il tuo vault",
+    "intro": "Non esiste ancora un vault. Scegli una password principale (almeno {{min}} caratteri).",
+    "recovery": "Crea una chiave di recupero su carta (facoltativo, aumenta la superficie di attacco)"
+  },
+  "confirmAdd": {
+    "title": "Conferma la modifica",
+    "proposal": "Aggiungi segreto per {{name}}",
+    "note": "Il valore reale qui sotto è cifrato e non viene mai mostrato all'AI.",
+    "override": "{{name}} sostituisce una variabile di sistema e potrebbe influire sui comandi successivi.",
+    "llmEnvReads": "llm.env conterrà",
+    "proposalAdd": "Aggiungi il segreto per {{name}}",
+    "proposalUpdate": "Aggiorna il segreto per {{name}}",
+    "replaces": "Esiste già un valore. Quello nuovo lo sostituisce; il valore attuale non viene mostrato qui."
+  },
+  "confirmRemove": {
+    "title": "Conferma la rimozione",
+    "proposal": "Rimuovi segreto per {{name}}",
+    "irreversible": "L'azione non può essere annullata. Il valore reale viene eliminato dal vault.",
+    "allow": "Consenti rimozione",
+    "llmEnvEntry": "Questa voce di llm.env verrà eliminata"
+  },
+  "typed": {
+    "title": "Conferma i segnaposto tipizzati",
+    "description": "Ogni riga apparirà esattamente così in tutti i file registrati.",
+    "leaks": "Questo rivela il tipo di ogni valore, e lo schema di un URL, a chiunque possa leggere il file, assistente AI compreso: {{kinds}}. Non rivela mai il contenuto."
+  },
+  "install": {
+    "overwrite": "{{count}} nomi sono usati da un altro progetto e ne sovrascriveranno il valore nel vault.",
+    "cancelNote": "Nega, o chiudere questa finestra, annulla tutto.",
+    "aboutMigrate_one": "Stai per migrare {{count}} variabile da:",
+    "aboutMigrate_other": "Stai per migrare {{count}} variabili da:",
+    "aboutRegister": "Stai per registrare per i futuri resync_targets:",
+    "confirmMigration": "Conferma la migrazione",
+    "confirmRegistration": "Conferma la registrazione",
+    "migrateWill": "Consenti (1) cifrerà in vault.enc i {{count}} valori reali qui sotto, leggibili solo con la tua password principale, e (2) riscriverà il file in modo che ogni riga diventi VAR=\"value N\". Quel segnaposto è tutto ciò che un assistente AI vedrà.",
+    "overwriteWarning": "{{count}} nome/i qui sopra sono già usati da un altro progetto registrato. Continuando si sovrascrive il valore di quel progetto nel vault: {{names}}",
+    "overwrites": "sovrascrive il valore usato da {{path}}",
+    "registerWill": "Nessun nuovo segreto da migrare. Consenti registrerà {{file}} perché le future chiamate a resync_targets lo mantengano allineato per le variabili qui sotto.",
+    "sensitiveWarning": "{{names}} sostituiscono variabili d'ambiente di sistema o di runtime. Ogni comando avviato in seguito da run_with_env vedrà il valore del vault invece di quello reale del sistema.",
+    "variables": "Variabili"
+  },
+  "encrypt": {
+    "title": "Conferma cifratura del file",
+    "destroyed": "IL FILE ORIGINALE VERRÀ DISTRUTTO. Dopo che la copia cifrata è stata scritta e verificata, {{name}} viene sovrascritto con byte casuali ed eliminato. L'unico modo per recuperarlo è la password principale del vault o la sua chiave di recupero.",
+    "durabilityCaveat": "Se vault.enc su questo computer va perso, questo file non può essere recuperato. La chiave di recupero da sola non basta: funziona solo insieme a vault.enc. Fai una copia di quel file.",
+    "gitSafe": "Il file .levault è solo testo cifrato e si può committare in git. Il suo nome però rivela il nome del file originale.",
+    "overwriteCaveat": "La sovrascrittura è best effort. Su SSD e file system con journaling i byte originali possono restare in aree che questo programma non raggiunge (wear levelling, copie shadow, backup, file di swap). Se il file è mai stato esposto, ruota la credenziale: non fare affidamento su questa eliminazione.",
+    "resume": "Esiste già una copia cifrata di questo file, verificata come identica al contenuto attuale: un'esecuzione precedente si è interrotta prima di distruggere l'originale. Resta solo l'eliminazione qui sotto.",
+    "resumeTitle": "Completa la cifratura del file",
+    "unlockTitle": "Sblocca il vault per cifrare un file"
+  },
+  "decrypt": {
+    "title": "Conferma decifratura del file",
+    "warn": "Questa azione scrive un segreto reale su disco in modo permanente e non viene ripulita. L'assistente AI può vedere questo percorso e ha ricevuto l'istruzione di non leggere il file, ma l'istruzione non è imposta.",
+    "leftInPlace": "Il file .levault resta dov'è; questa azione non lo rimuove dal vault.",
+    "renamed": "Il file era stato cifrato come {{name}} ma verrà ripristinato con il nome indicato sopra. Il nome di destinazione deriva dal nome del file .levault, non da ciò che contiene.",
+    "unlockTitle": "Sblocca il vault per decifrare un file"
+  },
+  "abandon": {
+    "title": "Abbandonare i file irraggiungibili?",
+    "warning": "{{count}} file sono stati cifrati con una chiave precedente. Ritirarla li rende illeggibili in modo permanente, comprese le copie nei backup e nella cronologia git.",
+    "confirm": "Questi file sono persi per sempre. Abbandonali.",
+    "action": "Abbandona e ritira",
+    "onlyIf": "Continua solo se sei certo che questi file non esistano più da nessuna parte:",
+    "otherwise": "Se qualcuno potrebbe ancora esistere, annulla: rendilo raggiungibile ed esegui di nuovo la rotazione."
+  },
+  "changePassword": {
+    "title": "Cambia la password principale",
+    "submit": "Cambia password"
+  },
+  "recoveryKey": {
+    "title": "Salva la tua chiave di recupero",
+    "copy": "Copia (si cancella tra {{seconds}} s)",
+    "written": "L'ho scritta su carta",
+    "confirm": "Conferma: ce l'ho",
+    "groups": "Gruppi di 4 caratteri separati da trattini. L'ultimo gruppo è il checksum.",
+    "later": "La imposto più tardi",
+    "reentry": "Reinserisci la chiave completa dal tuo foglio",
+    "slot": "ID slot: {{id}}. Controlla che corrisponda a una stampa già salvata per capire se è obsoleta.",
+    "steps": "1. Scrivi su carta la chiave completa, poi spunta la casella. 2. Reinserisci la chiave COMPLETA dal tuo foglio per confermare che l'hai scritta correttamente. Controllare solo alcuni caratteri non dimostra nulla.",
+    "warning": "Una volta chiusa questa pagina la chiave non potrà più essere mostrata. Scrivila su carta e conservala al sicuro: è l'unico modo per riottenere l'accesso se dimentichi la password principale."
+  },
+  "recover": {
+    "title": "Recupera l'accesso",
+    "submit": "Recupera",
+    "warning": "Usa questa funzione solo se hai dimenticato la password principale. La chiave di recupero su carta ti permette di impostarne una nuova."
+  },
+  "manage": {
+    "title": "Gestisci vault",
+    "confirm": {
+      "reissue_recovery": "Rigenera chiave di recupero",
+      "retire_file_keys": "Ritira le vecchie chiavi",
+      "rotate_file_key": "Ruota la chiave dei file",
+      "setup_recovery": "Crea chiave di recupero",
+      "upgrade_v2": "Passa alla v2"
+    },
+    "format": "Formato: v{{version}}",
+    "infoSetupRecovery": "Una chiave di recupero su carta permette di reimpostare la password principale se la dimentichi. Aumenta davvero la superficie di attacco: chiunque trovi il foglio può reimpostare la tua password. Anche un vault protetto solo da password è una scelta valida e sicura.",
+    "noActions": "Nessuna azione disponibile per lo stato attuale del vault.",
+    "recoveryActive": "Slot di recupero: attivo · id slot: {{id}} · creato: {{created}}",
+    "recoveryNone": "Slot di recupero: non configurato",
+    "titles": {
+      "change_password": "Cambia la password principale",
+      "reissue_recovery": "Rigenera la chiave di recupero",
+      "retire_file_keys": "Ritira le vecchie chiavi dei file",
+      "rotate_file_key": "Ruota la chiave dei file cifrati",
+      "setup_recovery": "Crea la chiave di recupero su carta",
+      "upgrade_v2": "Passa il vault alla v2"
+    },
+    "warnReissue": "Verrà generata una nuova chiave di recupero. La vecchia chiave su carta smette di funzionare subito.",
+    "warnRetire": "Questa azione elimina definitivamente dal vault tutte le vecchie chiavi dei file. Ogni file .levault ancora cifrato con una di esse, comprese le copie su altri computer, nei backup o nella cronologia git, diventa illeggibile per sempre. Viene rifiutata se ogni file registrato non è già stato ruotato sulla chiave attuale ed è leggibile in questo momento. I file che il vault non conosce non possono essere controllati.",
+    "warnRotate": "Cambiare la password principale NON cambia la chiave che protegge i file cifrati. È voluto, ed è il motivo per cui un .levault committato in git continua a funzionare. Ruota qui quella chiave se pensi che possa essere stata esposta. Ogni file cifrato che questo computer riesce a trovare ({{count}} registrati) viene ricifrato con una nuova chiave. I file mancanti vengono saltati e continuano a funzionare con la vecchia chiave, che viene conservata. Nulla diventa illeggibile finché non ritiri separatamente le vecchie chiavi.",
+    "warnUpgrade": "Dopo l'aggiornamento le versioni precedenti di questo plugin non potranno più aprire il vault. Una build più vecchia segnala \"Password errata\" anche con la password corretta. Non si perdono dati, ma può spaventare se non te lo aspetti. Aggiorna solo se tutte le tue installazioni sono aggiornate."
+  },
+  "strength": {
+    "label": "Robustezza della password",
+    "weak": "Debole",
+    "fair": "Discreta",
+    "strong": "Forte"
+  },
+  "toast": {
+    "copied": "Copiato negli appunti"
+  },
+  "add": {
+    "aboutAdd": "Stai per aggiungere il segreto per {{name}}.",
+    "aboutUpdate": "Stai per aggiornare il segreto per {{name}}."
+  },
+  "remove": {
+    "about": "Stai per rimuovere il segreto per {{name}}."
+  },
+  "retype": {
+    "about": "Stai per assegnare un tipo a {{count}} segnaposto, così un .env con soli segnaposto può essere interpretato dall'app che lo legge.",
+    "why": "La password principale serve perché il tipo di un valore si può leggere solo dal valore reale."
+  },
+  "unlock": {
+    "title": "Sblocca il vault"
+  },
+  "done": {
+    "approved": "Fatto",
+    "declined": "Annullato. Non è stato modificato nulla.",
+    "timeout": "La finestra è scaduta. Non è stato modificato nulla.",
+    "closed": "La finestra è stata chiusa. Non è stato modificato nulla.",
+    "error": "Qualcosa è andato storto. Controlla il tuo assistente per i dettagli.",
+    "hint": "Puoi chiudere questa scheda e tornare al tuo assistente."
+  },
+  "session": {
+    "invalid": "Questo link è già stato usato o non è più valido. Chiedi al tuo assistente di riaprire la finestra.",
+    "none": "Apri questa pagina dal link fornito dal tuo assistente.",
+    "loading": "Connessione in corso…"
+  },
+  "vaultApp": {
+    "title": "Vault",
+    "lock": {
+      "title": "Il tuo vault è bloccato",
+      "createTitle": "Crea il tuo vault",
+      "unlock": "Sblocca",
+      "createAction": "Crea vault",
+      "recover": "Recupera con la chiave di recupero",
+      "or": "oppure",
+      "auto": "Bloccato per inattività."
+    },
+    "tabs": {
+      "vault": "Vault",
+      "generator": "Generatore",
+      "settings": "Impostazioni"
+    },
+    "menu": {
+      "account": "Account",
+      "close": "Chiudi app"
+    },
+    "vault": {
+      "add": "Aggiungi",
+      "search": "Cerca",
+      "type": "Tipo",
+      "allTypes": "Tutti i tipi",
+      "emptyTitle": "Ancora nessun segreto",
+      "emptyHint": "Aggiungi il tuo primo segreto per iniziare.",
+      "noMatch": "Nessun risultato",
+      "noMatchHint": "Prova un'altra ricerca o un altro tipo.",
+      "count_one": "{{count}} elemento",
+      "count_other": "{{count}} elementi",
+      "copy": "Copia valore",
+      "more": "Altre opzioni",
+      "edit": "Modifica",
+      "copyName": "Copia nome",
+      "delete": "Elimina",
+      "placeholder": "Segnaposto {{n}}",
+      "notUsed": "Non ancora usato in nessun file",
+      "open": "Apri"
+    },
+    "types": {
+      "apiKey": "Chiave API",
+      "token": "Token",
+      "password": "Password",
+      "url": "URL",
+      "database": "Database",
+      "other": "Altro",
+      "secret": "Segreto",
+      "login": "Accesso",
+      "card": "Carta",
+      "identity": "Identità",
+      "note": "Nota",
+      "ssh": "Chiave SSH"
+    },
+    "toast": {
+      "saved": "Salvato.",
+      "deleted": "Eliminato.",
+      "copied": "Copiato. Gli appunti vengono svuotati tra {{seconds}} s.",
+      "copy_unavailable": "Nessuno strumento per gli appunti trovato. Installa wl-clipboard o xclip.",
+      "copy_failed": "Impossibile copiare.",
+      "nameCopied": "Nome copiato."
+    },
+    "form": {
+      "addTitle": "Nuovo segreto",
+      "editTitle": "Modifica segreto",
+      "editing": "Inserisci un nuovo valore per {{name}}. Il valore attuale non viene mai mostrato.",
+      "name": "Nome",
+      "value": "Valore",
+      "save": "Salva",
+      "nameInvalid": "Usa lettere, cifre e trattini bassi, iniziando con una lettera o un trattino basso.",
+      "nameExists": "Esiste già un segreto chiamato {{name}}. Modificalo invece.",
+      "sensitiveAck": "{{name}} cambia il comportamento dei programmi. Premi di nuovo Salva per confermare."
+    },
+    "generator": {
+      "password": "Password",
+      "passphrase": "Frase segreta",
+      "username": "Nome utente",
+      "options": "Opzioni",
+      "length": "Lunghezza",
+      "lengthHint": "Il valore deve essere tra {{min}} e {{max}}.",
+      "include": "Includi",
+      "minNumbers": "Numeri minimi",
+      "minSpecial": "Caratteri speciali minimi",
+      "avoidAmbiguous": "Evita caratteri ambigui",
+      "words": "Numero di parole",
+      "separator": "Separatore di parole",
+      "capitalize": "Iniziali maiuscole",
+      "includeNumber": "Includi un numero",
+      "regenerate": "Genera di nuovo",
+      "copy": "Copia",
+      "copied": "Copiato."
+    },
+    "settings": {
+      "accountSecurity": "Sicurezza dell'account",
+      "vaultOptions": "Opzioni del vault",
+      "appearance": "Aspetto",
+      "about": "Informazioni",
+      "lockNow": "Blocca ora",
+      "autoLock": "Blocca dopo inattività",
+      "autoLockHint": "Il vault si blocca dopo questo tempo senza attività.",
+      "minutes_one": "{{count}} minuto",
+      "minutes_other": "{{count}} minuti",
+      "clipboardClear": "Svuota appunti",
+      "clipboardHint": "Un segreto copiato viene rimosso dagli appunti dopo questo tempo.",
+      "seconds_one": "{{count}} secondo",
+      "seconds_other": "{{count}} secondi",
+      "version": "Versione",
+      "format": "Formato del vault",
+      "secrets": "Elementi",
+      "recoveryKey": "Chiave di recupero",
+      "recoveryOn": "Configurata",
+      "recoveryOff": "Non configurata",
+      "location": "Cartella del vault",
+      "noRecovery": "Nessuna chiave di recupero configurata.",
+      "noRecoveryAction": "Aggiungila in Sicurezza dell'account."
+    },
+    "result": {
+      "keyMistyped": "Questa chiave di recupero sembra digitata male (il checksum non corrisponde). Controllala sulla copia stampata.",
+      "keyWrong": "Questa chiave di recupero non è valida per questo vault. Se la password è cambiata dopo la stampa, la vecchia chiave non funziona più.",
+      "noRecoverySlot": "Questo vault non ha una chiave di recupero, quindi non può essere recuperato senza la password principale.",
+      "damaged": "Il file del vault è danneggiato o è stato manomesso. Ripristinalo da un backup.",
+      "restored": "L'operazione non è stata completata. Il vault è stato riportato allo stato precedente.",
+      "recovered": "Accesso recuperato. La tua chiave di recupero esistente funziona ancora.",
+      "keyNotConfirmed": "La nuova chiave di recupero non è stata confermata e non può essere mostrata di nuovo. Emettine una nuova in Sicurezza dell'account.",
+      "passwordChanged": "Password principale cambiata.",
+      "keyIssued": "Chiave di recupero emessa.",
+      "upgraded": "Vault aggiornato al formato v2.",
+      "rotated": "Chiave dei file ruotata. {{count}} file ricifrati.",
+      "rotatedPartial": "{{count}} file non sono stati ruotati e usano ancora la vecchia chiave.",
+      "retired": "Ritirate {{count}} vecchie chiavi dei file.",
+      "nothingToRetire": "Niente da ritirare.",
+      "noVault": "Nessun vault trovato."
+    },
+    "item": {
+      "chooseTitle": "Aggiungi un elemento",
+      "chooseHint": "I segreti sono disponibili al tuo assistente IA come segnaposto. Tutto il resto è solo per te e non gli viene mai mostrato.",
+      "about": {
+        "secret": "Una variabile d'ambiente che l'assistente può usare senza vederla",
+        "login": "Nome utente e password di un sito",
+        "card": "Una carta di pagamento",
+        "identity": "Il tuo nome, indirizzo e contatti",
+        "note": "Testo libero, come un codice di recupero o una configurazione",
+        "ssh": "Una chiave SSH privata e pubblica"
+      },
+      "add": {
+        "login": "Nuovo accesso",
+        "card": "Nuova carta",
+        "identity": "Nuova identità",
+        "note": "Nuova nota",
+        "ssh": "Nuova chiave SSH"
+      },
+      "edit": {
+        "login": "Modifica accesso",
+        "card": "Modifica carta",
+        "identity": "Modifica identità",
+        "note": "Modifica nota",
+        "ssh": "Modifica chiave SSH"
+      },
+      "view": {
+        "login": "Visualizza accesso",
+        "card": "Visualizza carta",
+        "identity": "Visualizza identità",
+        "note": "Visualizza nota",
+        "ssh": "Visualizza chiave SSH"
+      },
+      "name": "Nome",
+      "noFolder": "Nessuna cartella",
+      "history": "Cronologia dell'elemento",
+      "lastEdited": "Ultima modifica",
+      "created": "Creato",
+      "noFields": "Questo elemento non ha ancora contenuto.",
+      "deleteTitle": "Elimina elemento",
+      "deleteBody": "Eliminare {{name}}? L'operazione non si può annullare.",
+      "corrupted": "Gli elementi salvati sono in un formato che questa versione non riconosce. I tuoi segreti non sono stati toccati.",
+      "invalid": "{{message}}"
+    },
+    "fields": {
+      "notes": "Note",
+      "folder": "Cartella",
+      "username": "Nome utente",
+      "password": "Password",
+      "uri": "Sito web",
+      "holder": "Intestatario della carta",
+      "brand": "Circuito",
+      "number": "Numero della carta",
+      "expMonth": "Mese di scadenza",
+      "expYear": "Anno di scadenza",
+      "code": "Codice di sicurezza",
+      "title": "Titolo",
+      "firstName": "Nome",
+      "middleName": "Secondo nome",
+      "lastName": "Cognome",
+      "email": "Email",
+      "phone": "Telefono",
+      "company": "Azienda",
+      "address1": "Indirizzo 1",
+      "address2": "Indirizzo 2",
+      "city": "Città",
+      "state": "Stato / provincia",
+      "postalCode": "CAP",
+      "country": "Paese",
+      "ssn": "Codice fiscale / numero di previdenza sociale",
+      "passport": "Numero del passaporto",
+      "license": "Numero della patente",
+      "privateKey": "Chiave privata",
+      "publicKey": "Chiave pubblica",
+      "passphrase": "Passphrase"
+    }
+  }
+}

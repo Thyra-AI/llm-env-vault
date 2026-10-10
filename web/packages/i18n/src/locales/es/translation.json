@@ -1,0 +1,449 @@
+{
+  "app": {
+    "name": "Thyra Vault"
+  },
+  "common": {
+    "cancel": "Cancelar",
+    "back": "Atrás",
+    "continue": "Continuar",
+    "allow": "Permitir",
+    "deny": "Denegar",
+    "copy": "Copiar",
+    "copied": "Copiado",
+    "show": "Mostrar valor",
+    "hide": "Ocultar valor",
+    "working": "Procesando…",
+    "step": "Paso {{current}} de {{total}}",
+    "language": "Idioma",
+    "theme": "Tema",
+    "light": "Claro",
+    "dark": "Oscuro",
+    "system": "Sistema",
+    "close": "Cerrar"
+  },
+  "fields": {
+    "masterPassword": "Contraseña maestra",
+    "confirmPassword": "Confirmar contraseña",
+    "currentPassword": "Contraseña actual",
+    "newPassword": "Nueva contraseña (mínimo {{min}} caracteres)",
+    "confirmNewPassword": "Confirmar nueva contraseña",
+    "recoveryKey": "Clave de recuperación",
+    "command": "Comando",
+    "realValue": "Valor real de {{name}}",
+    "encryptedFile": "Archivo cifrado",
+    "fileToEncrypt": "Archivo que cifrar",
+    "encryptedCopy": "La copia cifrada se escribirá en",
+    "restoredTo": "El contenido real se escribirá en",
+    "sizePerms": "Tamaño {{size}} · Permisos {{mode}}",
+    "permsRestored": "Tamaño {{size}} · Permisos restablecidos a {{mode}}"
+  },
+  "errors": {
+    "minLength": "Usa al menos {{min}} caracteres.",
+    "addPartial": "Guardado en la caja fuerte, pero no se pudo actualizar vault_index.json ni llm.env: {{message}}. El valor real ya está en la caja fuerte. Corrige el problema y vuelve a ejecutar add_secret (o sync_llm_env) para enlazarlo a un marcador.",
+    "changedWhileOpen": "{{name}} cambió en la caja fuerte mientras este diálogo estaba abierto. Vuelve atrás y escribe de nuevo la contraseña para continuar.",
+    "checkWritten": "Marca la casilla para confirmar que has anotado la clave.",
+    "commonPassword": "Es una de las contraseñas más usadas del mundo. Quien copie vault.enc la adivinaría en segundos, por fuerte que sea el cifrado. Elige otra.",
+    "confirmRequired": "Marca la casilla para confirmar que estos archivos ya no existen.",
+    "currentEmpty": "Escribe tu contraseña actual.",
+    "decryptFailed": "Error al descifrar: {{message}}",
+    "decryptPath": "No se pudo descifrar {{path}}: {{message}}",
+    "emptyPassword": "Escribe una contraseña.",
+    "encryptFailed": "Error al cifrar: {{message}}",
+    "installPartial": "Guardado en la caja fuerte, pero no se pudo reescribir {{file}}: {{message}}. Los valores reales están a salvo. Corrige el problema y ejecuta resync_targets.",
+    "keyInternal": "Error interno al verificar la clave. Contacta con soporte.",
+    "keyMismatch": "La clave que has escrito no coincide con la mostrada arriba. Revisa lo que has escrito: cada carácter debe coincidir.",
+    "keyUnexpected": "No se pudo verificar la clave (error inesperado).",
+    "leftoverIntact": "La copia cifrada se escribió y verificó, pero no se pudo eliminar el original {{name}} (puede estar abierto en otro programa). Todavía contiene el secreto real: cierra lo que lo retiene y elimínalo tú. Tus datos están a salvo de todos modos: el archivo .levault está completo y verificado.",
+    "leftoverOverwritten": "La copia cifrada se escribió y verificó. El original {{name}} se sobrescribió con bytes aleatorios, pero no se pudo eliminar (puede estar abierto en otro programa). Ya no contiene tu secreto; lo contiene el archivo .levault. Elimina el resto tú.",
+    "newMismatch": "Las contraseñas nuevas no coinciden.",
+    "noneInVault": "Ninguna de esas variables está en esta caja fuerte.",
+    "passwordMismatch": "Las contraseñas no coinciden.",
+    "recordTypes": "No se pudieron registrar los tipos: {{message}}",
+    "recoveryEmpty": "Escribe la clave de recuperación.",
+    "recoveryUnexpected": "No se pudo verificar la clave de recuperación (error inesperado).",
+    "reenterKey": "Vuelve a escribir la clave de recuperación desde tu papel.",
+    "removePartial": "El secreto ya se eliminó de la caja fuerte (no se puede deshacer), pero no se pudo actualizar vault_index.json ni llm.env: {{message}}. Todavía muestran un marcador para un valor que ya no existe. Vuelve a ejecutar remove_secret para limpiarlo, o edita vault_index.json a mano.",
+    "saveFailed": "No se pudo guardar: {{message}}",
+    "sidecarMismatch": "{{name}} ya existe y no contiene el contenido actual de este archivo. Resuélvelo a mano: uno de los dos archivos no es lo que crees.",
+    "valueEmpty": "Escribe el valor del secreto.",
+    "vault": "Error de la caja fuerte: {{message}}"
+  },
+  "unlockRun": {
+    "title": "Desbloquear la caja fuerte para ejecutar el comando",
+    "expose_one": "Expondrá {{count}} variable a este comando.",
+    "expose_other": "Expondrá {{count}} variables a este comando.",
+    "output": "La salida de este comando se devuelve al asistente de IA.",
+    "files_one": "También descifra {{count}} archivo en disco hasta que termine el comando.",
+    "files_other": "También descifra {{count}} archivos en disco hasta que termine el comando.",
+    "notRedacted": "El contenido de los archivos no se oculta en la salida del comando.",
+    "trust": "Confiar en este comando exacto durante las próximas {{hours}} horas (se ejecuta sin preguntar hasta entonces, o hasta que este servidor se reinicie, lo que ocurra primero)",
+    "submit": "Desbloquear y ejecutar",
+    "filesCleanup": "(se eliminan en cuanto termina el comando)",
+    "materialize": "También escribe valores secretos reales en el disco mientras dure el comando",
+    "materializeExit": "(archivo eliminado en cuanto termina el comando)",
+    "materializeOnce": "(se vacía tras las primeras {{count}} aperturas del archivo, por el comando o, cuando no se puede distinguir al lector, por cualquier programa, o al terminar el comando, lo que ocurra primero; las aperturas detectadas por otros programas se indican en el resultado, y el archivo se elimina en cualquier caso)",
+    "noTrustFiles": "Esta ejecución descifra archivos en el disco, así que no se puede confiar en ella para reutilizarla. Se te preguntará cada vez.",
+    "cwd": "Se ejecuta en",
+    "executable": "Programa"
+  },
+  "setup": {
+    "title": "Crea tu caja fuerte",
+    "intro": "Todavía no existe una caja fuerte. Elige una contraseña maestra (mínimo {{min}} caracteres).",
+    "recovery": "Configurar una clave de recuperación en papel (opcional, aumenta la superficie de ataque)"
+  },
+  "confirmAdd": {
+    "title": "Confirmar el cambio",
+    "proposal": "Añadir secreto de {{name}}",
+    "note": "El valor real de abajo se cifra y nunca se muestra a la IA.",
+    "override": "{{name}} sustituye una variable del sistema y podría afectar a comandos posteriores.",
+    "llmEnvReads": "llm.env contendrá",
+    "proposalAdd": "Añadir el secreto de {{name}}",
+    "proposalUpdate": "Actualizar el secreto de {{name}}",
+    "replaces": "Ya existe un valor. El nuevo lo sustituye; el actual no se muestra aquí."
+  },
+  "confirmRemove": {
+    "title": "Confirmar la eliminación",
+    "proposal": "Eliminar secreto de {{name}}",
+    "irreversible": "No se puede deshacer. El valor real se borra de la caja fuerte.",
+    "allow": "Permitir eliminación",
+    "llmEnvEntry": "Esta entrada de llm.env se eliminará"
+  },
+  "typed": {
+    "title": "Confirmar marcadores con tipo",
+    "description": "Cada línea se leerá exactamente así en todos los archivos registrados.",
+    "leaks": "Esto revela el tipo de cada valor, y el esquema de una URL, a cualquiera que pueda leer el archivo, incluido el asistente de IA: {{kinds}}. Nunca revela el contenido."
+  },
+  "install": {
+    "overwrite": "{{count}} nombres los usa otro proyecto y sobrescribirán su valor en la caja fuerte.",
+    "cancelNote": "Denegar, o cerrar esta ventana, lo cancela todo.",
+    "aboutMigrate_one": "Vas a migrar {{count}} variable desde:",
+    "aboutMigrate_other": "Vas a migrar {{count}} variables desde:",
+    "aboutRegister": "Vas a registrar para futuros resync_targets:",
+    "confirmMigration": "Confirmar la migración",
+    "confirmRegistration": "Confirmar el registro",
+    "migrateWill": "Permitir (1) cifrará en vault.enc los {{count}} valores reales de abajo, legibles solo con tu contraseña maestra, y (2) reescribirá el archivo para que cada línea pase a ser VAR=\"value N\". Ese marcador es lo único que verá un asistente de IA.",
+    "overwriteWarning": "{{count}} nombre(s) de arriba ya los usa otro proyecto registrado. Continuar sobrescribirá el valor de ese proyecto en la caja fuerte: {{names}}",
+    "overwrites": "sobrescribe el valor que usa {{path}}",
+    "registerWill": "No hay secretos nuevos que migrar. Permitir registrará {{file}} para que las futuras llamadas a resync_targets lo mantengan sincronizado para las variables de abajo.",
+    "sensitiveWarning": "{{names}} sustituyen variables de entorno del sistema o de ejecución. Cualquier comando que run_with_env lance después verá el valor de la caja fuerte en lugar del valor real del sistema.",
+    "variables": "Variables"
+  },
+  "encrypt": {
+    "title": "Confirmar el cifrado del archivo",
+    "destroyed": "EL ARCHIVO ORIGINAL SE DESTRUIRÁ. Cuando la copia cifrada se haya escrito y verificado, {{name}} se sobrescribe con bytes aleatorios y se elimina. La única vía de vuelta es la contraseña maestra de esta caja fuerte o su clave de recuperación.",
+    "durabilityCaveat": "Si se pierde vault.enc en este equipo, este archivo no se podrá recuperar. La clave de recuperación sola no basta: solo funciona junto con vault.enc. Haz una copia de ese archivo.",
+    "gitSafe": "El archivo .levault es texto cifrado puro y se puede subir a git sin problema. Su nombre sí revela el nombre del archivo original.",
+    "overwriteCaveat": "La sobrescritura se hace con el mejor esfuerzo. En SSD y sistemas de archivos con registro, los bytes originales pueden seguir existiendo en zonas que este programa no alcanza (nivelación de desgaste, copias sombra, copias de seguridad, archivos de intercambio). Si el archivo llegó a estar expuesto, rota la credencial: no confíes en este borrado.",
+    "resume": "Ya existe una copia cifrada de este archivo y se ha verificado que contiene exactamente su contenido actual: una ejecución anterior se interrumpió antes de destruir el original. Solo queda el borrado de abajo.",
+    "resumeTitle": "Terminar de cifrar el archivo",
+    "unlockTitle": "Desbloquear la caja fuerte para cifrar un archivo"
+  },
+  "decrypt": {
+    "title": "Confirmar el descifrado del archivo",
+    "warn": "Esto escribe un secreto real en el disco de forma permanente y no se limpia. El asistente de IA puede ver esta ruta y tiene la instrucción de no leer el archivo, pero esa instrucción no se hace cumplir.",
+    "leftInPlace": "El archivo .levault se queda donde está; esto no lo quita de la caja fuerte.",
+    "renamed": "Se cifró como {{name}} pero se restaurará con el nombre indicado arriba. El nombre de salida procede del nombre del archivo .levault, no de lo que contiene.",
+    "unlockTitle": "Desbloquear la caja fuerte para descifrar un archivo"
+  },
+  "abandon": {
+    "title": "¿Abandonar los archivos inaccesibles?",
+    "warning": "{{count}} archivos se cifraron con una clave antigua. Retirarla los deja ilegibles para siempre, incluidas las copias en copias de seguridad y en el historial de git.",
+    "confirm": "Estos archivos se pierden para siempre. Abandonarlos.",
+    "action": "Abandonar y retirar",
+    "onlyIf": "Continúa solo si estás seguro de que estos archivos ya no existen en ningún sitio:",
+    "otherwise": "Si alguno podría seguir existiendo, cancela: hazlo accesible y vuelve a ejecutar la rotación."
+  },
+  "changePassword": {
+    "title": "Cambiar la contraseña maestra",
+    "submit": "Cambiar contraseña"
+  },
+  "recoveryKey": {
+    "title": "Guarda tu clave de recuperación",
+    "copy": "Copiar (se borra en {{seconds}} s)",
+    "written": "La he anotado en papel",
+    "confirm": "Confirmar: ya la tengo",
+    "groups": "Grupos de 4 caracteres separados por guiones. El último grupo es la suma de comprobación.",
+    "later": "La configuraré más tarde",
+    "reentry": "Vuelve a escribir la clave completa desde tu papel",
+    "slot": "ID de ranura: {{id}}. Comprueba que coincide con cualquier impresión guardada para saber si está obsoleta.",
+    "steps": "1. Escribe la clave completa en papel y marca la casilla. 2. Vuelve a escribir la clave COMPLETA desde tu papel para confirmar que la copiaste bien. Comprobar solo unos pocos caracteres no demuestra nada.",
+    "warning": "Cuando esta página se cierre, la clave no se podrá mostrar de nuevo. Anótala en papel y guárdala en un lugar seguro: es la única forma de recuperar el acceso si olvidas tu contraseña maestra."
+  },
+  "recover": {
+    "title": "Recuperar el acceso",
+    "submit": "Recuperar",
+    "warning": "Usa esto solo si has olvidado tu contraseña maestra. Tu clave de recuperación en papel te permite establecer una nueva."
+  },
+  "manage": {
+    "title": "Gestionar la caja fuerte",
+    "confirm": {
+      "reissue_recovery": "Reemitir clave de recuperación",
+      "retire_file_keys": "Retirar claves antiguas",
+      "rotate_file_key": "Renovar clave de archivos",
+      "setup_recovery": "Crear clave de recuperación",
+      "upgrade_v2": "Actualizar a v2"
+    },
+    "format": "Formato: v{{version}}",
+    "infoSetupRecovery": "Una clave de recuperación en papel te permite restablecer la contraseña maestra si la olvidas. Aumenta de verdad la superficie de ataque: quien encuentre el papel puede restablecer tu contraseña. Una caja fuerte solo con contraseña también es una opción válida y segura.",
+    "noActions": "No hay acciones disponibles para el estado actual de la caja fuerte.",
+    "recoveryActive": "Ranura de recuperación: activa · id de ranura: {{id}} · creada: {{created}}",
+    "recoveryNone": "Ranura de recuperación: no configurada",
+    "titles": {
+      "change_password": "Cambiar la contraseña maestra",
+      "reissue_recovery": "Reemitir la clave de recuperación",
+      "retire_file_keys": "Retirar claves antiguas de archivos",
+      "rotate_file_key": "Renovar la clave de los archivos cifrados",
+      "setup_recovery": "Crear la clave de recuperación en papel",
+      "upgrade_v2": "Actualizar la caja fuerte a v2"
+    },
+    "warnReissue": "Se generará una nueva clave de recuperación. Tu clave de papel anterior deja de funcionar de inmediato.",
+    "warnRetire": "Esto elimina de forma permanente de la caja fuerte todas las claves de archivo antiguas. Cualquier archivo .levault que siga cifrado con una de ellas, incluidas las copias en otros equipos, en copias de seguridad o en el historial de git, quedará ilegible para siempre. Se rechaza si cada archivo registrado no se ha rotado ya a la clave actual y no se puede leer ahora mismo. Los archivos que esta caja fuerte nunca ha conocido no se pueden comprobar.",
+    "warnRotate": "Cambiar tu contraseña maestra NO cambia la clave que protege tus archivos cifrados. Es deliberado, y por eso un .levault subido a git sigue funcionando. Renueva aquí esa clave si crees que pudo quedar expuesta. Cada archivo cifrado que este equipo encuentre ({{count}} registrados) se vuelve a cifrar con una clave nueva. Los archivos que faltan se omiten y siguen funcionando con la clave antigua, que se conserva. Nada queda ilegible hasta que retires por separado las claves antiguas.",
+    "warnUpgrade": "Tras actualizar, las versiones anteriores de este plugin ya no podrán abrir la caja fuerte. Una versión antigua informará de «Contraseña incorrecta» aunque sea correcta. No se pierden datos, pero resulta alarmante si no lo esperas. Actualiza solo si todas tus instalaciones están al día."
+  },
+  "strength": {
+    "label": "Seguridad de la contraseña",
+    "weak": "Débil",
+    "fair": "Media",
+    "strong": "Fuerte"
+  },
+  "toast": {
+    "copied": "Copiado al portapapeles"
+  },
+  "add": {
+    "aboutAdd": "Vas a añadir el secreto de {{name}}.",
+    "aboutUpdate": "Vas a actualizar el secreto de {{name}}."
+  },
+  "remove": {
+    "about": "Vas a eliminar el secreto de {{name}}."
+  },
+  "retype": {
+    "about": "Vas a asignar un tipo a {{count}} marcadores, para que un .env con solo marcadores pueda ser interpretado por la aplicación que lo lee.",
+    "why": "Se necesita la contraseña maestra porque el tipo de un valor solo se puede leer a partir del valor real."
+  },
+  "unlock": {
+    "title": "Desbloquear la caja fuerte"
+  },
+  "done": {
+    "approved": "Listo",
+    "declined": "Cancelado. No se cambió nada.",
+    "timeout": "Este diálogo caducó. No se cambió nada.",
+    "closed": "Este diálogo se cerró. No se cambió nada.",
+    "error": "Algo salió mal. Consulta a tu asistente para ver los detalles.",
+    "hint": "Puedes cerrar esta pestaña y volver a tu asistente."
+  },
+  "session": {
+    "invalid": "Este enlace ya se usó o ya no es válido. Pide a tu asistente que vuelva a abrir el diálogo.",
+    "none": "Abre esta página desde el enlace que te da tu asistente.",
+    "loading": "Conectando…"
+  },
+  "vaultApp": {
+    "title": "Caja fuerte",
+    "lock": {
+      "title": "Tu caja fuerte está bloqueada",
+      "createTitle": "Crea tu caja fuerte",
+      "unlock": "Desbloquear",
+      "createAction": "Crear caja fuerte",
+      "recover": "Recuperar con la clave de recuperación",
+      "or": "o",
+      "auto": "Bloqueada por inactividad."
+    },
+    "tabs": {
+      "vault": "Caja fuerte",
+      "generator": "Generador",
+      "settings": "Ajustes"
+    },
+    "menu": {
+      "account": "Cuenta",
+      "close": "Cerrar la app"
+    },
+    "vault": {
+      "add": "Añadir",
+      "search": "Buscar",
+      "type": "Tipo",
+      "allTypes": "Todos los tipos",
+      "emptyTitle": "Aún no hay secretos",
+      "emptyHint": "Añade tu primer secreto para empezar.",
+      "noMatch": "Sin resultados",
+      "noMatchHint": "Prueba con otra búsqueda u otro tipo.",
+      "count_one": "{{count}} elemento",
+      "count_other": "{{count}} elementos",
+      "copy": "Copiar valor",
+      "more": "Más opciones",
+      "edit": "Editar",
+      "copyName": "Copiar nombre",
+      "delete": "Eliminar",
+      "placeholder": "Marcador {{n}}",
+      "notUsed": "Aún no se usa en ningún archivo",
+      "open": "Abrir"
+    },
+    "types": {
+      "apiKey": "Clave de API",
+      "token": "Token",
+      "password": "Contraseña",
+      "url": "URL",
+      "database": "Base de datos",
+      "other": "Otro",
+      "secret": "Secreto",
+      "login": "Inicio de sesión",
+      "card": "Tarjeta",
+      "identity": "Identidad",
+      "note": "Nota",
+      "ssh": "Clave SSH"
+    },
+    "toast": {
+      "saved": "Guardado.",
+      "deleted": "Eliminado.",
+      "copied": "Copiado. El portapapeles se vaciará en {{seconds}} s.",
+      "copy_unavailable": "No se encontró ninguna herramienta de portapapeles. Instala wl-clipboard o xclip.",
+      "copy_failed": "No se pudo copiar.",
+      "nameCopied": "Nombre copiado."
+    },
+    "form": {
+      "addTitle": "Nuevo secreto",
+      "editTitle": "Editar secreto",
+      "editing": "Introduce un nuevo valor para {{name}}. El valor actual nunca se muestra.",
+      "name": "Nombre",
+      "value": "Valor",
+      "save": "Guardar",
+      "nameInvalid": "Usa letras, dígitos y guiones bajos, empezando por una letra o un guion bajo.",
+      "nameExists": "Ya existe un secreto llamado {{name}}. Edítalo en su lugar.",
+      "sensitiveAck": "{{name}} cambia el comportamiento de los programas. Pulsa Guardar de nuevo para confirmar."
+    },
+    "generator": {
+      "password": "Contraseña",
+      "passphrase": "Frase de contraseña",
+      "username": "Nombre de usuario",
+      "options": "Opciones",
+      "length": "Longitud",
+      "lengthHint": "El valor debe estar entre {{min}} y {{max}}.",
+      "include": "Incluir",
+      "minNumbers": "Mínimo de números",
+      "minSpecial": "Mínimo de especiales",
+      "avoidAmbiguous": "Evitar caracteres ambiguos",
+      "words": "Número de palabras",
+      "separator": "Separador de palabras",
+      "capitalize": "Mayúscula inicial",
+      "includeNumber": "Incluir número",
+      "regenerate": "Generar de nuevo",
+      "copy": "Copiar",
+      "copied": "Copiado."
+    },
+    "settings": {
+      "accountSecurity": "Seguridad de la cuenta",
+      "vaultOptions": "Opciones de la caja fuerte",
+      "appearance": "Apariencia",
+      "about": "Acerca de",
+      "lockNow": "Bloquear ahora",
+      "autoLock": "Bloquear tras inactividad",
+      "autoLockHint": "La caja fuerte se bloquea tras este tiempo sin actividad.",
+      "minutes_one": "{{count}} minuto",
+      "minutes_other": "{{count}} minutos",
+      "clipboardClear": "Vaciar el portapapeles",
+      "clipboardHint": "Un secreto copiado se elimina del portapapeles pasado este tiempo.",
+      "seconds_one": "{{count}} segundo",
+      "seconds_other": "{{count}} segundos",
+      "version": "Versión",
+      "format": "Formato de la caja fuerte",
+      "secrets": "Elementos",
+      "recoveryKey": "Clave de recuperación",
+      "recoveryOn": "Configurada",
+      "recoveryOff": "No configurada",
+      "location": "Carpeta de la caja fuerte",
+      "noRecovery": "No hay ninguna clave de recuperación configurada.",
+      "noRecoveryAction": "Añade una en Seguridad de la cuenta."
+    },
+    "result": {
+      "keyMistyped": "Esa clave de recuperación parece mal escrita (su suma de comprobación no coincide). Compárala con tu copia impresa.",
+      "keyWrong": "Esa clave de recuperación no es válida para esta caja fuerte. Si la contraseña cambió desde que se imprimió, la clave antigua ya no funciona.",
+      "noRecoverySlot": "Esta caja fuerte no tiene clave de recuperación, así que no se puede recuperar sin la contraseña maestra.",
+      "damaged": "El archivo de la caja fuerte está dañado o ha sido manipulado. Restáurala desde una copia de seguridad.",
+      "restored": "La operación no se completó. La caja fuerte volvió a su estado anterior.",
+      "recovered": "Acceso recuperado. Tu clave de recuperación actual sigue funcionando.",
+      "keyNotConfirmed": "La nueva clave de recuperación no se confirmó y no puede mostrarse de nuevo. Emite una nueva en Seguridad de la cuenta.",
+      "passwordChanged": "Contraseña maestra cambiada.",
+      "keyIssued": "Clave de recuperación emitida.",
+      "upgraded": "Caja fuerte actualizada al formato v2.",
+      "rotated": "Clave de archivos rotada. {{count}} archivo(s) recifrado(s).",
+      "rotatedPartial": "{{count}} archivo(s) no se rotaron y siguen usando la clave antigua.",
+      "retired": "{{count}} clave(s) de archivos antigua(s) retirada(s).",
+      "nothingToRetire": "Nada que retirar.",
+      "noVault": "No se encontró ninguna caja fuerte."
+    },
+    "item": {
+      "chooseTitle": "Añadir un elemento",
+      "chooseHint": "Los secretos están disponibles para tu asistente de IA como marcadores. Todo lo demás es solo para ti y nunca se le muestra.",
+      "about": {
+        "secret": "Una variable de entorno que el asistente puede usar sin verla",
+        "login": "Un usuario y una contraseña para un sitio",
+        "card": "Una tarjeta de pago",
+        "identity": "Tu nombre, dirección y datos de contacto",
+        "note": "Texto libre, como un código de recuperación o una configuración",
+        "ssh": "Una clave SSH privada y pública"
+      },
+      "add": {
+        "login": "Nuevo inicio de sesión",
+        "card": "Nueva tarjeta",
+        "identity": "Nueva identidad",
+        "note": "Nueva nota",
+        "ssh": "Nueva clave SSH"
+      },
+      "edit": {
+        "login": "Editar inicio de sesión",
+        "card": "Editar tarjeta",
+        "identity": "Editar identidad",
+        "note": "Editar nota",
+        "ssh": "Editar clave SSH"
+      },
+      "view": {
+        "login": "Ver inicio de sesión",
+        "card": "Ver tarjeta",
+        "identity": "Ver identidad",
+        "note": "Ver nota",
+        "ssh": "Ver clave SSH"
+      },
+      "name": "Nombre",
+      "noFolder": "Sin carpeta",
+      "history": "Historial del elemento",
+      "lastEdited": "Última modificación",
+      "created": "Creado",
+      "noFields": "Este elemento aún no tiene contenido.",
+      "deleteTitle": "Eliminar elemento",
+      "deleteBody": "¿Eliminar {{name}}? Esta acción no se puede deshacer.",
+      "corrupted": "Los elementos guardados están en un formato que esta versión no entiende. Tus secretos no se han tocado.",
+      "invalid": "{{message}}"
+    },
+    "fields": {
+      "notes": "Notas",
+      "folder": "Carpeta",
+      "username": "Usuario",
+      "password": "Contraseña",
+      "uri": "Sitio web",
+      "holder": "Titular de la tarjeta",
+      "brand": "Marca",
+      "number": "Número de tarjeta",
+      "expMonth": "Mes de caducidad",
+      "expYear": "Año de caducidad",
+      "code": "Código de seguridad",
+      "title": "Tratamiento",
+      "firstName": "Nombre",
+      "middleName": "Segundo nombre",
+      "lastName": "Apellidos",
+      "email": "Correo electrónico",
+      "phone": "Teléfono",
+      "company": "Empresa",
+      "address1": "Dirección 1",
+      "address2": "Dirección 2",
+      "city": "Ciudad",
+      "state": "Estado / provincia",
+      "postalCode": "Código postal",
+      "country": "País",
+      "ssn": "Número de la seguridad social",
+      "passport": "Número de pasaporte",
+      "license": "Número de licencia",
+      "privateKey": "Clave privada",
+      "publicKey": "Clave pública",
+      "passphrase": "Frase de contraseña"
+    }
+  }
+}

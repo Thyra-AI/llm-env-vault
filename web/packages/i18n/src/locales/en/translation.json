@@ -1,0 +1,449 @@
+{
+  "app": {
+    "name": "Thyra Vault"
+  },
+  "common": {
+    "cancel": "Cancel",
+    "back": "Back",
+    "continue": "Continue",
+    "allow": "Allow",
+    "deny": "Deny",
+    "copy": "Copy",
+    "copied": "Copied",
+    "show": "Show value",
+    "hide": "Hide value",
+    "working": "Working…",
+    "step": "Step {{current}} of {{total}}",
+    "language": "Language",
+    "theme": "Theme",
+    "light": "Light",
+    "dark": "Dark",
+    "system": "System",
+    "close": "Close"
+  },
+  "fields": {
+    "masterPassword": "Master password",
+    "confirmPassword": "Confirm password",
+    "currentPassword": "Current password",
+    "newPassword": "New password (at least {{min}} characters)",
+    "confirmNewPassword": "Confirm new password",
+    "recoveryKey": "Recovery key",
+    "command": "Command",
+    "realValue": "Real value for {{name}}",
+    "encryptedFile": "Encrypted file",
+    "fileToEncrypt": "File to encrypt",
+    "encryptedCopy": "Encrypted copy will be written to",
+    "restoredTo": "Real contents will be written to",
+    "sizePerms": "Size {{size}} · Permissions {{mode}}",
+    "permsRestored": "Size {{size}} · Permissions restored to {{mode}}"
+  },
+  "errors": {
+    "minLength": "Use at least {{min}} characters.",
+    "addPartial": "Saved to the vault, but couldn't update vault_index.json or llm.env: {{message}}. The real value is in the vault now. Fix the problem and run add_secret again (or sync_llm_env) to finish linking it to a placeholder.",
+    "changedWhileOpen": "{{name}} changed in the vault while this dialog was open. Go back and re-enter the password to continue.",
+    "checkWritten": "Tick the box to confirm you've written the key down.",
+    "commonPassword": "That's one of the most commonly used passwords in the world. Anyone who copies vault.enc would guess it within seconds, however strong the encryption is. Pick another.",
+    "confirmRequired": "Tick the box to confirm these files no longer exist.",
+    "currentEmpty": "Enter your current password.",
+    "decryptFailed": "Decryption failed: {{message}}",
+    "decryptPath": "Couldn't decrypt {{path}}: {{message}}",
+    "emptyPassword": "Enter a password.",
+    "encryptFailed": "Encryption failed: {{message}}",
+    "installPartial": "Saved to the vault, but couldn't rewrite {{file}}: {{message}}. The real values are safe. Fix the problem and run resync_targets.",
+    "keyInternal": "Internal error verifying the key. Contact support.",
+    "keyMismatch": "The key you entered doesn't match the one shown above. Check what you typed: every character must match.",
+    "keyUnexpected": "Couldn't verify the key (unexpected error).",
+    "leftoverIntact": "The encrypted copy was written and verified, but the original {{name}} couldn't be removed (it may be open in another program). It still contains the real secret: close whatever is holding it and delete it yourself. Your data is safe either way; the .levault file is complete and verified.",
+    "leftoverOverwritten": "The encrypted copy was written and verified. The original {{name}} was overwritten with random bytes but couldn't be deleted (it may be open in another program). It no longer contains your secret; the .levault file does. Delete the leftover yourself.",
+    "newMismatch": "The new passwords don't match.",
+    "noneInVault": "None of those variables are in this vault.",
+    "passwordMismatch": "The passwords don't match.",
+    "recordTypes": "Couldn't record the types: {{message}}",
+    "recoveryEmpty": "Enter the recovery key.",
+    "recoveryUnexpected": "Couldn't verify the recovery key (unexpected error).",
+    "reenterKey": "Re-enter the recovery key from your paper.",
+    "removePartial": "The secret was already removed from the vault (this can't be undone), but vault_index.json or llm.env couldn't be updated: {{message}}. They still show a placeholder for a value that no longer exists. Run remove_secret again to clean that up, or edit vault_index.json by hand.",
+    "saveFailed": "Couldn't save: {{message}}",
+    "sidecarMismatch": "{{name}} already exists and doesn't contain this file's current contents. Resolve that by hand: one of the two files isn't what you think.",
+    "valueEmpty": "Enter the secret value.",
+    "vault": "Vault error: {{message}}"
+  },
+  "unlockRun": {
+    "title": "Unlock vault to run command",
+    "expose_one": "Will expose {{count}} variable to this command.",
+    "expose_other": "Will expose {{count}} variables to this command.",
+    "output": "This command's output is returned to the AI assistant.",
+    "files_one": "Also decrypts {{count}} file to disk until the command exits.",
+    "files_other": "Also decrypts {{count}} files to disk until the command exits.",
+    "notRedacted": "File contents are not redacted from the command's output.",
+    "trust": "Trust this exact command for the next {{hours}} hours (it runs with no prompt until then, or until this server restarts, whichever comes first)",
+    "submit": "Unlock and run",
+    "filesCleanup": "(deleted the moment the command exits)",
+    "materialize": "Also writes real secret values to disk for the lifetime of the command",
+    "materializeExit": "(file deleted the moment the command exits)",
+    "materializeOnce": "(emptied after the first {{count}} open(s) of the file, by the command or, when the reader can't be told apart, by any program, or when the command exits, whichever comes first; detected opens by other programs are listed in the result, and the file is deleted either way)",
+    "noTrustFiles": "This run decrypts files to disk, so it can't be trusted for later reuse. You'll be asked again every time.",
+    "cwd": "Runs in",
+    "executable": "Program"
+  },
+  "setup": {
+    "title": "Create your vault",
+    "intro": "No vault exists yet. Choose a master password (at least {{min}} characters).",
+    "recovery": "Set up a paper recovery key (optional, increases attack surface)"
+  },
+  "confirmAdd": {
+    "title": "Confirm change",
+    "proposal": "Add secret for {{name}}",
+    "note": "The real value below is encrypted and never shown to the AI.",
+    "override": "{{name}} overrides a system variable and could affect later commands.",
+    "llmEnvReads": "llm.env will read",
+    "proposalAdd": "Add the secret for {{name}}",
+    "proposalUpdate": "Update the secret for {{name}}",
+    "replaces": "A value already exists. The new value replaces it; the current one isn't shown here."
+  },
+  "confirmRemove": {
+    "title": "Confirm removal",
+    "proposal": "Remove secret for {{name}}",
+    "irreversible": "This cannot be undone. The real value is deleted from the vault.",
+    "allow": "Allow removal",
+    "llmEnvEntry": "This llm.env entry will be deleted"
+  },
+  "typed": {
+    "title": "Confirm typed placeholders",
+    "description": "Each line will read exactly like this in every registered file.",
+    "leaks": "This discloses the type of each value, and a URL's scheme, to anything that can read the file, including the AI assistant: {{kinds}}. It never discloses content."
+  },
+  "install": {
+    "overwrite": "{{count}} names are used by another project and will overwrite its vault value.",
+    "cancelNote": "Deny, or closing this window, cancels everything.",
+    "aboutMigrate_one": "About to migrate {{count}} variable out of:",
+    "aboutMigrate_other": "About to migrate {{count}} variables out of:",
+    "aboutRegister": "About to register for future resync_targets:",
+    "confirmMigration": "Confirm migration",
+    "confirmRegistration": "Confirm registration",
+    "migrateWill": "Allow will (1) encrypt the {{count}} real values below into vault.enc, readable only with your master password, and (2) rewrite the file so each line becomes VAR=\"value N\". That placeholder is all an AI assistant will ever see.",
+    "overwriteWarning": "{{count}} name(s) above are already used by another registered project. Continuing overwrites that project's vault value: {{names}}",
+    "overwrites": "overwrites the value used by {{path}}",
+    "registerWill": "No new secrets to migrate. Allow will register {{file}} so future resync_targets calls keep it in sync for the variables below.",
+    "sensitiveWarning": "{{names}} override system or runtime environment variables. Any command run_with_env launches later will see the vaulted value instead of the real system value.",
+    "variables": "Variables"
+  },
+  "encrypt": {
+    "title": "Confirm encrypt file",
+    "destroyed": "THE ORIGINAL FILE WILL BE DESTROYED. After the encrypted copy is written and verified, {{name}} is overwritten with random bytes and deleted. The only way back is this vault's master password or its recovery key.",
+    "durabilityCaveat": "If vault.enc on this machine is lost, this file can't be recovered. The recovery key alone isn't enough: it only works together with vault.enc. Back that file up.",
+    "gitSafe": "The .levault file is pure ciphertext and is safe to commit to git. Its filename still reveals the original filename.",
+    "overwriteCaveat": "Overwriting is best effort. On SSDs and journaling filesystems the original bytes may still exist in storage this program can't reach (wear levelling, shadow copies, backups, swap files). If this file was ever exposed, rotate the credential; don't rely on this deletion.",
+    "resume": "An encrypted copy of this file already exists and is verified to contain exactly its current contents: a previous run was interrupted before the original could be destroyed. Only the deletion below is left to do.",
+    "resumeTitle": "Finish encrypting the file",
+    "unlockTitle": "Unlock the vault to encrypt a file"
+  },
+  "decrypt": {
+    "title": "Confirm decrypt file",
+    "warn": "This writes a real secret to disk permanently and it is not cleaned up. The AI assistant can see this path and has been told not to read the file, but that isn't enforced.",
+    "leftInPlace": "The .levault file stays in place; this doesn't remove the file from the vault.",
+    "renamed": "This was encrypted as {{name}} but will be restored under the name above. The output name comes from the .levault file's name, not from what is stored inside it.",
+    "unlockTitle": "Unlock the vault to decrypt a file"
+  },
+  "abandon": {
+    "title": "Abandon unreachable files?",
+    "warning": "{{count}} files were encrypted with an old key. Retiring it makes them permanently unreadable, including copies in backups and git history.",
+    "confirm": "These files are gone forever. Abandon them.",
+    "action": "Abandon and retire",
+    "onlyIf": "Only continue if you are certain these no longer exist anywhere:",
+    "otherwise": "If any of them might still exist, cancel: make it reachable and run the rotation again instead."
+  },
+  "changePassword": {
+    "title": "Change master password",
+    "submit": "Change password"
+  },
+  "recoveryKey": {
+    "title": "Save your recovery key",
+    "copy": "Copy (clears in {{seconds}}s)",
+    "written": "I have written this down on paper",
+    "confirm": "Confirm: I have it",
+    "groups": "Groups of 4 characters separated by hyphens. The last group is the checksum.",
+    "later": "I'll set it up later",
+    "reentry": "Re-enter the full key from your paper",
+    "slot": "Slot ID: {{id}}. Check that it matches any saved printout to tell whether it is stale.",
+    "steps": "1. Write the full key on paper, then tick the box. 2. Re-enter the FULL key from your paper to confirm it was written correctly. Checking only a few characters proves nothing.",
+    "warning": "Once this page closes, the key can't be shown again. Write it down on paper and store it safely: it is the only way to regain access if you forget your master password."
+  },
+  "recover": {
+    "title": "Recover access",
+    "submit": "Recover",
+    "warning": "Use this only if you've forgotten your master password. Your paper recovery key lets you set a new master password."
+  },
+  "manage": {
+    "title": "Manage vault",
+    "confirm": {
+      "reissue_recovery": "Reissue recovery key",
+      "retire_file_keys": "Retire old keys",
+      "rotate_file_key": "Rotate file key",
+      "setup_recovery": "Set up recovery key",
+      "upgrade_v2": "Upgrade to v2"
+    },
+    "format": "Format: v{{version}}",
+    "infoSetupRecovery": "A paper recovery key lets you reset your master password if you forget it. It genuinely increases attack surface: anyone who finds the paper can reset your password. A password-only vault is also a valid and secure choice.",
+    "noActions": "No actions are available for this vault state.",
+    "recoveryActive": "Recovery slot: active · slot id: {{id}} · created: {{created}}",
+    "recoveryNone": "Recovery slot: not configured",
+    "titles": {
+      "change_password": "Change master password",
+      "reissue_recovery": "Reissue recovery key",
+      "retire_file_keys": "Retire old file keys",
+      "rotate_file_key": "Rotate encrypted-file key",
+      "setup_recovery": "Set up paper recovery key",
+      "upgrade_v2": "Upgrade vault to v2"
+    },
+    "warnReissue": "This generates a new recovery key. Your old paper key stops working immediately.",
+    "warnRetire": "This permanently deletes every old file key from the vault. Any .levault file still encrypted under one, including copies on other machines, in backups or in git history, becomes permanently unreadable. It is refused unless every registered file has already been rotated onto the current key and is readable right now. Files this vault has never been told about can't be checked.",
+    "warnRotate": "Changing your master password does not change the key that protects your encrypted files. That is deliberate, and it is why a .levault committed to git keeps working. Rotate that key here if you believe it may have been exposed. Every encrypted file this machine can find ({{count}} registered) is re-encrypted under a new key. Missing files are skipped and keep working under the old key, which is retained. Nothing becomes unreadable until you separately retire the old keys.",
+    "warnUpgrade": "After upgrading, older versions of this plugin can no longer open the vault. An older build reports \"Wrong password\" for a correct password. There is no data loss, but it is alarming if you aren't expecting it. Only upgrade if all your installations are current."
+  },
+  "strength": {
+    "label": "Password strength",
+    "weak": "Weak",
+    "fair": "Fair",
+    "strong": "Strong"
+  },
+  "toast": {
+    "copied": "Copied to clipboard"
+  },
+  "add": {
+    "aboutAdd": "About to add the secret for {{name}}.",
+    "aboutUpdate": "About to update the secret for {{name}}."
+  },
+  "remove": {
+    "about": "About to remove the secret for {{name}}."
+  },
+  "retype": {
+    "about": "About to give {{count}} placeholders a type, so a placeholder-only .env can be parsed by the app that reads it.",
+    "why": "The master password is needed because a value's type can only be read from the real value."
+  },
+  "unlock": {
+    "title": "Unlock vault"
+  },
+  "done": {
+    "approved": "Done",
+    "declined": "Cancelled. Nothing was changed.",
+    "timeout": "This dialog timed out. Nothing was changed.",
+    "closed": "This dialog was closed. Nothing was changed.",
+    "error": "Something went wrong. Check your assistant for details.",
+    "hint": "You can close this tab and go back to your assistant."
+  },
+  "session": {
+    "invalid": "This link was already used or is no longer valid. Ask your assistant to open the dialog again.",
+    "none": "Open this page from the link your assistant gives you.",
+    "loading": "Connecting…"
+  },
+  "vaultApp": {
+    "title": "Vault",
+    "lock": {
+      "title": "Your vault is locked",
+      "createTitle": "Create your vault",
+      "unlock": "Unlock",
+      "createAction": "Create vault",
+      "recover": "Recover with recovery key",
+      "or": "or",
+      "auto": "Locked after inactivity."
+    },
+    "tabs": {
+      "vault": "Vault",
+      "generator": "Generator",
+      "settings": "Settings"
+    },
+    "menu": {
+      "account": "Account",
+      "close": "Close app"
+    },
+    "vault": {
+      "add": "Add",
+      "search": "Search",
+      "type": "Type",
+      "allTypes": "All types",
+      "emptyTitle": "No secrets yet",
+      "emptyHint": "Add your first secret to get started.",
+      "noMatch": "No matches",
+      "noMatchHint": "Try another search or type.",
+      "count_one": "{{count}} item",
+      "count_other": "{{count}} items",
+      "copy": "Copy value",
+      "more": "More options",
+      "edit": "Edit",
+      "copyName": "Copy name",
+      "delete": "Delete",
+      "placeholder": "Placeholder {{n}}",
+      "notUsed": "Not used in any file yet",
+      "open": "Open"
+    },
+    "types": {
+      "apiKey": "API key",
+      "token": "Token",
+      "password": "Password",
+      "url": "URL",
+      "database": "Database",
+      "other": "Other",
+      "secret": "Secret",
+      "login": "Login",
+      "card": "Card",
+      "identity": "Identity",
+      "note": "Note",
+      "ssh": "SSH key"
+    },
+    "toast": {
+      "saved": "Saved.",
+      "deleted": "Deleted.",
+      "copied": "Copied. The clipboard is cleared in {{seconds}} s.",
+      "copy_unavailable": "No clipboard tool found. Install wl-clipboard or xclip.",
+      "copy_failed": "Could not copy.",
+      "nameCopied": "Name copied."
+    },
+    "form": {
+      "addTitle": "New secret",
+      "editTitle": "Edit secret",
+      "editing": "Enter a new value for {{name}}. The current value is never shown.",
+      "name": "Name",
+      "value": "Value",
+      "save": "Save",
+      "nameInvalid": "Use letters, digits and underscores, starting with a letter or underscore.",
+      "nameExists": "A secret named {{name}} already exists. Edit it instead.",
+      "sensitiveAck": "{{name}} changes how programs behave. Press Save again to confirm."
+    },
+    "generator": {
+      "password": "Password",
+      "passphrase": "Passphrase",
+      "username": "Username",
+      "options": "Options",
+      "length": "Length",
+      "lengthHint": "Value must be between {{min}} and {{max}}.",
+      "include": "Include",
+      "minNumbers": "Minimum numbers",
+      "minSpecial": "Minimum special",
+      "avoidAmbiguous": "Avoid ambiguous characters",
+      "words": "Number of words",
+      "separator": "Word separator",
+      "capitalize": "Capitalize",
+      "includeNumber": "Include number",
+      "regenerate": "Generate again",
+      "copy": "Copy",
+      "copied": "Copied."
+    },
+    "settings": {
+      "accountSecurity": "Account security",
+      "vaultOptions": "Vault options",
+      "appearance": "Appearance",
+      "about": "About",
+      "lockNow": "Lock now",
+      "autoLock": "Lock after inactivity",
+      "autoLockHint": "The vault locks after this much time without activity.",
+      "minutes_one": "{{count}} minute",
+      "minutes_other": "{{count}} minutes",
+      "clipboardClear": "Clear clipboard",
+      "clipboardHint": "A copied secret is removed from the clipboard after this time.",
+      "seconds_one": "{{count}} second",
+      "seconds_other": "{{count}} seconds",
+      "version": "Version",
+      "format": "Vault format",
+      "secrets": "Items",
+      "recoveryKey": "Recovery key",
+      "recoveryOn": "Set up",
+      "recoveryOff": "Not set up",
+      "location": "Vault folder",
+      "noRecovery": "No recovery key is set up.",
+      "noRecoveryAction": "Add one in Account security."
+    },
+    "result": {
+      "keyMistyped": "That recovery key looks mistyped (its checksum does not match). Check it against your printed copy.",
+      "keyWrong": "That recovery key is not valid for this vault. If the password changed since it was printed, the old key no longer works.",
+      "noRecoverySlot": "This vault has no recovery key, so it cannot be recovered without the master password.",
+      "damaged": "The vault file is damaged or has been tampered with. Restore it from a backup.",
+      "restored": "That did not complete. The vault was restored to its previous state.",
+      "recovered": "Access recovered. Your existing recovery key still works.",
+      "keyNotConfirmed": "The new recovery key was not confirmed and cannot be shown again. Issue a replacement in Account security.",
+      "passwordChanged": "Master password changed.",
+      "keyIssued": "Recovery key issued.",
+      "upgraded": "Vault upgraded to the v2 format.",
+      "rotated": "File key rotated. {{count}} file(s) re-encrypted.",
+      "rotatedPartial": "{{count}} file(s) were not rotated and still use the old key.",
+      "retired": "Retired {{count}} old file key(s).",
+      "nothingToRetire": "Nothing to retire.",
+      "noVault": "No vault found."
+    },
+    "item": {
+      "chooseTitle": "Add an item",
+      "chooseHint": "Secrets are available to your AI assistant as placeholders. Everything else is only for you and is never shown to it.",
+      "about": {
+        "secret": "An environment variable the assistant can use without seeing it",
+        "login": "A username and password for a site",
+        "card": "A payment card",
+        "identity": "Your name, address and contact details",
+        "note": "Free text, such as a recovery code or a config",
+        "ssh": "A private and public SSH key"
+      },
+      "add": {
+        "login": "New login",
+        "card": "New card",
+        "identity": "New identity",
+        "note": "New note",
+        "ssh": "New SSH key"
+      },
+      "edit": {
+        "login": "Edit login",
+        "card": "Edit card",
+        "identity": "Edit identity",
+        "note": "Edit note",
+        "ssh": "Edit SSH key"
+      },
+      "view": {
+        "login": "View login",
+        "card": "View card",
+        "identity": "View identity",
+        "note": "View note",
+        "ssh": "View SSH key"
+      },
+      "name": "Name",
+      "noFolder": "No folder",
+      "history": "Item history",
+      "lastEdited": "Last edited",
+      "created": "Created",
+      "noFields": "This item has no content yet.",
+      "deleteTitle": "Delete item",
+      "deleteBody": "Delete {{name}}? This cannot be undone.",
+      "corrupted": "The stored items are in a format this version does not understand. Your secrets are untouched.",
+      "invalid": "{{message}}"
+    },
+    "fields": {
+      "notes": "Notes",
+      "folder": "Folder",
+      "username": "Username",
+      "password": "Password",
+      "uri": "Website",
+      "holder": "Cardholder name",
+      "brand": "Brand",
+      "number": "Card number",
+      "expMonth": "Expiry month",
+      "expYear": "Expiry year",
+      "code": "Security code",
+      "title": "Title",
+      "firstName": "First name",
+      "middleName": "Middle name",
+      "lastName": "Last name",
+      "email": "Email",
+      "phone": "Phone",
+      "company": "Company",
+      "address1": "Address 1",
+      "address2": "Address 2",
+      "city": "City",
+      "state": "State / province",
+      "postalCode": "Postal code",
+      "country": "Country",
+      "ssn": "Social security number",
+      "passport": "Passport number",
+      "license": "License number",
+      "privateKey": "Private key",
+      "publicKey": "Public key",
+      "passphrase": "Passphrase"
+    }
+  }
+}

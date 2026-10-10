@@ -1,0 +1,449 @@
+{
+  "app": {
+    "name": "Thyra Vault"
+  },
+  "common": {
+    "cancel": "Annuler",
+    "back": "Retour",
+    "continue": "Continuer",
+    "allow": "Autoriser",
+    "deny": "Refuser",
+    "copy": "Copier",
+    "copied": "Copié",
+    "show": "Afficher la valeur",
+    "hide": "Masquer la valeur",
+    "working": "Traitement en cours…",
+    "step": "Étape {{current}} sur {{total}}",
+    "language": "Langue",
+    "theme": "Thème",
+    "light": "Clair",
+    "dark": "Sombre",
+    "system": "Système",
+    "close": "Fermer"
+  },
+  "fields": {
+    "masterPassword": "Mot de passe principal",
+    "confirmPassword": "Confirmer le mot de passe",
+    "currentPassword": "Mot de passe actuel",
+    "newPassword": "Nouveau mot de passe ({{min}} caractères minimum)",
+    "confirmNewPassword": "Confirmer le nouveau mot de passe",
+    "recoveryKey": "Clé de récupération",
+    "command": "Commande",
+    "realValue": "Valeur réelle de {{name}}",
+    "encryptedFile": "Fichier chiffré",
+    "fileToEncrypt": "Fichier à chiffrer",
+    "encryptedCopy": "La copie chiffrée sera écrite dans",
+    "restoredTo": "Le contenu réel sera écrit dans",
+    "sizePerms": "Taille {{size}} · Permissions {{mode}}",
+    "permsRestored": "Taille {{size}} · Permissions rétablies à {{mode}}"
+  },
+  "errors": {
+    "minLength": "Utilisez au moins {{min}} caractères.",
+    "addPartial": "Enregistré dans le coffre, mais vault_index.json ou llm.env n'ont pas pu être mis à jour : {{message}}. La vraie valeur est désormais dans le coffre. Corrigez le problème et relancez add_secret (ou sync_llm_env) pour finir de la lier à une valeur de remplacement.",
+    "changedWhileOpen": "{{name}} a changé dans le coffre pendant que cette fenêtre était ouverte. Revenez en arrière et saisissez à nouveau le mot de passe pour continuer.",
+    "checkWritten": "Cochez la case pour confirmer que vous avez noté la clé.",
+    "commonPassword": "C'est l'un des mots de passe les plus utilisés au monde. Quiconque copie vault.enc le devinerait en quelques secondes, quelle que soit la solidité du chiffrement. Choisissez-en un autre.",
+    "confirmRequired": "Cochez la case pour confirmer que ces fichiers n'existent plus.",
+    "currentEmpty": "Saisissez votre mot de passe actuel.",
+    "decryptFailed": "Échec du déchiffrement : {{message}}",
+    "decryptPath": "Impossible de déchiffrer {{path}} : {{message}}",
+    "emptyPassword": "Saisissez un mot de passe.",
+    "encryptFailed": "Échec du chiffrement : {{message}}",
+    "installPartial": "Enregistré dans le coffre, mais {{file}} n'a pas pu être réécrit : {{message}}. Les vraies valeurs sont en sécurité. Corrigez le problème et lancez resync_targets.",
+    "keyInternal": "Erreur interne lors de la vérification de la clé. Contactez le support.",
+    "keyMismatch": "La clé saisie ne correspond pas à celle affichée ci-dessus. Vérifiez votre saisie : chaque caractère doit être identique.",
+    "keyUnexpected": "Impossible de vérifier la clé (erreur inattendue).",
+    "leftoverIntact": "La copie chiffrée a été écrite et vérifiée, mais l'original {{name}} n'a pas pu être supprimé (il est peut-être ouvert dans un autre programme). Il contient toujours le vrai secret : fermez ce qui le retient et supprimez-le vous-même. Vos données sont en sécurité dans tous les cas : le fichier .levault est complet et vérifié.",
+    "leftoverOverwritten": "La copie chiffrée a été écrite et vérifiée. L'original {{name}} a été écrasé par des octets aléatoires mais n'a pas pu être supprimé (il est peut-être ouvert dans un autre programme). Il ne contient plus votre secret : c'est le fichier .levault qui le contient. Supprimez le résidu vous-même.",
+    "newMismatch": "Les nouveaux mots de passe ne correspondent pas.",
+    "noneInVault": "Aucune de ces variables ne figure dans ce coffre.",
+    "passwordMismatch": "Les mots de passe ne correspondent pas.",
+    "recordTypes": "Impossible d'enregistrer les types : {{message}}",
+    "recoveryEmpty": "Saisissez la clé de récupération.",
+    "recoveryUnexpected": "Impossible de vérifier la clé de récupération (erreur inattendue).",
+    "reenterKey": "Saisissez à nouveau la clé de récupération depuis votre papier.",
+    "removePartial": "Le secret a déjà été retiré du coffre (irréversible), mais vault_index.json ou llm.env n'ont pas pu être mis à jour : {{message}}. Ils affichent encore une valeur de remplacement pour une valeur qui n'existe plus. Relancez remove_secret pour nettoyer, ou modifiez vault_index.json à la main.",
+    "saveFailed": "Impossible d'enregistrer : {{message}}",
+    "sidecarMismatch": "{{name}} existe déjà et ne contient pas le contenu actuel de ce fichier. Réglez cela à la main : l'un des deux fichiers n'est pas ce que vous pensez.",
+    "valueEmpty": "Saisissez la valeur du secret.",
+    "vault": "Erreur du coffre : {{message}}"
+  },
+  "unlockRun": {
+    "title": "Déverrouiller le coffre pour exécuter la commande",
+    "expose_one": "Exposera {{count}} variable à cette commande.",
+    "expose_other": "Exposera {{count}} variables à cette commande.",
+    "output": "La sortie de cette commande est renvoyée à l'assistant IA.",
+    "files_one": "Déchiffre aussi {{count}} fichier sur le disque jusqu'à la fin de la commande.",
+    "files_other": "Déchiffre aussi {{count}} fichiers sur le disque jusqu'à la fin de la commande.",
+    "notRedacted": "Le contenu des fichiers n'est pas masqué dans la sortie de la commande.",
+    "trust": "Faire confiance à cette commande exacte pendant les {{hours}} prochaines heures (elle s'exécute sans confirmation jusque-là, ou jusqu'au redémarrage de ce serveur, selon ce qui arrive en premier)",
+    "submit": "Déverrouiller et exécuter",
+    "filesCleanup": "(supprimés dès la fin de la commande)",
+    "materialize": "Écrit aussi de vraies valeurs secrètes sur le disque pendant toute la durée de la commande",
+    "materializeExit": "(fichier supprimé dès la fin de la commande)",
+    "materializeOnce": "(vidé après les {{count}} premières ouvertures du fichier, par la commande ou, quand on ne peut pas distinguer le lecteur, par n'importe quel programme, ou à la fin de la commande, selon ce qui arrive en premier ; les ouvertures détectées par d'autres programmes figurent dans le résultat, et le fichier est supprimé dans tous les cas)",
+    "noTrustFiles": "Cette exécution déchiffre des fichiers sur le disque, elle ne peut donc pas être approuvée pour une réutilisation ultérieure. La confirmation vous sera redemandée à chaque fois.",
+    "cwd": "S'exécute dans",
+    "executable": "Programme"
+  },
+  "setup": {
+    "title": "Créer votre coffre",
+    "intro": "Aucun coffre n'existe encore. Choisissez un mot de passe principal ({{min}} caractères minimum).",
+    "recovery": "Créer une clé de récupération papier (facultatif, augmente la surface d'attaque)"
+  },
+  "confirmAdd": {
+    "title": "Confirmer la modification",
+    "proposal": "Ajouter le secret de {{name}}",
+    "note": "La valeur réelle ci-dessous est chiffrée et jamais montrée à l'IA.",
+    "override": "{{name}} remplace une variable système et pourrait affecter les commandes suivantes.",
+    "llmEnvReads": "llm.env contiendra",
+    "proposalAdd": "Ajouter le secret de {{name}}",
+    "proposalUpdate": "Mettre à jour le secret de {{name}}",
+    "replaces": "Une valeur existe déjà. La nouvelle la remplace ; la valeur actuelle n'est pas affichée ici."
+  },
+  "confirmRemove": {
+    "title": "Confirmer la suppression",
+    "proposal": "Supprimer le secret de {{name}}",
+    "irreversible": "Cette action est irréversible. La valeur réelle est supprimée du coffre.",
+    "allow": "Autoriser la suppression",
+    "llmEnvEntry": "Cette entrée de llm.env sera supprimée"
+  },
+  "typed": {
+    "title": "Confirmer les valeurs de remplacement typées",
+    "description": "Chaque ligne se lira exactement ainsi dans tous les fichiers enregistrés.",
+    "leaks": "Cela révèle le type de chaque valeur, et le schéma d'une URL, à tout ce qui peut lire le fichier, y compris l'assistant IA : {{kinds}}. Le contenu n'est jamais révélé."
+  },
+  "install": {
+    "overwrite": "{{count}} noms sont utilisés par un autre projet et écraseront sa valeur dans le coffre.",
+    "cancelNote": "Refuser, ou fermer cette fenêtre, annule tout.",
+    "aboutMigrate_one": "Vous allez migrer {{count}} variable depuis :",
+    "aboutMigrate_other": "Vous allez migrer {{count}} variables depuis :",
+    "aboutRegister": "Vous allez enregistrer pour les futurs resync_targets :",
+    "confirmMigration": "Confirmer la migration",
+    "confirmRegistration": "Confirmer l'enregistrement",
+    "migrateWill": "Autoriser va (1) chiffrer dans vault.enc les {{count}} vraies valeurs ci-dessous, lisibles uniquement avec votre mot de passe principal, et (2) réécrire le fichier pour que chaque ligne devienne VAR=\"value N\". Cette valeur de remplacement est tout ce qu'un assistant IA verra jamais.",
+    "overwriteWarning": "{{count}} nom(s) ci-dessus sont déjà utilisés par un autre projet enregistré. Continuer écrasera la valeur de ce projet dans le coffre : {{names}}",
+    "overwrites": "écrase la valeur utilisée par {{path}}",
+    "registerWill": "Aucun nouveau secret à migrer. Autoriser enregistrera {{file}} pour que les futurs appels à resync_targets le gardent synchronisé pour les variables ci-dessous.",
+    "sensitiveWarning": "{{names}} remplacent des variables d'environnement système ou d'exécution. Toute commande lancée ensuite par run_with_env verra la valeur du coffre au lieu de la vraie valeur du système.",
+    "variables": "Variables"
+  },
+  "encrypt": {
+    "title": "Confirmer le chiffrement du fichier",
+    "destroyed": "LE FICHIER D'ORIGINE SERA DÉTRUIT. Une fois la copie chiffrée écrite et vérifiée, {{name}} est écrasé par des octets aléatoires puis supprimé. Le seul moyen de le récupérer est le mot de passe principal du coffre ou sa clé de récupération.",
+    "durabilityCaveat": "Si vault.enc est perdu sur cette machine, ce fichier est irrécupérable. La clé de récupération seule ne suffit pas : elle ne fonctionne qu'avec vault.enc. Sauvegardez ce fichier.",
+    "gitSafe": "Le fichier .levault est du pur texte chiffré et peut être commité dans git. Son nom révèle toutefois le nom du fichier d'origine.",
+    "overwriteCaveat": "L'écrasement est fait au mieux. Sur les SSD et les systèmes de fichiers journalisés, les octets d'origine peuvent subsister dans des zones inaccessibles à ce programme (répartition de l'usure, clichés instantanés, sauvegardes, fichiers d'échange). Si ce fichier a déjà été exposé, renouvelez l'identifiant : ne comptez pas sur cette suppression.",
+    "resume": "Une copie chiffrée de ce fichier existe déjà et il est vérifié qu'elle contient exactement son contenu actuel : une exécution précédente a été interrompue avant la destruction de l'original. Il ne reste que la suppression ci-dessous.",
+    "resumeTitle": "Terminer le chiffrement du fichier",
+    "unlockTitle": "Déverrouiller le coffre pour chiffrer un fichier"
+  },
+  "decrypt": {
+    "title": "Confirmer le déchiffrement du fichier",
+    "warn": "Cette action écrit définitivement un vrai secret sur le disque, sans nettoyage. L'assistant IA peut voir ce chemin et a reçu pour consigne de ne pas lire le fichier, mais cette consigne n'est pas appliquée.",
+    "leftInPlace": "Le fichier .levault reste en place ; cette action ne le retire pas du coffre.",
+    "renamed": "Ce fichier avait été chiffré sous le nom {{name}} mais sera restauré sous le nom ci-dessus. Le nom de sortie provient du nom du fichier .levault, pas de son contenu.",
+    "unlockTitle": "Déverrouiller le coffre pour déchiffrer un fichier"
+  },
+  "abandon": {
+    "title": "Abandonner les fichiers inaccessibles ?",
+    "warning": "{{count}} fichiers ont été chiffrés avec une ancienne clé. La retirer les rend illisibles définitivement, y compris les copies dans les sauvegardes et l'historique git.",
+    "confirm": "Ces fichiers sont perdus pour toujours. Les abandonner.",
+    "action": "Abandonner et retirer",
+    "onlyIf": "Ne continuez que si vous êtes certain que ces fichiers n'existent plus nulle part :",
+    "otherwise": "Si l'un d'eux peut encore exister, annulez : rendez-le accessible et relancez la rotation."
+  },
+  "changePassword": {
+    "title": "Changer le mot de passe principal",
+    "submit": "Changer le mot de passe"
+  },
+  "recoveryKey": {
+    "title": "Enregistrez votre clé de récupération",
+    "copy": "Copier (effacé dans {{seconds}} s)",
+    "written": "Je l'ai notée sur papier",
+    "confirm": "Confirmer : je l'ai",
+    "groups": "Groupes de 4 caractères séparés par des tirets. Le dernier groupe est la somme de contrôle.",
+    "later": "Je la configurerai plus tard",
+    "reentry": "Saisissez à nouveau la clé complète depuis votre papier",
+    "slot": "ID de l'emplacement : {{id}}. Vérifiez qu'il correspond à toute impression enregistrée pour savoir si elle est périmée.",
+    "steps": "1. Écrivez la clé complète sur papier, puis cochez la case. 2. Saisissez à nouveau la clé COMPLÈTE depuis votre papier pour confirmer qu'elle a été bien recopiée. Vérifier seulement quelques caractères ne prouve rien.",
+    "warning": "Une fois cette page fermée, la clé ne pourra plus être affichée. Notez-la sur papier et conservez-la en lieu sûr : c'est le seul moyen de retrouver l'accès si vous oubliez votre mot de passe principal."
+  },
+  "recover": {
+    "title": "Récupérer l'accès",
+    "submit": "Récupérer",
+    "warning": "N'utilisez ceci que si vous avez oublié votre mot de passe principal. Votre clé de récupération papier vous permet d'en définir un nouveau."
+  },
+  "manage": {
+    "title": "Gérer le coffre",
+    "confirm": {
+      "reissue_recovery": "Réémettre la clé de récupération",
+      "retire_file_keys": "Retirer les anciennes clés",
+      "rotate_file_key": "Renouveler la clé des fichiers",
+      "setup_recovery": "Créer la clé de récupération",
+      "upgrade_v2": "Passer en v2"
+    },
+    "format": "Format : v{{version}}",
+    "infoSetupRecovery": "Une clé de récupération papier vous permet de réinitialiser votre mot de passe principal si vous l'oubliez. Elle augmente réellement la surface d'attaque : quiconque trouve le papier peut réinitialiser votre mot de passe. Un coffre protégé uniquement par mot de passe est aussi un choix valable et sûr.",
+    "noActions": "Aucune action n'est disponible pour l'état actuel du coffre.",
+    "recoveryActive": "Emplacement de récupération : actif · id : {{id}} · créé le : {{created}}",
+    "recoveryNone": "Emplacement de récupération : non configuré",
+    "titles": {
+      "change_password": "Changer le mot de passe principal",
+      "reissue_recovery": "Réémettre la clé de récupération",
+      "retire_file_keys": "Retirer les anciennes clés de fichiers",
+      "rotate_file_key": "Renouveler la clé des fichiers chiffrés",
+      "setup_recovery": "Créer la clé de récupération papier",
+      "upgrade_v2": "Passer le coffre en v2"
+    },
+    "warnReissue": "Une nouvelle clé de récupération va être générée. Votre ancienne clé papier cesse de fonctionner immédiatement.",
+    "warnRetire": "Cette action supprime définitivement du coffre toutes les anciennes clés de fichiers. Tout fichier .levault encore chiffré avec l'une d'elles, y compris les copies sur d'autres machines, dans des sauvegardes ou dans l'historique git, devient définitivement illisible. Elle est refusée tant que chaque fichier enregistré n'a pas été basculé sur la clé actuelle et n'est pas lisible à cet instant. Les fichiers que ce coffre ne connaît pas ne peuvent pas être vérifiés.",
+    "warnRotate": "Changer votre mot de passe principal NE change PAS la clé qui protège vos fichiers chiffrés. C'est voulu, et c'est pourquoi un .levault commité dans git continue de fonctionner. Renouvelez cette clé ici si vous pensez qu'elle a pu être exposée. Chaque fichier chiffré que cette machine retrouve ({{count}} enregistrés) est rechiffré avec une nouvelle clé. Les fichiers introuvables sont ignorés et continuent de fonctionner avec l'ancienne clé, qui est conservée. Rien ne devient illisible tant que vous ne retirez pas séparément les anciennes clés.",
+    "warnUpgrade": "Après la mise à niveau, les versions plus anciennes de ce plugin ne pourront plus ouvrir le coffre. Une version plus ancienne signale « Mot de passe incorrect » même avec le bon mot de passe. Aucune donnée n'est perdue, mais c'est déroutant si vous ne vous y attendez pas. Ne mettez à niveau que si toutes vos installations sont à jour."
+  },
+  "strength": {
+    "label": "Robustesse du mot de passe",
+    "weak": "Faible",
+    "fair": "Moyenne",
+    "strong": "Forte"
+  },
+  "toast": {
+    "copied": "Copié dans le presse-papiers"
+  },
+  "add": {
+    "aboutAdd": "Vous allez ajouter le secret de {{name}}.",
+    "aboutUpdate": "Vous allez mettre à jour le secret de {{name}}."
+  },
+  "remove": {
+    "about": "Vous allez retirer le secret de {{name}}."
+  },
+  "retype": {
+    "about": "Vous allez donner un type à {{count}} valeurs de remplacement, afin qu'un .env ne contenant que des valeurs de remplacement puisse être analysé par l'application qui le lit.",
+    "why": "Le mot de passe principal est nécessaire car le type d'une valeur ne peut être lu qu'à partir de la valeur réelle."
+  },
+  "unlock": {
+    "title": "Déverrouiller le coffre"
+  },
+  "done": {
+    "approved": "Terminé",
+    "declined": "Annulé. Rien n'a été modifié.",
+    "timeout": "Cette fenêtre a expiré. Rien n'a été modifié.",
+    "closed": "Cette fenêtre a été fermée. Rien n'a été modifié.",
+    "error": "Une erreur s'est produite. Consultez votre assistant pour plus de détails.",
+    "hint": "Vous pouvez fermer cet onglet et retourner à votre assistant."
+  },
+  "session": {
+    "invalid": "Ce lien a déjà été utilisé ou n'est plus valide. Demandez à votre assistant de rouvrir la fenêtre.",
+    "none": "Ouvrez cette page depuis le lien fourni par votre assistant.",
+    "loading": "Connexion en cours…"
+  },
+  "vaultApp": {
+    "title": "Coffre",
+    "lock": {
+      "title": "Votre coffre est verrouillé",
+      "createTitle": "Créer votre coffre",
+      "unlock": "Déverrouiller",
+      "createAction": "Créer le coffre",
+      "recover": "Récupérer avec la clé de récupération",
+      "or": "ou",
+      "auto": "Verrouillé après une période d'inactivité."
+    },
+    "tabs": {
+      "vault": "Coffre",
+      "generator": "Générateur",
+      "settings": "Réglages"
+    },
+    "menu": {
+      "account": "Compte",
+      "close": "Fermer l'application"
+    },
+    "vault": {
+      "add": "Ajouter",
+      "search": "Rechercher",
+      "type": "Type",
+      "allTypes": "Tous les types",
+      "emptyTitle": "Aucun secret pour l'instant",
+      "emptyHint": "Ajoutez votre premier secret pour commencer.",
+      "noMatch": "Aucun résultat",
+      "noMatchHint": "Essayez une autre recherche ou un autre type.",
+      "count_one": "{{count}} élément",
+      "count_other": "{{count}} éléments",
+      "copy": "Copier la valeur",
+      "more": "Plus d'options",
+      "edit": "Modifier",
+      "copyName": "Copier le nom",
+      "delete": "Supprimer",
+      "placeholder": "Substitut {{n}}",
+      "notUsed": "Pas encore utilisé dans un fichier",
+      "open": "Ouvrir"
+    },
+    "types": {
+      "apiKey": "Clé d'API",
+      "token": "Jeton",
+      "password": "Mot de passe",
+      "url": "URL",
+      "database": "Base de données",
+      "other": "Autre",
+      "secret": "Secret",
+      "login": "Identifiant",
+      "card": "Carte",
+      "identity": "Identité",
+      "note": "Note",
+      "ssh": "Clé SSH"
+    },
+    "toast": {
+      "saved": "Enregistré.",
+      "deleted": "Supprimé.",
+      "copied": "Copié. Le presse-papiers sera vidé dans {{seconds}} s.",
+      "copy_unavailable": "Aucun outil de presse-papiers trouvé. Installez wl-clipboard ou xclip.",
+      "copy_failed": "Copie impossible.",
+      "nameCopied": "Nom copié."
+    },
+    "form": {
+      "addTitle": "Nouveau secret",
+      "editTitle": "Modifier le secret",
+      "editing": "Saisissez une nouvelle valeur pour {{name}}. La valeur actuelle n'est jamais affichée.",
+      "name": "Nom",
+      "value": "Valeur",
+      "save": "Enregistrer",
+      "nameInvalid": "Utilisez des lettres, des chiffres et des tirets bas, en commençant par une lettre ou un tiret bas.",
+      "nameExists": "Un secret nommé {{name}} existe déjà. Modifiez-le plutôt.",
+      "sensitiveAck": "{{name}} change le comportement des programmes. Appuyez de nouveau sur Enregistrer pour confirmer."
+    },
+    "generator": {
+      "password": "Mot de passe",
+      "passphrase": "Phrase secrète",
+      "username": "Nom d'utilisateur",
+      "options": "Options",
+      "length": "Longueur",
+      "lengthHint": "La valeur doit être comprise entre {{min}} et {{max}}.",
+      "include": "Inclure",
+      "minNumbers": "Chiffres minimum",
+      "minSpecial": "Caractères spéciaux minimum",
+      "avoidAmbiguous": "Éviter les caractères ambigus",
+      "words": "Nombre de mots",
+      "separator": "Séparateur de mots",
+      "capitalize": "Majuscule initiale",
+      "includeNumber": "Inclure un chiffre",
+      "regenerate": "Générer à nouveau",
+      "copy": "Copier",
+      "copied": "Copié."
+    },
+    "settings": {
+      "accountSecurity": "Sécurité du compte",
+      "vaultOptions": "Options du coffre",
+      "appearance": "Apparence",
+      "about": "À propos",
+      "lockNow": "Verrouiller maintenant",
+      "autoLock": "Verrouiller après inactivité",
+      "autoLockHint": "Le coffre se verrouille après ce délai sans activité.",
+      "minutes_one": "{{count}} minute",
+      "minutes_other": "{{count}} minutes",
+      "clipboardClear": "Vider le presse-papiers",
+      "clipboardHint": "Un secret copié est retiré du presse-papiers après ce délai.",
+      "seconds_one": "{{count}} seconde",
+      "seconds_other": "{{count}} secondes",
+      "version": "Version",
+      "format": "Format du coffre",
+      "secrets": "Éléments",
+      "recoveryKey": "Clé de récupération",
+      "recoveryOn": "Configurée",
+      "recoveryOff": "Non configurée",
+      "location": "Dossier du coffre",
+      "noRecovery": "Aucune clé de récupération n'est configurée.",
+      "noRecoveryAction": "Ajoutez-en une dans Sécurité du compte."
+    },
+    "result": {
+      "keyMistyped": "Cette clé de récupération semble mal saisie (sa somme de contrôle ne correspond pas). Comparez-la à votre copie imprimée.",
+      "keyWrong": "Cette clé de récupération n'est pas valide pour ce coffre. Si le mot de passe a changé depuis l'impression, l'ancienne clé ne fonctionne plus.",
+      "noRecoverySlot": "Ce coffre n'a pas de clé de récupération : il ne peut pas être récupéré sans le mot de passe principal.",
+      "damaged": "Le fichier du coffre est endommagé ou a été altéré. Restaurez-le depuis une sauvegarde.",
+      "restored": "L'opération n'a pas abouti. Le coffre a été remis dans son état précédent.",
+      "recovered": "Accès récupéré. Votre clé de récupération existante fonctionne toujours.",
+      "keyNotConfirmed": "La nouvelle clé de récupération n'a pas été confirmée et ne peut plus être affichée. Émettez-en une nouvelle dans Sécurité du compte.",
+      "passwordChanged": "Mot de passe principal modifié.",
+      "keyIssued": "Clé de récupération émise.",
+      "upgraded": "Coffre mis à niveau au format v2.",
+      "rotated": "Clé de fichiers renouvelée. {{count}} fichier(s) rechiffré(s).",
+      "rotatedPartial": "{{count}} fichier(s) n'ont pas été renouvelés et utilisent encore l'ancienne clé.",
+      "retired": "{{count}} ancienne(s) clé(s) de fichiers retirée(s).",
+      "nothingToRetire": "Rien à retirer.",
+      "noVault": "Aucun coffre trouvé."
+    },
+    "item": {
+      "chooseTitle": "Ajouter un élément",
+      "chooseHint": "Les secrets sont accessibles à votre assistant IA sous forme de substituts. Tout le reste n'est que pour vous et ne lui est jamais montré.",
+      "about": {
+        "secret": "Une variable d'environnement que l'assistant peut utiliser sans la voir",
+        "login": "Un identifiant et un mot de passe pour un site",
+        "card": "Une carte de paiement",
+        "identity": "Votre nom, adresse et coordonnées",
+        "note": "Du texte libre, comme un code de récupération ou une configuration",
+        "ssh": "Une clé SSH privée et publique"
+      },
+      "add": {
+        "login": "Nouvel identifiant",
+        "card": "Nouvelle carte",
+        "identity": "Nouvelle identité",
+        "note": "Nouvelle note",
+        "ssh": "Nouvelle clé SSH"
+      },
+      "edit": {
+        "login": "Modifier l'identifiant",
+        "card": "Modifier la carte",
+        "identity": "Modifier l'identité",
+        "note": "Modifier la note",
+        "ssh": "Modifier la clé SSH"
+      },
+      "view": {
+        "login": "Voir l'identifiant",
+        "card": "Voir la carte",
+        "identity": "Voir l'identité",
+        "note": "Voir la note",
+        "ssh": "Voir la clé SSH"
+      },
+      "name": "Nom",
+      "noFolder": "Aucun dossier",
+      "history": "Historique de l'élément",
+      "lastEdited": "Dernière modification",
+      "created": "Créé",
+      "noFields": "Cet élément n'a pas encore de contenu.",
+      "deleteTitle": "Supprimer l'élément",
+      "deleteBody": "Supprimer {{name}} ? Cette action est irréversible.",
+      "corrupted": "Les éléments enregistrés sont dans un format que cette version ne comprend pas. Vos secrets n'ont pas été touchés.",
+      "invalid": "{{message}}"
+    },
+    "fields": {
+      "notes": "Notes",
+      "folder": "Dossier",
+      "username": "Nom d'utilisateur",
+      "password": "Mot de passe",
+      "uri": "Site web",
+      "holder": "Titulaire de la carte",
+      "brand": "Marque",
+      "number": "Numéro de carte",
+      "expMonth": "Mois d'expiration",
+      "expYear": "Année d'expiration",
+      "code": "Code de sécurité",
+      "title": "Titre",
+      "firstName": "Prénom",
+      "middleName": "Deuxième prénom",
+      "lastName": "Nom de famille",
+      "email": "E-mail",
+      "phone": "Téléphone",
+      "company": "Société",
+      "address1": "Adresse 1",
+      "address2": "Adresse 2",
+      "city": "Ville",
+      "state": "État / province",
+      "postalCode": "Code postal",
+      "country": "Pays",
+      "ssn": "Numéro de sécurité sociale",
+      "passport": "Numéro de passeport",
+      "license": "Numéro de permis",
+      "privateKey": "Clé privée",
+      "publicKey": "Clé publique",
+      "passphrase": "Phrase secrète"
+    }
+  }
+}
