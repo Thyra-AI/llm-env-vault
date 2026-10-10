@@ -31,6 +31,10 @@ pinning what a user installs.
   revealed field or an open form cannot keep the session alive. Reserved keys are already ignored for variables by 2.x
   releases that keep the file key in one, so an older 2.x opening a vault with items still sees only its secrets
   (not tested against every older release).
+- **`/thyra-vault:open`** opens the Thyra Vault app from an installed plugin. It is user-only
+  (`disable-model-invocation`), passes the plugin's data directory to `plugin_launcher.py app` (Claude Code
+  does not export it to a shell), and the launcher refuses to guess it, so the app always opens the same vault
+  as the assistant's tools, in the plugin's own Python environment.
 - **Vault location** is resolved in `thyra_vault/datadir.py`: `THYRA_VAULT_HOME`, then
   `CLAUDE_PLUGIN_DATA` (unchanged), then next to the module for a source checkout
   (unchanged), then the user's data directory when running as an installed package or a

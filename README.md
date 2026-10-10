@@ -99,6 +99,21 @@ claude plugin install thyra-vault@thyra-vault --scope user
 
 **First run is slower on purpose:** Claude Code auto-installs Node.js plugin dependencies but has no equivalent for Python, so the plugin ships a launcher (`plugin_launcher.py`) that, on first run, creates a venv in the plugin's persistent data directory (`${CLAUDE_PLUGIN_DATA}`, survives updates), installs dependencies into it (from `requirements-lock.txt`, a hash-pinned universal lockfile, via `--require-hashes` on every platform), and then execs the real server from that venv. A stamp file means it only reinstalls when the plugin is actually updated (a new version-scoped install directory) — every subsequent run is instant, and a plain local edit to the requirements file doesn't trigger anything on its own. The only prerequisite is a `python` on your PATH — see the platform note above, since on macOS/Linux that specifically means `python` and not just `python3`.
 
+**Opening the app.** After installing, run `/thyra-vault:open` (see [Commands](#commands)). It is the only way the
+installed plugin opens the app. `python -m thyra_vault.app` is for a source checkout.
+
+**Trying it from a local clone** (before anything is published): point Claude Code at the folder instead of GitHub.
+
+```bash
+claude plugin marketplace add /path/to/thyra-vault
+claude plugin install thyra-vault@thyra-vault
+# after changing the clone:
+claude plugin marketplace update thyra-vault && claude plugin update thyra-vault@thyra-vault
+# to start over (keeps your vault unless you drop --keep-data):
+claude plugin uninstall thyra-vault@thyra-vault --keep-data
+claude plugin marketplace remove thyra-vault
+```
+
 Update / remove like any plugin:
 
 ```bash
@@ -562,7 +577,7 @@ stronger KDF and AES-256-GCM authentication, or to enable the recovery key.
 
 ## Commands
 
-Two slash commands ship with the plugin. Everything else is done by asking normally — the tools
+Three slash commands ship with the plugin. Everything else is done by asking normally — the tools
 above are the interface, and wrapping each one in a command would just make it longer to type.
 
 ### `/thyra-vault:protect`
@@ -574,6 +589,16 @@ open a file still full of live credentials. The command's `allowed-tools` delibe
 every file-reading tool, so its discovery path *cannot* read a candidate's contents even if asked
 to. It reports paths, migrates each one behind the usual dialog, resyncs if more than one file
 moved, and tells you which now-placeholder-only files are safe to commit.
+
+### `/thyra-vault:open`
+
+Opens the **Thyra Vault app** (the window where *you* unlock the vault, browse and edit secrets and personal
+items, and copy a value). Only you can run it: the command is marked `disable-model-invocation`, so the
+assistant cannot open the app by itself, because the app can put a secret on your clipboard. Claude Code shows
+you the one command it will run (`CLAUDE_PLUGIN_DATA=... python .../plugin_launcher.py app`) and asks you to
+approve it the first time. The data directory is passed in explicitly because Claude Code exports it to the
+MCP server but not to a shell; with it, the app uses the plugin's own Python environment and **the same vault
+the assistant's tools use**. The first run sets up the environment and can take a few seconds.
 
 ### `/thyra-vault:doctor`
 
@@ -678,7 +703,7 @@ python -m thyra_vault.app --where    # print the vault folder and exit
 python -m thyra_vault.webui_demo app # a throwaway demo vault (the demo password is printed)
 ```
 
-It is a command you run, **not an MCP tool**, on purpose: the app can put a secret on your clipboard, and an assistant must not be able to open it.
+From an installed plugin, run **`/thyra-vault:open`** instead (it opens the same vault the assistant's tools use). It is a command you run, **not an MCP tool**, on purpose: the app can put a secret on your clipboard, and an assistant must not be able to open it.
 
 - **Besides environment secrets, it holds personal items**: logins, cards, identities, notes and SSH keys (each with its own fields, a folder and created/edited times). They are for **you only**: they live encrypted inside `vault.enc` (one reserved key in the body, so even their titles are encrypted), they are never in the plaintext index, no MCP tool can list, read or change them, and `run_with_env` cannot see them. A hidden field (a password, a card number, a note's text, a private key) reaches the page **only after you press the eye on that one field**, and is forgotten when you leave the item, lock, or the idle limit passes. Editing an item pre-fills its form for you, the one other time an item's text is sent. Copy still goes through the server's clipboard write.
 - **A value never reaches the page** for an environment secret. The list shows names, placeholder numbers, a type guessed from the name and the files a secret is used in. "Copy" asks the server to write the value to your system clipboard (`wl-copy`, `xclip`/`xsel`, `pbcopy` or PowerShell, fed on stdin, never on a command line) and to wipe it again after 10 s to 2 min (default 30 s), only if the clipboard still holds it. There is no "show value". If no clipboard tool is installed the app says so and copies nothing (on Linux: `wl-clipboard` or `xclip`). Any program that can read the clipboard can read the value while it is there, and Windows clipboard history may keep a copy this app cannot erase.

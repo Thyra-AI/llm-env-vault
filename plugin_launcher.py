@@ -419,8 +419,45 @@ def _provision(python: Path, current_marker: str) -> None:
     STAMP_FILE.write_text(current_marker)
 
 
+def _app_command(python, extra) -> list:
+    """The command that opens the Thyra Vault app in the plugin's own venv."""
+    return [str(python), "-m", "thyra_vault.app", *extra]
+
+
+def _looks_like_plugin_cache(path: Path) -> bool:
+    parts = {part.lower() for part in path.parts}
+    return "plugins" in parts and "cache" in parts
+
+
+def _require_data_dir_for_app() -> None:
+    """The app must see the vault the assistant's tools use. That vault lives under
+    CLAUDE_PLUGIN_DATA, which Claude Code exports to the MCP server but not to a shell, so
+    /thyra-vault:open passes it in explicitly. Refuse to guess: without it an installed plugin
+    would open (or create) a different, empty vault."""
+    if "CLAUDE_PLUGIN_DATA" not in os.environ and _looks_like_plugin_cache(PLUGIN_ROOT):
+        print("thyra-vault: run this through /thyra-vault:open in Claude Code (it passes the "
+              "plugin's data directory, where your vault lives).", file=sys.stderr)
+        sys.exit(2)
+
+
+def _run_app(python, extra) -> None:
+    """``plugin_launcher.py app``: open the app the PERSON asked for (/thyra-vault:open).
+    Same venv and same vault as the MCP server."""
+    os.chdir(PLUGIN_ROOT)  # so `-m thyra_vault.app` finds the package
+    command = _app_command(python, extra)
+    if sys.platform == "win32":
+        sys.exit(subprocess.call(command))
+    os.execv(command[0], command)
+
+
 def main() -> None:
+    opening_app = len(sys.argv) > 1 and sys.argv[1] == "app"
+    if opening_app:
+        _require_data_dir_for_app()  # before any provisioning: it is cheap and cannot half-install
     python = _ensure_venv()
+    if opening_app:
+        _run_app(python, sys.argv[2:])
+        return
     server = str(PLUGIN_ROOT / "mcp_server.py")
     if sys.platform == "win32":
         # On Windows, os.execv is not a true exec: CPython implements it via
