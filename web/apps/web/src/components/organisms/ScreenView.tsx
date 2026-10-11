@@ -34,15 +34,15 @@ export function ScreenView({ screen, busy, onAction }: ScreenViewProps) {
   useEffect(() => {
     setPending(null)
     if (!screen.error) return
-    // A message that came from the vault itself (e.g. wrong password) means the
-    // password just typed is no good: clear it rather than leave it on screen.
-    if ('raw' in screen.error) {
-      setValues((v) => {
-        const next = { ...v }
-        for (const f of screen.fields) if (f.type === 'password') next[f.name] = ''
-        return next
-      })
-    }
+    // A failed attempt: do not leave the master password in memory or on screen.
+    // Item forms (vaultApp.*) have a password-type field that is the item's own
+    // value, so only the dialogs' credential fields are cleared; other values stay.
+    if (screen.title.key.startsWith('vaultApp.')) return
+    setValues((v) => {
+      const next = { ...v }
+      for (const f of screen.fields) if (f.type === 'password') next[f.name] = ''
+      return next
+    })
     formRef.current?.querySelector<HTMLInputElement>('input:not([type=checkbox])')?.focus()
   }, [screen.id])
 

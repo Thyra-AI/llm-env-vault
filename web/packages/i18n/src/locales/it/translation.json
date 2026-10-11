@@ -76,6 +76,7 @@
     "files_one": "Decifra anche {{count}} file su disco finché il comando non termina.",
     "files_other": "Decifra anche {{count}} file su disco finché il comando non termina.",
     "notRedacted": "Il contenuto dei file non viene oscurato nell'output del comando.",
+    "backgroundUnredacted": "Esecuzione in background: l'output va in un file di log NON oscurato, che l'assistente può leggere finché il processo è in esecuzione.",
     "trust": "Considera attendibile questo comando esatto per le prossime {{hours}} ore (parte senza richiesta fino ad allora, o finché questo server non si riavvia)",
     "submit": "Sblocca ed esegui",
     "filesCleanup": "(eliminati non appena il comando termina)",

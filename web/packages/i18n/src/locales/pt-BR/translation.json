@@ -76,6 +76,7 @@
     "files_one": "Também descriptografa {{count}} arquivo no disco até o comando terminar.",
     "files_other": "Também descriptografa {{count}} arquivos no disco até o comando terminar.",
     "notRedacted": "O conteúdo dos arquivos não é ocultado na saída do comando.",
+    "backgroundUnredacted": "Execução em segundo plano: a saída vai para um arquivo de log NÃO ocultado, que o assistente pode ler enquanto o processo estiver em execução.",
     "trust": "Confiar neste comando exato pelas próximas {{hours}} horas (ele roda sem perguntar até lá, ou até este servidor reiniciar, o que vier primeiro)",
     "submit": "Desbloquear e executar",
     "filesCleanup": "(excluídos assim que o comando terminar)",

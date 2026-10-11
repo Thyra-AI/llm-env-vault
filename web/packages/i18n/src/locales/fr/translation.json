@@ -76,6 +76,7 @@
     "files_one": "Déchiffre aussi {{count}} fichier sur le disque jusqu'à la fin de la commande.",
     "files_other": "Déchiffre aussi {{count}} fichiers sur le disque jusqu'à la fin de la commande.",
     "notRedacted": "Le contenu des fichiers n'est pas masqué dans la sortie de la commande.",
+    "backgroundUnredacted": "Exécution en arrière-plan : la sortie va dans un fichier journal NON masqué, que l'assistant peut lire pendant l'exécution du processus.",
     "trust": "Faire confiance à cette commande exacte pendant les {{hours}} prochaines heures (elle s'exécute sans confirmation jusque-là, ou jusqu'au redémarrage de ce serveur, selon ce qui arrive en premier)",
     "submit": "Déverrouiller et exécuter",
     "filesCleanup": "(supprimés dès la fin de la commande)",

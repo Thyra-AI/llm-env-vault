@@ -17,6 +17,7 @@ this module cannot erase. Short timeouts shrink the window; they do not close it
 import atexit
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -147,3 +148,39 @@ def wipe_now() -> int:
 
 
 atexit.register(wipe_now)
+
+
+def _exit_signals() -> list:
+    """The signals that end the process without running atexit: closing the
+    terminal (SIGHUP) or a plain ``kill`` (SIGTERM; SIGBREAK on Windows)."""
+    names = ("SIGTERM", "SIGBREAK") if sys.platform == "win32" else ("SIGTERM", "SIGHUP")
+    return [getattr(signal, n) for n in names if hasattr(signal, n)]
+
+
+def _on_exit_signal(signum, frame) -> None:  # noqa: ARG001 -- signal handler signature
+    wipe_now()
+    raise SystemExit(128 + int(signum))  # unwinds the app's finally blocks
+
+
+def install_signal_handlers() -> Callable[[], None]:
+    """Wipe the clipboard when the process is told to stop, then exit cleanly.
+
+    Main thread only (elsewhere this is a no-op). Returns a function that puts
+    the previous handlers back.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return lambda: None
+    previous = {}
+    for sig in _exit_signals():
+        try:
+            previous[sig] = signal.signal(sig, _on_exit_signal)
+        except (ValueError, OSError):
+            continue
+
+    def restore() -> None:
+        for sig, handler in previous.items():
+            try:
+                signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+            except (ValueError, OSError):
+                pass
+    return restore

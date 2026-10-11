@@ -82,10 +82,11 @@ def confirm_abandon_files_dialog(outstanding: dict, registry_names: dict):
 
 def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None,
                           trust_note: str = None, files=None, *, timeout=None,
-                          max_reads=None, cwd: str = None, executable: str = None):
+                          max_reads=None, cwd: str = None, executable: str = None,
+                          command_lines=None, background: bool = False):
     outcome = {"secrets": None, "trust": False}
     _run(flows.unlock_for_run(outcome, command_str, materialize_path, only_vars, trust_note,
-                              files, max_reads, cwd, executable),
+                              files, max_reads, cwd, executable, command_lines, background),
          lambda: "approved" if outcome["secrets"] is not None else "declined")
     return outcome
 
@@ -127,11 +128,17 @@ APP_MAX_LIFETIME = 12 * 3600.0
 def vault_app() -> dict:
     """Open the Thyra Vault app and block until the person closes it."""
     from . import appflow
+    from .. import clipboard
     limits = Limits(launch_timeout=LIMITS.launch_timeout, heartbeat_timeout=LIMITS.heartbeat_timeout,
                     closing_grace=LIMITS.closing_grace,
                     max_lifetime=max(LIMITS.max_lifetime, APP_MAX_LIFETIME),
                     max_bad_codes=LIMITS.max_bad_codes)
     outcome = {"closed": False}
-    server.run_flow(appflow.vault_app(outcome), status_of=lambda: "approved", limits=limits,
-                    window_size=APP_WINDOW_SIZE)
+    # SIGTERM / SIGHUP (closing the terminal) skip atexit: wipe the clipboard first.
+    restore = clipboard.install_signal_handlers()
+    try:
+        server.run_flow(appflow.vault_app(outcome), status_of=lambda: "approved", limits=limits,
+                        window_size=APP_WINDOW_SIZE)
+    finally:
+        restore()
     return outcome

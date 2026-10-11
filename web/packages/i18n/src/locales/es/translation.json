@@ -76,6 +76,7 @@
     "files_one": "También descifra {{count}} archivo en disco hasta que termine el comando.",
     "files_other": "También descifra {{count}} archivos en disco hasta que termine el comando.",
     "notRedacted": "El contenido de los archivos no se oculta en la salida del comando.",
+    "backgroundUnredacted": "Ejecución en segundo plano: la salida va a un archivo de registro SIN ocultar datos secretos, que el asistente puede leer mientras el proceso se ejecuta.",
     "trust": "Confiar en este comando exacto durante las próximas {{hours}} horas (se ejecuta sin preguntar hasta entonces, o hasta que este servidor se reinicie, lo que ocurra primero)",
     "submit": "Desbloquear y ejecutar",
     "filesCleanup": "(se eliminan en cuanto termina el comando)",

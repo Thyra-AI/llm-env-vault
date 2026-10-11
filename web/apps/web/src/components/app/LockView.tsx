@@ -51,7 +51,8 @@ export function LockView({ screen, busy, onAction }: LockViewProps) {
 
   useEffect(() => {
     setPending(null)
-    if (screen.error && 'raw' in screen.error) setValues((v) => ({ ...v, password: '' }))
+    // After any failed attempt the password is no good (or must not linger): retype it.
+    if (screen.error) setValues((v) => ({ ...v, password: '', confirm: '' }))
     form.current?.querySelector<HTMLInputElement>('input')?.focus()
   }, [screen.id])
 
@@ -60,7 +61,7 @@ export function LockView({ screen, busy, onAction }: LockViewProps) {
     setPending(id)
     onAction(id, values)
     // Never keep the password around once it has been sent.
-    if (id === 'continue') setValues((v) => ({ ...v, password: '', confirm: '' }))
+    if (id === 'continue' || id === 'recover') setValues((v) => ({ ...v, password: '', confirm: '' }))
   }
   const primary = screen.actions.find((a) => a.variant === 'primary')
   const secondary = screen.actions.filter((a) => a.variant !== 'primary')

@@ -46,12 +46,19 @@ class AutoLocked(Exception):
     """The vault sat idle past the limit; unwinds whatever screen was open."""
 
 
-def _touch(state: dict) -> None:
+IDLE_LOCK = "autolock"  # sent by the page's idle timer from any screen
+
+
+def _touch(state: dict, act=None) -> None:
     """Called whenever the person acts, on EVERY screen -- not just the list.
 
     A form or an item view left open must not keep the session alive forever,
-    and a revealed secret must not outlive the idle limit on screen.
+    and a revealed secret must not outlive the idle limit on screen. ``act`` is
+    the action just received: the page's idle timer sends ``autolock`` from
+    whatever screen is open, which locks at once (it can only lock, never unlock).
     """
+    if act is not None and getattr(act, "id", None) == IDLE_LOCK:
+        raise AutoLocked()
     now = state["clock"]()
     delta = now - state["last"]
     # A big step backwards means the wall clock was set back: treat it as idle
@@ -72,7 +79,7 @@ def _guarded(state: dict, inner):
         scr = next(inner)
         while True:
             act = yield scr
-            _touch(state)
+            _touch(state, act)
             scr = inner.send(act)
     except StopIteration as done:
         return done.value
@@ -291,7 +298,7 @@ def _item_form(state: dict, name: Optional[str] = None):
             actions=[action("back", "common.cancel"),
                      action("save", "vaultApp.form.save", variant="primary")],
             default_action="save", error=error)
-        _touch(state)
+        _touch(state, act)
         if act.id != "save":
             return None
         var = name if editing else _s(act, "name").strip()
@@ -338,7 +345,7 @@ def _confirm_delete(state: dict, name: str):
                 notice("danger", "confirmRemove.irreversible")],
         actions=[action("deny", "common.cancel"),
                  action("allow", "confirmRemove.allow", variant="danger")])
-    _touch(state)
+    _touch(state, act)
     if act.id != "allow":
         return None
     secrets_saved = False
@@ -451,7 +458,7 @@ def _choose_type(state: dict):
                 menu([{"id": f"type:{t}", "icon": _TYPE_ICONS[t], "label": msg(f"vaultApp.types.{t}"),
                        "description": msg(f"vaultApp.item.about.{t}")} for t in _TYPE_ORDER])],
         actions=[action("back", "common.cancel")])
-    _touch(state)
+    _touch(state, act)
     if act.id.startswith("menu:type:") and act.id[len("menu:type:"):] in _TYPE_ORDER:
         return act.id[len("menu:type:"):]
     return None
@@ -484,7 +491,7 @@ def _entry_form(state: dict, item_type: str, current: Optional[dict] = None):
             icon=_TYPE_ICONS[item_type], fields=fields,
             actions=[action("back", "common.cancel"), action("save", "vaultApp.form.save", variant="primary")],
             default_action=None, error=error)
-        _touch(state)
+        _touch(state, act)
         if act.id != "save":
             return None
         values = {f: _s(act, f) for f, _k in personal.FIELD_SPECS[item_type]}
@@ -548,7 +555,7 @@ def _view_item(state: dict, item_id: str, clip):
             actions=[action("back", "common.back"), action("edit", "vaultApp.vault.edit", variant="primary"),
                      action("delete", "vaultApp.vault.delete", variant="danger")])
         toast = None
-        _touch(state)
+        _touch(state, act)
         if act.id == "back":
             return None
         if act.id == "edit":
@@ -576,7 +583,7 @@ def _confirm_delete_item(state: dict, item: dict):
         blocks=[text("vaultApp.item.deleteBody", name=_safe_display(item["name"])),
                 notice("danger", "confirmRemove.irreversible")],
         actions=[action("deny", "common.cancel"), action("allow", "confirmRemove.allow", variant="danger")])
-    _touch(state)
+    _touch(state, act)
     if act.id != "allow":
         return None
     try:
@@ -633,7 +640,7 @@ def _home(state: dict, clip, clock):
                  "info": _info(state)})
         toast = None
         try:
-            _touch(state)
+            _touch(state, act)
         except AutoLocked:
             state["lock_note"] = "vaultApp.lock.auto"
             return "lock"

@@ -28,6 +28,14 @@ export function takeLaunchCode(): string | null {
   return match[1]
 }
 
+function dropToken() {
+  try {
+    sessionStorage.removeItem(TOKEN_KEY)
+  } catch {
+    /* nothing stored */
+  }
+}
+
 export function hasStoredSession(): boolean {
   return readStoredToken() !== null
 }
@@ -75,6 +83,12 @@ export class Client {
 
   async ping(): Promise<void> {
     await this.call('POST', '/api/ping', {})
+  }
+
+  /** The session is over: forget the token so this page can never talk to that port again. */
+  forget(): void {
+    this.token = null
+    dropToken()
   }
 
   /** Best effort on pagehide: lets the server end the dialog promptly. */

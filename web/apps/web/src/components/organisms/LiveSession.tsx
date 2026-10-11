@@ -7,15 +7,18 @@ import { TransitionPanel } from '@workspace/ui/components/transition-panel'
 import { useTheme } from '@workspace/ui/hooks/use-theme'
 import { openSession, SessionError, type Client } from '@/api'
 import type { FormValues, View } from '@/protocol'
+import { useAutoLock } from '@/components/app/useAutoLock'
 import { VaultApp } from '@/components/app/VaultApp'
 import { useMsg } from '@/components/molecules'
 import { AppShell } from './AppShell'
 import { DoneView } from './DoneView'
 import { ScreenView } from './ScreenView'
 
-type State = { kind: 'loading' } | { kind: 'view'; view: View } | { kind: 'invalid' } | { kind: 'lost' }
+type State = { kind: 'loading' } | { kind: 'view'; view: View } | { kind: 'invalid' } | { kind: 'lost' } | { kind: 'ended' }
 
 const HEARTBEAT_MS = 5000
+/** Consecutive failed heartbeats (about 15 s) before the page treats the session as over. */
+const MAX_MISSED = 3
 
 /** Connects to the Python server that launched this page and shows its screens. */
 export function LiveSession() {
@@ -28,9 +31,29 @@ export function LiveSession() {
   const client = useRef<Client | null>(null)
   const lastTitle = useRef<string | null>(null)
   const finished = useRef(false)
+  const screenId = useRef<string | null>(null)
+  const autoLockMinutes = useRef<number | null>(null)
+
+  /** The server is gone (or not ours any more): drop everything and stop talking to that port. */
+  const endSession = () => {
+    finished.current = true
+    client.current?.forget()
+    client.current = null
+    screenId.current = null
+    autoLockMinutes.current = null
+    setState({ kind: 'ended' })
+    try {
+      window.close()
+    } catch {
+      /* a tab not opened by script cannot be closed: the ended notice stays */
+    }
+  }
 
   const show = (view: View) => {
     if ('done' in view) finished.current = true
+    screenId.current = 'screen' in view ? view.screen.id : null
+    if ('screen' in view && view.screen.app?.view === 'home') autoLockMinutes.current = view.screen.app.prefs.autoLockMinutes
+    if ('screen' in view && view.screen.app?.view === 'lock') autoLockMinutes.current = null
     if ('screen' in view && lastTitle.current !== view.screen.title.key) {
       lastTitle.current = view.screen.title.key
       setStep((s) => s + 1)
@@ -41,6 +64,7 @@ export function LiveSession() {
   useEffect(() => {
     let alive = true
     let timer: number | undefined
+    let missed = 0
     openSession()
       .then(async (c) => {
         client.current = c
@@ -49,9 +73,16 @@ export function LiveSession() {
           // Once the dialog is over the server is *meant* to go away: stop
           // pinging, and never let a failed ping replace the result screen.
           if (finished.current) return window.clearInterval(timer)
-          c.ping().catch((e) => {
-            if (alive && !finished.current) setState({ kind: e instanceof SessionError ? 'invalid' : 'lost' })
-          })
+          c.ping().then(
+            () => {
+              missed = 0
+            },
+            (e) => {
+              if (!alive || finished.current) return
+              missed += 1
+              if (e instanceof SessionError || missed >= MAX_MISSED) endSession()
+            },
+          )
         }, HEARTBEAT_MS)
       })
       .catch((e) => alive && setState({ kind: e instanceof SessionError ? 'invalid' : 'lost' }))
@@ -92,11 +123,27 @@ export function LiveSession() {
     try {
       show(await c.act(state.view.screen.id, action, values))
     } catch (e) {
-      if (!finished.current) setState({ kind: e instanceof SessionError ? 'invalid' : 'lost' })
+      if (!finished.current) endSession()
     } finally {
       setBusy(false)
     }
   }
+
+  // Idle lock for EVERY screen of the app (item view, forms, manage...): drop what
+  // is on screen at once (a revealed secret must not outlive the limit), then tell
+  // the server, which locks and sends the lock screen.
+  const idleLock = async () => {
+    const c = client.current
+    const id = screenId.current
+    if (!c || !id || finished.current) return
+    setState({ kind: 'loading' })
+    try {
+      show(await c.act(id, 'autolock', {}))
+    } catch {
+      if (!finished.current) endSession()
+    }
+  }
+  useAutoLock(autoLockMinutes.current, () => void idleLock())
 
   if (state.kind === 'loading') {
     return (
@@ -104,6 +151,13 @@ export function LiveSession() {
         <p className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
           <Spinner aria-hidden /> {t('session.loading')}
         </p>
+      </AppShell>
+    )
+  }
+  if (state.kind === 'ended') {
+    return (
+      <AppShell>
+        <DoneView reason="closed" status={null} />
       </AppShell>
     )
   }

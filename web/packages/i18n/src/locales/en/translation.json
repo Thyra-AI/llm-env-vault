@@ -76,6 +76,7 @@
     "files_one": "Also decrypts {{count}} file to disk until the command exits.",
     "files_other": "Also decrypts {{count}} files to disk until the command exits.",
     "notRedacted": "File contents are not redacted from the command's output.",
+    "backgroundUnredacted": "Background run: its output goes to a log file that is NOT redacted and that the assistant can read while the process runs.",
     "trust": "Trust this exact command for the next {{hours}} hours (it runs with no prompt until then, or until this server restarts, whichever comes first)",
     "submit": "Unlock and run",
     "filesCleanup": "(deleted the moment the command exits)",

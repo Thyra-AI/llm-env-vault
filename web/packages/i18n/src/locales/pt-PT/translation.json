@@ -76,6 +76,7 @@
     "files_one": "Também decifra {{count}} ficheiro no disco até o comando terminar.",
     "files_other": "Também decifra {{count}} ficheiros no disco até o comando terminar.",
     "notRedacted": "O conteúdo dos ficheiros não é ocultado no resultado do comando.",
+    "backgroundUnredacted": "Execução em segundo plano: a saída vai para um ficheiro de registo NÃO ocultado, que o assistente pode ler enquanto o processo estiver a correr.",
     "trust": "Confiar neste comando exato durante as próximas {{hours}} horas (é executado sem pedir confirmação até lá, ou até este servidor reiniciar, o que acontecer primeiro)",
     "submit": "Desbloquear e executar",
     "filesCleanup": "(eliminados assim que o comando terminar)",

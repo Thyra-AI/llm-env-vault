@@ -1,6 +1,6 @@
 import { LogOut, Lock, Plus } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { toast } from 'sonner'
 import { useTranslation } from '@workspace/i18n'
 import { Button } from '@workspace/ui/components/button'
@@ -14,25 +14,6 @@ import { LockView } from './LockView'
 import { SettingsTab } from './SettingsTab'
 import { TabBar } from './TabBar'
 import { ALL_KINDS, VaultTab } from './VaultTab'
-
-/** Lock after `minutes` without any input. The server enforces the same limit; this just makes it prompt. */
-function useAutoLock(minutes: number, onLock: () => void) {
-  const callback = useRef(onLock)
-  callback.current = onLock
-  useEffect(() => {
-    let timer = window.setTimeout(() => callback.current(), minutes * 60_000)
-    const reset = () => {
-      window.clearTimeout(timer)
-      timer = window.setTimeout(() => callback.current(), minutes * 60_000)
-    }
-    const events = ['pointerdown', 'keydown', 'wheel', 'touchstart'] as const
-    for (const e of events) addEventListener(e, reset, { passive: true })
-    return () => {
-      window.clearTimeout(timer)
-      for (const e of events) removeEventListener(e, reset)
-    }
-  }, [minutes])
-}
 
 interface VaultAppProps {
   screen: Screen
@@ -58,7 +39,6 @@ function Home({ screen, app, busy, onAction }: VaultAppProps & { app: Extract<No
   const send = (id: string, extra: FormValues = {}) => {
     if (!busy) onAction(id, { tab, ...extra })
   }
-  useAutoLock(app.prefs.autoLockMinutes, () => onAction('lock', { tab, auto: true }))
 
   const copyName = async (item: AppItem) => {
     try {

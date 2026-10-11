@@ -76,6 +76,7 @@
     "files_one": "Entschlüsselt außerdem {{count}} Datei auf die Festplatte, bis der Befehl endet.",
     "files_other": "Entschlüsselt außerdem {{count}} Dateien auf die Festplatte, bis der Befehl endet.",
     "notRedacted": "Dateiinhalte werden in der Ausgabe des Befehls nicht geschwärzt.",
+    "backgroundUnredacted": "Hintergrundausführung: Die Ausgabe landet in einer Logdatei, die NICHT geschwärzt ist und die der Assistent lesen kann, solange der Prozess läuft.",
     "trust": "Diesem genauen Befehl für die nächsten {{hours}} Stunden vertrauen (er läuft bis dahin ohne Rückfrage, oder bis dieser Server neu startet, je nachdem, was zuerst eintritt)",
     "submit": "Entsperren und ausführen",
     "filesCleanup": "(werden gelöscht, sobald der Befehl endet)",
