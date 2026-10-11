@@ -29,8 +29,6 @@ Runs under pytest (`pytest tests/test_run_with_files.py -q`) or standalone
 """
 import base64
 import contextlib
-import os
-import subprocess
 import sys
 import tempfile
 from pathlib import Path

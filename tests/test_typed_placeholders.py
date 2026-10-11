@@ -4,7 +4,7 @@ Typed ("shape-preserving") placeholders -- the 2.0 replacement for swap=.
 `SMTP_PORT="value 17"` is not an int and `SMTP_USE_SSL="value 38"` is not a
 bool, so a placeholder-only .env fails to LOAD in pydantic-settings with the
 vault not involved in the run at all. That is mechanism F in
-docs/env-consumption-research.md, and the reason a protected project could
+docs/research/env-consumption-research.md, and the reason a protected project could
 not run a test suite that reads .env from a scrubbed child environment.
 
 A typed placeholder preserves the shape and nothing else: `0` for an int,

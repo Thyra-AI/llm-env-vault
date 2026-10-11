@@ -27,8 +27,6 @@ uses isolated_vault from test_trust.py for a real (throwaway) vault.
 Runs under pytest (`pytest tests/test_trust_hardening.py -q`) or standalone
 (`python tests/test_trust_hardening.py`), matching test_trust.py's convention.
 """
-import contextlib
-import os
 import sys
 import tempfile
 import time

@@ -33,7 +33,7 @@ from typing import Optional
 
 from secrets import token_hex as _token_hex
 
-from . import crypto, datadir, procs
+from . import crypto, datadir
 
 # When installed as a Claude Code plugin, __file__ resolves inside a
 # version-scoped cache directory (e.g.
@@ -129,7 +129,7 @@ PENDING_PLACEHOLDER = '"value ?"'
 # bool. A placeholder-only .env therefore fails to LOAD in pydantic-settings,
 # django-environ or Spring -- with the vault not involved in the run at all --
 # so a test that only needs the file to parse cannot run against a protected
-# project. That is mechanism F in docs/env-consumption-research.md, and the
+# project. That is mechanism F in docs/research/env-consumption-research.md, and the
 # case that kept reappearing: a git pre-push hook whose tests spawn children
 # with a scrubbed environment, where the file is the only source.
 #
@@ -446,12 +446,6 @@ def is_placeholder(name: str, value: str, index: Optional[dict],
     # self-describing form is still recognisable. A bare `17` is not, and is
     # treated as a real value on purpose.
     return bool(_ORPHAN_TYPED_RE.match(v))
-
-
-def looks_like_orphan_placeholder(value: str) -> bool:
-    """A self-describing typed placeholder whose name we know nothing about.
-    Used only where the alternative is to leave a line alone forever."""
-    return bool(_ORPHAN_TYPED_RE.match((value or "").strip()))
 
 
 # Well-known OS/runtime-critical environment variable names.  Vaulting a
@@ -1345,7 +1339,7 @@ def write_materialized_env(path: Path, secrets: dict) -> None:
 # Everything above keeps real values out of every file an agent can read, and
 # as of 2.0 there is no exception in this module: run_with_env(swap=[...]),
 # which rewrote a registered .env with real values for one command, is gone
-# (docs/security-posture-2.0.0.md §3). What survives it is the record of how
+# (docs/security/security-posture-2.0.0.md §3). What survives it is the record of how
 # each line was quoted, because anything that rewrites a managed line has to
 # put it back in the form the file's consumers already parse -- no single
 # quoting works for every .env parser.
@@ -1495,7 +1489,7 @@ def render_value_in_style(value: str, style: Optional[str]) -> tuple:
     existed -- which is the only quoting we can know is right, because no
     universal one exists: docker run / kubectl / make keep quotes literally
     while every dotenv-family parser strips them, and `$` is interpolated
-    by most of them unless single-quoted (docs/env-consumption-research.md).
+    by most of them unless single-quoted (docs/research/env-consumption-research.md).
 
     Unknown style (a registry written before styles were recorded, or a
     name whose line was already a placeholder when it was registered)
@@ -1715,29 +1709,6 @@ def _dotenv_decode(raw_value: str) -> str:
         return re.sub(r"\\(.)", lambda m: {"n": "\n", "t": "\t", "r": "\r"}.get(
             m.group(1), m.group(1)), inner)
     return _unquote(raw_value)
-
-
-def _carries_value(raw_value: str, entry: dict, raw_line: Optional[str] = None) -> bool:
-    """Does this line still hold the swapped secret, in ANY spelling?
-
-    Matching the rendered form alone is the blind spot the 1.6.0 review
-    found: a formatter that re-quotes `SECRET="abc"` to `SECRET=abc` during
-    the run made the line look like a user edit (left alone, journal
-    released) while verify, comparing the same rendered form, stayed silent.
-    So compare the VALUE: the rendered form, or what a dotenv parser would
-    deliver (_unquote), or -- for verify only, on values long enough not to
-    false-positive inside an unrelated token -- the raw secret anywhere in
-    the line.
-    """
-    secret = entry["secret"]
-    stripped = raw_value.strip()
-    if stripped == entry["rendered_value"]:
-        return True
-    if _unquote(raw_value) == secret or _dotenv_decode(raw_value) == secret:
-        return True
-    if raw_line is not None and len(secret) >= 8 and secret in raw_line:
-        return True
-    return False
 
 
 # Coarsens vault.enc's ciphertext length to a multiple of this many bytes
@@ -2345,11 +2316,6 @@ def _update_sealed(password: str, additions=None, removals=None) -> None:
         record["sealed"] = sealed
         body[FMK_KEY] = record
         save_vault_body(password, body, expect_fingerprint=fingerprint)
-
-
-def _sealed_ids(record: dict, gen: str) -> list:
-    """The file_ids outstanding under one generation."""
-    return list(((record or {}).get("sealed") or {}).get(gen) or [])
 
 
 def get_fmk(password: str):

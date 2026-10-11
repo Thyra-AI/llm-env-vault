@@ -23,7 +23,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from thyra_vault.uihelpers import (
     _parse_rk_input,
     _applicable_manage_actions,
-    MIN_PASSWORD_LEN,
 )
 from thyra_vault.crypto import new_recovery_key, format_recovery_key
 

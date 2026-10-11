@@ -495,14 +495,6 @@ def cache_secrets(signature, secrets: dict) -> None:
     _cached_vault_fingerprint = _vault_fingerprint()
 
 
-def has_cached_secrets() -> bool:
-    """Whether ANYTHING is cached, for any signature -- not "is this
-    specific signature cached" (that's what check() answers). Kept as a
-    no-arg call: existing callers use it as a coarse "has trust ever been
-    granted this session" signal."""
-    return bool(_cached_secrets)
-
-
 def cached_secrets(signature) -> Optional[dict]:
     """The already-scoped subset cached for this exact signature, or None
     if nothing is cached for it. Never returns more than what was approved

@@ -8,8 +8,6 @@
     "continue": "Continua",
     "allow": "Consenti",
     "deny": "Nega",
-    "copy": "Copia",
-    "copied": "Copiato",
     "show": "Mostra valore",
     "hide": "Nascondi valore",
     "working": "Operazione in corso…",
@@ -327,8 +325,7 @@
       "capitalize": "Iniziali maiuscole",
       "includeNumber": "Includi un numero",
       "regenerate": "Genera di nuovo",
-      "copy": "Copia",
-      "copied": "Copiato."
+      "copy": "Copia"
     },
     "settings": {
       "accountSecurity": "Sicurezza dell'account",

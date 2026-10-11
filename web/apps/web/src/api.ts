@@ -21,7 +21,7 @@ function storeToken(token: string) {
 }
 
 /** The single-use launch code lives in the URL fragment (never sent to a server). */
-export function takeLaunchCode(): string | null {
+function takeLaunchCode(): string | null {
   const match = /(?:^|&)c=([\w-]+)/.exec(location.hash.slice(1))
   if (!match) return null
   history.replaceState(null, '', location.pathname + location.search)
@@ -36,7 +36,7 @@ function dropToken() {
   }
 }
 
-export function hasStoredSession(): boolean {
+function hasStoredSession(): boolean {
   return readStoredToken() !== null
 }
 

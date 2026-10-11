@@ -1,9 +1,9 @@
 """
-Regression tests for the pure, Tkinter-free helpers in thyra_vault/gui.py.
+Regression tests for the pure, display-text helpers in thyra_vault/uihelpers.py.
 
 These functions had zero test coverage before this file was written.
-All tests here are headless -- no tk.Tk() is created, no display is
-required, and tkinter is not imported at module level. The only things
+All tests here are headless -- no window is created and no display is
+required. The only things
 being exercised are:
 
   _strip_hidden(text)         -- strips Cf format chars and C0/C1 controls
@@ -22,8 +22,7 @@ import os
 # file is run directly (python tests/test_uihelpers.py).
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Import only the helpers we're testing -- avoid importing tkinter at the
-# top level so the test file can run in a headless/CI environment.
+# Import only the helpers we are testing, so the file runs headless
 from thyra_vault.uihelpers import (_safe_display, _collapse_whitespace, _strip_hidden,
                            _is_common_password, _password_rejection_reason,
                            _COMMON_PASSWORDS, MIN_PASSWORD_LEN)
@@ -374,14 +373,14 @@ def test_ellipsis_split_for_normal_max_len() -> None:
 # cannot attack the password at all, since it can neither see nor drive the
 # native dialog. The cost is that a copy of vault.enc taken off the machine is
 # attacked offline, where a short password is the weak link. That trade is
-# documented in gui.py next to the constant and in the README.
+# documented in uihelpers.py next to the constant and in the README.
 # ---------------------------------------------------------------------------
 
 def test_min_password_len_is_5() -> None:
     assert MIN_PASSWORD_LEN == 5, (
         f"REGRESSION: MIN_PASSWORD_LEN is {MIN_PASSWORD_LEN!r}, expected 5. "
         "Changing the password floor is a product decision with a documented "
-        "trade-off -- update the reasoning in gui.py and the README together "
+        "trade-off -- update the reasoning in uihelpers.py and the README together "
         "with this test, not just the number."
     )
 

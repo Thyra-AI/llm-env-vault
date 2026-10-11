@@ -659,105 +659,6 @@ def _git_ignores(path: Path) -> Optional[bool]:
     return None
 
 
-# Windows marks a file that lives under a cloud-sync root (OneDrive, and
-# any provider using the Cloud Files API) with recall attributes; the
-# well-known sync roots cover Dropbox/Google Drive/iCloud on every platform.
-_FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x40000
-_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000
-_FILE_ATTRIBUTE_OFFLINE = 0x1000
-_IO_REPARSE_TAG_CLOUD = 0x9000001A  # the family tag; provider bits masked off
-
-
-def _cloud_synced(path: Path) -> Optional[str]:
-    """Name of the sync provider that appears to cover *path*, or None.
-
-    A swapped file inside a synced folder can be uploaded -- with real
-    values -- before the command finishes, and no restore recalls it from
-    the provider. This is the single most probable accidental leak on a
-    default Windows install (Documents and Desktop are OneDrive roots), so
-    the dialog names it. Warn only: refusing would block the feature for
-    everyone whose projects live under Documents.
-    """
-    try:
-        resolved = path.resolve()
-    except OSError:
-        return None
-    roots = []
-    for var, label in (("OneDrive", "OneDrive"), ("OneDriveConsumer", "OneDrive"),
-                       ("OneDriveCommercial", "OneDrive")):
-        value = os.environ.get(var)
-        if value:
-            roots.append((Path(value), label))
-    home = Path.home()
-    for sub, label in (("Dropbox", "Dropbox"), ("Google Drive", "Google Drive"),
-                       ("My Drive", "Google Drive"), ("iCloud Drive", "iCloud"),
-                       ("Library/Mobile Documents", "iCloud")):
-        roots.append((home / sub, label))
-    for root, label in roots:
-        try:
-            if resolved.is_relative_to(root.resolve()):
-                return label
-        except (OSError, ValueError):
-            continue
-    for sub in ("Library/CloudStorage",):
-        try:
-            if resolved.is_relative_to((home / sub).resolve()):
-                return "a cloud-sync provider (macOS CloudStorage)"
-        except (OSError, ValueError):
-            pass
-    if os.name == "nt":
-        for root, label in _windows_sync_roots():
-            try:
-                if resolved.is_relative_to(root):
-                    return label
-            except ValueError:
-                continue
-        probe = resolved
-        for _ in range(64):
-            try:
-                st = os.lstat(probe)  # lstat: never follow a junction to a share
-                attrs = st.st_file_attributes
-                tag = getattr(st, "st_reparse_tag", 0)
-            except (OSError, AttributeError):
-                break
-            if attrs & (_FILE_ATTRIBUTE_RECALL_ON_OPEN | _FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
-                        | _FILE_ATTRIBUTE_OFFLINE):
-                return "a cloud-sync provider (file has cloud recall attributes)"
-            if tag and (tag & 0xFFFF0FFF) == _IO_REPARSE_TAG_CLOUD:
-                return "a cloud-sync provider (Cloud Files reparse point)"
-            if probe.parent == probe:
-                break
-            probe = probe.parent
-    return None
-
-
-def _windows_sync_roots() -> list:
-    """Every Cloud Filter sync root registered on this machine -- OneDrive,
-    Dropbox, iCloud, Box, Google Drive in mirror mode -- as (Path, label)."""
-    roots = []
-    try:
-        import winreg
-        base = r"Software\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, base) as key:
-            i = 0
-            while True:
-                try:
-                    sub = winreg.EnumKey(key, i)
-                except OSError:
-                    break
-                i += 1
-                try:
-                    with winreg.OpenKey(key, sub) as k:
-                        path, _ = winreg.QueryValueEx(k, "UserSyncRootPath")
-                        if path:
-                            roots.append((Path(path).resolve(), sub.split("!")[0]))
-                except OSError:
-                    continue
-    except (OSError, ImportError):
-        pass
-    return roots
-
-
 def _encrypt_file_impl(path: str) -> dict:
     try:
         target = Path(path)
@@ -1616,7 +1517,7 @@ class _Terminated(Exception):
     pass
 
 
-def _on_sigterm(signum, frame):
+def _on_sigterm(signum, _frame):
     raise _Terminated()
 
 

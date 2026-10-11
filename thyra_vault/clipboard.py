@@ -157,7 +157,7 @@ def _exit_signals() -> list:
     return [getattr(signal, n) for n in names if hasattr(signal, n)]
 
 
-def _on_exit_signal(signum, frame) -> None:  # noqa: ARG001 -- signal handler signature
+def _on_exit_signal(signum, _frame) -> None:  # noqa: ARG001 -- signal handler signature
     wipe_now()
     raise SystemExit(128 + int(signum))  # unwinds the app's finally blocks
 

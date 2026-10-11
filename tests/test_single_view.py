@@ -10,7 +10,6 @@ value, sleeps, reads again while still running, and gets the placeholder.
 
 Windows only, like the feature. Runs under pytest or standalone.
 """
-import json
 import os
 import subprocess
 import sys
@@ -23,9 +22,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 import mcp_server  # noqa: E402
-from thyra_vault import legacy_swap, procs, singleview, store, trust  # noqa: E402
-from _vault_workspace import (INDEX, PLACEHOLDER_ENV, SECRETS, fake_dialog, stub_run,  # noqa: E402
-                       workspace)
+from thyra_vault import procs, singleview, trust  # noqa: E402
+from _vault_workspace import (fake_dialog, workspace)
 
 IS_WIN = sys.platform == "win32"
 PYTHON = getattr(sys, "_base_executable", None) or sys.executable

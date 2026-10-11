@@ -9,12 +9,11 @@ build on them -- so they moved here when that suite was deleted rather than
 being re-implemented three times.
 
 `workspace()` yields (project_dir, env_path). `fake_dialog()` replaces the
-Tk unlock dialog so no window opens; `stub_run()` replaces the subprocess
+unlock dialog so no window opens; `stub_run()` replaces the subprocess
 call so a test can observe the environment a command would have seen.
 """
 import contextlib
 import json
-import os
 import sys
 import tempfile
 from pathlib import Path

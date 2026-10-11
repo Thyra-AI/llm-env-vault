@@ -38,8 +38,6 @@ from thyra_vault.crypto import (  # noqa: E402
     FORMAT_VERSION,
     MalformedRecoveryKey,
     NoRecoverySlot,
-    RECOVERY_KEY_BYTES,
-    SCRYPT_DEFAULT,
     VAULT_MAGIC,
     ScryptParams,
     VaultCorrupted,
@@ -49,13 +47,11 @@ from thyra_vault.crypto import (  # noqa: E402
     build_v2_vault,
     decrypt as v1_decrypt,
     format_recovery_key,
-    new_dek,
     new_recovery_key,
     open_v2_with_password,
     open_v2_with_recovery,
     parse_envelope,
     parse_recovery_key,
-    slot_aad,
     validate_scrypt_params,
 )
 

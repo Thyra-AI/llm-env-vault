@@ -27,7 +27,7 @@ const SYMBOLS = '!@#$%^&*'
 const AMBIGUOUS = /[Il1O0o]/g
 
 /** Uniform integer in [0, max) from the platform CSPRNG, without modulo bias. */
-export function randomInt(max: number): number {
+function randomInt(max: number): number {
   if (!Number.isInteger(max) || max < 1 || max > 2 ** 32) throw new RangeError('max out of range')
   const limit = Math.floor(2 ** 32 / max) * max
   const buf = new Uint32Array(1)
@@ -48,7 +48,7 @@ function shuffle<T>(items: T[]): T[] {
 
 const clean = (set: string, avoid: boolean) => (avoid ? set.replace(AMBIGUOUS, '') : set)
 
-export function generatePassword(o: GeneratorOptions): string {
+function generatePassword(o: GeneratorOptions): string {
   const sets = [
     o.upper && clean(UPPER, o.avoidAmbiguous),
     o.lower && clean(LOWER, o.avoidAmbiguous),
@@ -68,7 +68,7 @@ export function generatePassword(o: GeneratorOptions): string {
   return shuffle(chars.slice(0, length)).join('')
 }
 
-export function generatePassphrase(o: GeneratorOptions): string {
+function generatePassphrase(o: GeneratorOptions): string {
   const count = Math.min(WORDS_RANGE.max, Math.max(WORDS_RANGE.min, Math.round(o.words)))
   const words = Array.from({ length: count }, () => WORDS[randomInt(WORDS.length)])
   const shown = o.capitalize ? words.map((w) => w[0].toUpperCase() + w.slice(1)) : words
@@ -82,7 +82,7 @@ export function generatePassphrase(o: GeneratorOptions): string {
 const ADJECTIVES = ['brave', 'calm', 'clever', 'eager', 'gentle', 'lucky', 'mighty', 'quiet', 'swift', 'witty', 'bold', 'bright']
 const NOUNS = ['falcon', 'harbor', 'maple', 'comet', 'ember', 'otter', 'pebble', 'raven', 'summit', 'thistle', 'willow', 'zephyr']
 
-export function generateUsername(): string {
+function generateUsername(): string {
   const two = `${pick(DIGITS)}${pick(DIGITS)}`
   return `${ADJECTIVES[randomInt(ADJECTIVES.length)]}${NOUNS[randomInt(NOUNS.length)]}${two}`
 }
@@ -93,7 +93,7 @@ export function generate(o: GeneratorOptions): string {
   return generatePassword(o)
 }
 
-export type Piece = { text: string; kind: 'letter' | 'digit' | 'symbol' }
+type Piece = { text: string; kind: 'letter' | 'digit' | 'symbol' }
 
 /** Split into runs so digits and symbols can be coloured, as password managers do. */
 export function pieces(value: string): Piece[] {

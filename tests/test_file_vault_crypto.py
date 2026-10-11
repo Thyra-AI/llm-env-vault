@@ -59,8 +59,6 @@ from thyra_vault.crypto import (  # noqa: E402
     file_envelope_info,
     is_file_envelope,
     is_v2,
-    new_fmk,
-    new_fmk_id,
     open_file_envelope,
     parse_file_envelope,
 )

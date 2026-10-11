@@ -19,7 +19,6 @@ Runs under pytest or standalone (`python tests/test_hardening_161.py`).
 """
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,10 +29,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 import mcp_server  # noqa: E402
-from thyra_vault import legacy_swap, procs, store, trust  # noqa: E402
+from thyra_vault import legacy_swap, procs, store  # noqa: E402
 from _vault_workspace import (INDEX, LEGACY_SWAPPED_ENV, LEGACY_SWAPPED_NAMES,  # noqa: E402
-                              PLACEHOLDER_ENV, SECRETS, TEST_PASSWORD, _read_journal,
-                              fake_dialog, stub_run, workspace, write_legacy_journal)
+                              PLACEHOLDER_ENV, _read_journal,
+                              workspace, write_legacy_journal)
 from _vault_workspace import FIXTURES, norm_env  # noqa: E402
 
 IS_WIN = os.name == "nt"
@@ -239,9 +238,6 @@ def test_dotenv_decode_reads_single_backslash_escapes() -> None:
     assert store._dotenv_decode('"a\\\\b"') == "a\\b"
     assert store._dotenv_decode('"q\\"x"') == 'q"x'
     assert store._dotenv_decode("'lit\\n'") == "lit\\n"
-    # A formatter that re-escaped a secret containing a backslash: still ours.
-    entry = {"secret": "a\\b", "rendered_value": '"a\\b"'}
-    assert store._carries_value('"a\\\\b"', entry) is True
 
 
 

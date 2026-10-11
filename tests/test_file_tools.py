@@ -4,7 +4,7 @@ MCP-tool suite for encrypt_file / decrypt_file and vault_status's file list.
 These tests drive the _impl functions directly with gui.encrypt_file_dialog and
 gui.decrypt_file_dialog monkeypatched, which is the same shape every other tool
 suite here uses: the dialog is the consent boundary, and no test may ever open
-a real Tk window.
+a real dialog window.
 
 What matters at this layer, as opposed to the store layer below it:
 

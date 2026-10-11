@@ -25,7 +25,6 @@ The two serious ones:
 Runs under pytest or standalone (`python tests/test_file_safety_regressions.py`).
 """
 import contextlib
-import hashlib
 import sys
 import tempfile
 import threading

@@ -47,9 +47,7 @@ from test_trust import (  # noqa: E402
     isolated_vault,
     fake_dialog,
     _allow,
-    _py,
     BASE_SECRETS,
-    TEST_PASSWORD,
 )
 
 # The long secret from the shared fixture -- 11 chars, well above the floor.

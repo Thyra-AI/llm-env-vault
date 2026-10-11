@@ -3,7 +3,7 @@ import { useTranslation } from '@workspace/i18n'
 import { cn } from '@workspace/ui/lib/utils'
 
 /** Four-segment strength meter. Pattern adapted from @reui/c-input-23. */
-export function scorePassword(pw: string): number {
+function scorePassword(pw: string): number {
   return [pw.length >= 12, /[a-z]/.test(pw) && /[A-Z]/.test(pw), /\d/.test(pw), /[^A-Za-z0-9]/.test(pw)].filter(Boolean).length
 }
 

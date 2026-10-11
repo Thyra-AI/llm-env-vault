@@ -31,7 +31,7 @@ temp directory -- store.SALT_FILE / SECRETS_FILE / INDEX_FILE / ENV_FILE
 are redirected there for the duration of each test and restored
 afterward, so nothing here ever reads or writes this repo's real
 vault.enc / vault.salt / vault_index.json / llm.env. gui.unlock_for_run_dialog
-is monkeypatched per-test so no real Tkinter window ever opens.
+is monkeypatched per-test so no real dialog window ever opens.
 
 Runs under pytest (`pytest tests/test_trust.py -q`) or standalone
 (`python tests/test_trust.py`), matching test_install_migrate_robustness.py.
@@ -388,7 +388,7 @@ def test_b3_vault_change_drops_entire_cache_and_reprompts() -> None:
             mcp_server._run_with_env_impl(list(cmd1), None, False, None, None)
             mcp_server._run_with_env_impl(list(cmd2), None, False, None, None)
             assert len(calls) == 2
-            assert trust.has_cached_secrets()
+            assert trust._cached_secrets
 
             # Rotate a secret through the real store API (not a raw file
             # mutation) -- this is exactly what add_secret/remove_secret do.
@@ -635,7 +635,7 @@ def test_denial_does_not_cache_or_trust_anything() -> None:
         with fake_dialog(_deny()):
             r = mcp_server._run_with_env_impl(list(cmd), None, False, None, None)
             assert r == {"applied": False, "message": "Denied by user."}
-        assert not trust.has_cached_secrets()
+        assert not trust._cached_secrets
         sig = trust.make_signature(cmd, None, None, None, False)
         assert sig not in trust._trusted
 

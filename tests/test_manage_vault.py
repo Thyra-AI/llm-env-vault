@@ -26,7 +26,7 @@ Conventions (match test_trust.py / test_redaction.py)
 - Plain ``def test_x() -> None:``; no pytest fixtures or conftest.
 - 75-dash section banners with a prose failure-mode paragraph.
 - "REGRESSION: ..." assertion messages.
-- gui.* dialogs monkeypatched per-test; no real Tkinter windows open.
+- gui.* dialogs monkeypatched per-test; no real dialog windows open.
 - Standalone runner block at the bottom sweeping globals() for test_*.
   Prints ``Results: N/N passed`` -- CI runs this AND pytest.
 

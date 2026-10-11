@@ -247,7 +247,6 @@ def test_recovery_still_rotates_the_data_key() -> None:
     """Keeping the recovery key must not mean keeping the DEK."""
     with _empty_vault_dir():
         paper_key = _make_recoverable_vault("forgotten-password-4", {"A": "alpha"})
-        import json as _json
         def _wrapped():
             h, _, _ = crypto.parse_envelope(store.SECRETS_FILE.read_bytes())
             return {s["type"]: s["wrapped_dek"] for s in h["slots"]}

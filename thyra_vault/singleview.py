@@ -686,7 +686,6 @@ def self_test(path: str, timeout: float = 3.0) -> Optional[str]:
                 result["error"] = str(e)
 
         t = threading.Thread(target=opener, daemon=True)
-        t0 = time.monotonic()
         t.start()
         if w._wait_break(int(timeout * 1000)) != "break":
             return f"a test open of {path} did not break the oplock -- opens are not observable"

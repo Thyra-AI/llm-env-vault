@@ -14,14 +14,13 @@ behavioural tests exercise what happens, not how the code is shaped:
 """
 import ast
 import os
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import mcp_server  # noqa: E402
-from thyra_vault import crypto, store, webui  # noqa: E402
+from thyra_vault import webui  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 WEB_SRC = REPO / "web" / "apps" / "web" / "src"

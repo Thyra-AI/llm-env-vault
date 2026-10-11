@@ -43,10 +43,6 @@ SWAP_JOURNAL_NAME = "swap.journal.json"
 SWAP_JOURNAL_LOCK_NAME = "swap.journal.lock"
 
 
-class SwapInProgress(ValueError):
-    """Another live server process has real values written into this file."""
-
-
 def _journal_path() -> Path:
     return store.ROOT / SWAP_JOURNAL_NAME
 
@@ -178,25 +174,6 @@ def _file_is_all_placeholders(path: Path, names, index=None, shapes=None) -> boo
         else:
             other.add(m.group("name"))
     return not (other - placeholder)
-
-
-def journal_remove(path_key: str) -> None:
-    with _journal_lock():
-        entries, rejected = _load_journal_ex()
-        if path_key in entries:
-            del entries[path_key]
-        _save_journal(entries, rejected)
-
-
-def journal_mark_restore_failed(path_key: str) -> None:
-    """The in-process restore gave up. Flip the entry so every later tool
-    call in any server retries the restore regardless of whether this
-    process is still alive."""
-    with _journal_lock():
-        entries, rejected = _load_journal_ex()
-        if path_key in entries:
-            entries[path_key]["state"] = "restore_failed"
-        _save_journal(entries, rejected)
 
 
 def live_swaps() -> dict:

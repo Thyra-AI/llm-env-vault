@@ -8,8 +8,6 @@
     "continue": "Weiter",
     "allow": "Erlauben",
     "deny": "Ablehnen",
-    "copy": "Kopieren",
-    "copied": "Kopiert",
     "show": "Wert anzeigen",
     "hide": "Wert verbergen",
     "working": "Wird verarbeitet…",
@@ -327,8 +325,7 @@
       "capitalize": "Großschreiben",
       "includeNumber": "Zahl einfügen",
       "regenerate": "Neu erzeugen",
-      "copy": "Kopieren",
-      "copied": "Kopiert."
+      "copy": "Kopieren"
     },
     "settings": {
       "accountSecurity": "Kontosicherheit",

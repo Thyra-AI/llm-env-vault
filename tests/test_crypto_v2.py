@@ -31,7 +31,6 @@ Conventions:
 Runs under ``pytest tests/test_crypto_v2.py -q`` and standalone:
   ``python tests/test_crypto_v2.py``
 """
-import base64
 import sys
 from pathlib import Path
 
@@ -39,7 +38,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import thyra_vault.crypto as crypto  # noqa: E402
 from thyra_vault.crypto import (  # noqa: E402
-    SCRYPT_DEFAULT,
     VAULT_MAGIC,
     FORMAT_VERSION,
     RECOVERY_KEY_BYTES,
@@ -50,10 +48,7 @@ from thyra_vault.crypto import (  # noqa: E402
     WrongRecoveryKey,
     MalformedRecoveryKey,
     NoRecoverySlot,
-    build_envelope,
     build_v2_vault,
-    derive_password_kek,
-    derive_recovery_kek,
     encrypt,
     format_recovery_key,
     is_v2,

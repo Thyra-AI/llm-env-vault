@@ -3,12 +3,10 @@
 One test (at least) per finding that was fixed, named for what an attacker could
 do before. Findings that needed a design decision live in the sections at the end.
 """
-import json
 import os
 import socket
 import stat
 import sys
-import threading
 import time
 import types
 from pathlib import Path

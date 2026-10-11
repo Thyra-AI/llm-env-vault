@@ -5,7 +5,6 @@ Each test is named for what the adversarial assistant could do before the fix.
 import base64
 import os
 import sys
-import textwrap
 from pathlib import Path
 
 import pytest
