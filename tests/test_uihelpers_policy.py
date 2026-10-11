@@ -1,5 +1,5 @@
 """
-Headless tests for the pure helpers in thyra_vault/webui/uihelpers.py that the browser dialogs share:
+Headless tests for the pure helpers in src/webui/uihelpers.py that the browser dialogs share:
 
   _parse_rk_input(text) -> (bytearray | None, str | None)
       Checksum-verifies a recovery-key string; returns (raw, None) on success
@@ -20,11 +20,11 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from thyra_vault.webui.uihelpers import (
+from src.webui.uihelpers import (
     _parse_rk_input,
     _applicable_manage_actions,
 )
-from thyra_vault.vault.crypto import new_recovery_key, format_recovery_key
+from src.vault.crypto import new_recovery_key, format_recovery_key
 
 
 # ---------------------------------------------------------------------------

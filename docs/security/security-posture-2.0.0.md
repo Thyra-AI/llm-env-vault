@@ -142,7 +142,7 @@ another session. Those need opposite treatment:
   reported as `legacy_swap_live` and left until the pid goes.
 
 Liveness is decided by pid **and** process start time, so a recycled pid is not mistaken for the
-original server; our own pid with a foreign server id is a dead predecessor. `thyra_vault/
+original server; our own pid with a foreign server id is a dead predecessor. `src/
 legacy_swap.py` is deprecated and scheduled for removal in 3.0.
 
 With no journal at all — deleted, or never written — nothing can restore the file automatically.
@@ -174,7 +174,7 @@ values and re-vaults them.
   not impossible: a process of the same user that reads the start page before the browser uses it can race the
   human for the session, and a human who is shown a page they did not expect should close it. What a session
   alone does NOT give an attacker is the master password, so nothing is unlocked by it. There is no longer a
-  setting that restores a native window. See `thyra_vault/webui/server.py` for the full list of defences.
+  setting that restores a native window. See `src/webui/server.py` for the full list of defences.
 - **Trust is a convenience, not a boundary.** It lives in one process's memory and is forgotten
   on exit, but within a session it lets an approved command re-run without a dialog.
 

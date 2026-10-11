@@ -2,7 +2,7 @@
 
 Everything here is pure: no windows, no I/O, no vault access. Password policy, display
 sanitising of untrusted text, recovery-key parsing and the manage-menu rules live in one
-place so the dialogs (thyra_vault/webui/flows.py) and the app (appflow.py) cannot drift apart.
+place so the dialogs (src/webui/flows.py) and the app (appflow.py) cannot drift apart.
 """
 import re
 import unicodedata

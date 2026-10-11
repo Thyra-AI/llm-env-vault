@@ -22,10 +22,10 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from thyra_vault import mcp_server  # noqa: E402
-from thyra_vault.vault import store  # noqa: E402
-from thyra_vault.vault import crypto
-from thyra_vault import webui as gui  # noqa: E402
+from src import mcp_server  # noqa: E402
+from src.vault import store  # noqa: E402
+from src.vault import crypto
+from src import webui as gui  # noqa: E402
 
 _STORE_PATHS = {
     "SALT_FILE": "vault.salt",

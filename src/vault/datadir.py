@@ -63,10 +63,10 @@ def resolve_root(env: Mapping[str, str], module_file: Path, *, frozen: bool,
 
 
 def _checkout_root(module_file: Path) -> Path:
-    """The folder that contains the `thyra_vault` package, wherever this module sits inside it."""
+    """The folder that contains the `src` package, wherever this module sits inside it."""
     here = module_file.resolve()
     for parent in here.parents:
-        if parent.name == "thyra_vault":
+        if parent.name == "src":
             return parent.parent
     return here.parent.parent
 

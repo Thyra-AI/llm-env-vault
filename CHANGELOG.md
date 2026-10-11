@@ -45,13 +45,12 @@ pinning what a user installs.
 
 ### Changed
 
-- **The package is grouped by domain.** `thyra_vault/vault/` (crypto, store, items, datadir, envvars), `thyra_vault/runner/`
-  (trust, procs, singleview, legacy_swap) and `thyra_vault/webui/` (now also `uihelpers` and `clipboard`); the MCP tools moved to
-  `thyra_vault/mcp_server.py`. The repository-root `mcp_server.py` is now a thin entry point, so `python mcp_server.py` and the
-  launcher work unchanged. Import paths changed (`thyra_vault.store` is now `thyra_vault.vault.store`, and so on); no behaviour did.
-- **The plugin no longer needs a bare `python` on PATH.** `.mcp.json` and `/thyra-vault:open` now run
-  `sh launch.sh`, which uses the first of `python3`, `python` or `py -3`. Machines that only have
-  `python3` (current Ubuntu and others) failed to start the server before. Needs a POSIX `sh`.
+- **The Python package is now `src/`, grouped by domain.** `src/vault/` (crypto, store, items, datadir, envvars), `src/runner/`
+  (trust, procs, singleview, legacy_swap) and `src/webui/` (now also `uihelpers` and `clipboard`); the MCP tools moved to
+  `src/mcp_server.py`, and the built page is `src/web_dist/`. The repository-root `mcp_server.py` is a thin entry point, so
+  `python mcp_server.py` and the launcher work unchanged. Import paths changed (`thyra_vault.store` is now `src.vault.store`, and so
+  on; the app starts with `python -m src.app`); no behaviour did. Because many projects have a `src/` folder of their own, the
+  server is started as a script and the app from the plugin folder, so a project's `src` can never shadow ours (tested).
 - **Everything is now called Thyra Vault** (it was `llm-env-vault`): plugin and MCP server id `thyra-vault`,
   commands `/thyra-vault:protect` and `/thyra-vault:doctor`, Python package `thyra_vault` -> `thyra_vault`
   (`python -m thyra_vault.app`), environment variables `THYRA_VAULT_*`, temp-file prefixes

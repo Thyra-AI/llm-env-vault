@@ -1,6 +1,6 @@
 """Server-driven screen schema for the browser dialogs.
 
-A flow (thyra_vault/webui/flows.py) yields plain-dict *screens*; the React app
+A flow (src/webui/flows.py) yields plain-dict *screens*; the React app
 renders whatever it is sent. Every human-readable string is an i18n key plus
 parameters -- never pre-rendered English -- so the page can show it in any of
 the platform's languages. Strings that did not originate in this code (paths,
@@ -212,7 +212,7 @@ def screen(title: str, /, *, icon: str = "lock", blocks=(), fields=(), actions=(
     if badge:
         out["badge"] = badge
     if app is not None:
-        # The Bitwarden-style app frame (thyra_vault/webui/appflow.py). Carries
+        # The Bitwarden-style app frame (src/webui/appflow.py). Carries
         # item NAMES and metadata only -- never a value.
         out["app"] = app
     if toast is not None:

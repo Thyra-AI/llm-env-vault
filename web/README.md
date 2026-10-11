@@ -3,14 +3,14 @@
 The only user interface of Thyra Vault (the `thyra-vault` plugin): the consent dialogs an assistant
 triggers and the app you open yourself. pnpm workspaces + Turborepo.
 
-The page holds **no vault logic**. The Python server (`thyra_vault/webui/`) sends it *screens*
+The page holds **no vault logic**. The Python server (`src/webui/`) sends it *screens*
 (titles, text, fields, buttons, as i18n keys plus parameters); the page draws them and reports
 which button was pressed. So adding or changing a dialog is a Python change in
-`thyra_vault/webui/flows.py`, and the React app only needs new strings.
+`src/webui/flows.py`, and the React app only needs new strings.
 
 ```bash
 pnpm install
-pnpm build:embed    # typecheck + build, then copy to ../thyra_vault/web_dist (committed)
+pnpm build:embed    # typecheck + build, then copy to ../src/web_dist (committed)
 pnpm typecheck && pnpm lint
 ```
 
@@ -19,7 +19,7 @@ is always the real one. To work on it with live reload of the build, in two term
 
 ```bash
 pnpm --filter web exec vite build --watch      # rebuilds apps/web/dist on every save
-THYRA_VAULT_WEB_ASSETS=web/apps/web/dist python -m thyra_vault.webui_demo app     # a throwaway vault
+THYRA_VAULT_WEB_ASSETS=web/apps/web/dist python -m src.webui_demo app     # a throwaway vault
 ```
 
 (`webui_demo --list` shows every dialog, e.g. `unlock-run`, `first-run`, `recovery-key`.) Reload the
@@ -33,7 +33,7 @@ window after a rebuild. Run the demo from the repository root, with the repo's P
 
 ## Screen protocol
 
-`apps/web/src/protocol.ts` is the TypeScript mirror of `thyra_vault/webui/schema.py`. Blocks:
+`apps/web/src/protocol.ts` is the TypeScript mirror of `src/webui/schema.py`. Blocks:
 `text`, `notice`, `code`, `items`, `keyBox`, `copy`, `menu`, `itemHeader`, `fields`, `history`.
 Fields: `password`, `text`, `textarea`, `checkbox`. A screen may also carry `app` (the app frame) and `toast`. Every string is `{ key, params }`; untrusted text (paths, commands, variable names) is
 sanitised in Python and rendered as text, never HTML.
@@ -62,7 +62,7 @@ ReUI password patterns (`c-input-group-35`, `c-input-23`).
 
 ## Production build
 
-`pnpm build:embed` writes `thyra_vault/web_dist/`, which the plugin ships so users need no Node.
+`pnpm build:embed` writes `src/web_dist/`, which the plugin ships so users need no Node.
 Because the plugin directory validator rejects what it cannot inspect, the build is **unminified,
 sourcemap-free and binary-free**: no font files (a system font stack, with Public Sans, Archivo and
 IBM Plex Mono used when installed) and no inlined assets. It also gets a strict

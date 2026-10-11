@@ -1,4 +1,4 @@
-/** The screen schema the Python flows send (thyra_vault/webui/schema.py). */
+/** The screen schema the Python flows send (src/webui/schema.py). */
 export type Params = Record<string, string | number>
 export interface Msg {
   key: string
@@ -70,7 +70,7 @@ export interface AppInfo {
 
 export type AppTab = 'vault' | 'generator' | 'settings'
 
-/** The Bitwarden-style frame (thyra_vault/webui/appflow.py). */
+/** The Bitwarden-style frame (src/webui/appflow.py). */
 export type AppView =
   | { view: 'lock'; firstRun: boolean; location: string; prefs: AppPrefs }
   | { view: 'home'; tab: AppTab; items: AppItem[]; prefs: AppPrefs; info: AppInfo }

@@ -119,7 +119,7 @@ def _provision_lock():
     wait for it to finish (then re-check whether provisioning is even
     still needed -- see _ensure_venv), not duplicate the work.
 
-    Self-contained (no import from thyra_vault, which has its own
+    Self-contained (no import from src, which has its own
     dependencies plugin_launcher's whole job is to install in the first
     place -- it cannot import anything not-yet-installed itself)."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -229,7 +229,7 @@ def _install_marker() -> str:
     Installed plugin (CLAUDE_PLUGIN_ROOT set): keyed on CLAUDE_PLUGIN_ROOT's
     own resolved path, NOT requirements.txt's content hash. A real `claude
     plugin update` always moves the plugin to a new version-scoped
-    directory -- that's the same fact behind thyra_vault/vault/store.py's ROOT
+    directory -- that's the same fact behind src/vault/store.py's ROOT
     relocation: an update orphans whatever was in the OLD version's
     directory precisely because it creates a new one. So a path change IS
     a genuine update event, and requirements.txt's content is replaced
@@ -432,7 +432,7 @@ def _provision(python: Path, current_marker: str) -> None:
 
 def _app_command(python, extra) -> list:
     """The command that opens the Thyra Vault app in the plugin's own venv."""
-    return [str(python), "-m", "thyra_vault.app", *extra]
+    return [str(python), "-m", "src.app", *extra]
 
 
 def _looks_like_plugin_cache(path: Path) -> bool:
@@ -454,7 +454,7 @@ def _require_data_dir_for_app() -> None:
 def _run_app(python, extra) -> None:
     """``plugin_launcher.py app``: open the app the PERSON asked for (/thyra-vault:open).
     Same venv and same vault as the MCP server."""
-    os.chdir(PLUGIN_ROOT)  # so `-m thyra_vault.app` finds the package
+    os.chdir(PLUGIN_ROOT)  # so `-m src.app` finds the package
     command = _app_command(python, extra)
     if sys.platform == "win32":
         sys.exit(subprocess.call(command))

@@ -1,15 +1,15 @@
-"""Try a browser dialog without an AI assistant: ``python -m thyra_vault.webui_demo <dialog>``.
+"""Try a browser dialog without an AI assistant: ``python -m src.webui_demo <dialog>``.
 
 Builds a THROWAWAY vault in a temporary directory, opens the dialog in your
 browser, and prints what the dialog returned -- with every secret redacted. The
 demo master password is printed so you can type it in.
 
-    python -m thyra_vault.webui_demo unlock-run
-    python -m thyra_vault.webui_demo first-run        # no vault yet: create one
-    python -m thyra_vault.webui_demo --list
+    python -m src.webui_demo unlock-run
+    python -m src.webui_demo first-run        # no vault yet: create one
+    python -m src.webui_demo --list
 
-Why this is NOT thyra_vault/webui/__main__.py: ``python -m thyra_vault.webui`` would
-import the webui package -- and with it thyra_vault.vault.store -- BEFORE this code could
+Why this is NOT src/webui/__main__.py: ``python -m src.webui`` would
+import the webui package -- and with it src.vault.store -- BEFORE this code could
 point the vault at a temp directory. store resolves its location at import time,
 so the demo would have created a vault in the real data directory. Keeping this
 module outside the package, and refusing to run unless store.ROOT really is
@@ -40,7 +40,7 @@ def _redact(value):
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m thyra_vault.webui_demo", description=__doc__,
+    parser = argparse.ArgumentParser(prog="python -m src.webui_demo", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("dialog", nargs="?", choices=DIALOGS)
     parser.add_argument("--list", action="store_true", help="list the dialogs and exit")
@@ -51,17 +51,17 @@ def main(argv=None) -> int:
         print("\n".join(DIALOGS))
         return 0
 
-    if "thyra_vault.vault.store" in sys.modules:
-        print("refusing to run: thyra_vault.vault.store is already imported, so the vault location "
+    if "src.vault.store" in sys.modules:
+        print("refusing to run: src.vault.store is already imported, so the vault location "
               "is already fixed", file=sys.stderr)
         return 2
     work = Path(tempfile.mkdtemp(prefix="thyra-vault-demo-")).resolve()
-    os.environ["CLAUDE_PLUGIN_DATA"] = str(work)  # BEFORE thyra_vault.vault.store is imported
+    os.environ["CLAUDE_PLUGIN_DATA"] = str(work)  # BEFORE src.vault.store is imported
     if args.no_browser:
         os.environ["THYRA_VAULT_NO_BROWSER"] = "1"
 
-    from thyra_vault import webui
-    from thyra_vault.vault import crypto, store
+    from src import webui
+    from src.vault import crypto, store
     if work not in store.ROOT.resolve().parents:
         print(f"refusing to run: the vault would be at {store.ROOT}, not inside {work}",
               file=sys.stderr)

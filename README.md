@@ -6,7 +6,7 @@ Thyra Vault (`thyra-vault`) is an MCP server that replaces the secret values in 
 
 Your AI agent sees `DATABASE_URL="value 3"`. Your app, when you deliberately run it through the vault, sees the real thing.
 
-> **Naming.** The product is called **Thyra Vault** (it was `llm-env-vault`). The plugin id is `thyra-vault`, its commands are `/thyra-vault:…`, the Python package is `thyra_vault` and the environment variables are `THYRA_VAULT_*`. **Existing installs keep working:** the old `LLM_ENV_VAULT_*` variables are still read, and on first start the plugin copies a vault left under the old plugin id into its new data directory (the original is never touched). The GitHub repository keeps its current address until it is renamed there. The on-disk format identifiers (`llm-env-vault` inside the vault and encrypted-file headers, the `# Managed by llm-env-vault` marker in migrated `.env` files) are deliberately **unchanged**: they take part in key derivation and in recognising files you already migrated, so renaming them would lock you out.
+> **Naming.** The product is called **Thyra Vault** (it was `llm-env-vault`). The plugin id is `thyra-vault`, its commands are `/thyra-vault:…`, the Python package is `src` and the environment variables are `THYRA_VAULT_*`. **Existing installs keep working:** the old `LLM_ENV_VAULT_*` variables are still read, and on first start the plugin copies a vault left under the old plugin id into its new data directory (the original is never touched). The GitHub repository keeps its current address until it is renamed there. The on-disk format identifiers (`llm-env-vault` inside the vault and encrypted-file headers, the `# Managed by llm-env-vault` marker in migrated `.env` files) are deliberately **unchanged**: they take part in key derivation and in recognising files you already migrated, so renaming them would lock you out.
 
 Background material (threat model, research, archived plans) is indexed in [docs/](docs/README.md).
 
@@ -102,7 +102,7 @@ claude plugin install thyra-vault@thyra-vault --scope user
 **First run is slower on purpose:** Claude Code auto-installs Node.js plugin dependencies but has no equivalent for Python, so the plugin ships a launcher (`plugin_launcher.py`) that, on first run, creates a venv in the plugin's persistent data directory (`${CLAUDE_PLUGIN_DATA}`, survives updates), installs dependencies into it (from `requirements-lock.txt`, a hash-pinned universal lockfile, via `--require-hashes` on every platform), and then execs the real server from that venv. A stamp file means it only reinstalls when the plugin is actually updated (a new version-scoped install directory) — every subsequent run is instant, and a plain local edit to the requirements file doesn't trigger anything on its own. The only prerequisite is a Python 3 on your PATH — see the platform note above.
 
 **Opening the app.** After installing, run `/thyra-vault:open` (see [Commands](#commands)). It is the only way the
-installed plugin opens the app. `python -m thyra_vault.app` is for a source checkout.
+installed plugin opens the app. `python -m src.app` is for a source checkout.
 
 **Trying it from a local clone** (before anything is published): point Claude Code at the folder instead of GitHub.
 
@@ -164,7 +164,7 @@ Stated plainly, so you can decide whether to install it. Everything below was ch
 
 - **One local MCP server process**, started by Claude Code over stdio (`python plugin_launcher.py`, which hands off to `mcp_server.py`). It talks only to Claude Code through that pipe and makes no outbound network connection of its own. It opens no listening port while idle; the one exception is a dialog, described under [The dialogs](#the-dialogs), which listens on `127.0.0.1` only, only while it is open.
 - **`plugin_launcher.py`**, on first run and again after a real plugin update: creates a virtualenv under `${CLAUDE_PLUGIN_DATA}/venv` and installs `cryptography` and `mcp` (plus their dependencies) from **PyPI** with `pip` — or with `uv` if one is on your `PATH` — from the hash-pinned `requirements-lock.txt` with `--require-hashes`, on every platform. Its output is logged to `${CLAUDE_PLUGIN_DATA}/provision.log`.
-- **The Thyra Vault app**, only when you run `python -m thyra_vault.app` yourself ([details](#the-thyra-vault-app-you-open-it)): the same loopback page, plus a clipboard write through your OS clipboard tool when you press Copy.
+- **The Thyra Vault app**, only when you run `python -m src.app` yourself ([details](#the-thyra-vault-app-you-open-it)): the same loopback page, plus a clipboard write through your OS clipboard tool when you press Copy.
 - **The dialogs**, for every password prompt and confirmation, are small local web pages served from a loopback-only port on your own machine for as long as the dialog is open (see [The dialogs](#the-dialogs)). They need a browser (a Chromium-based one gives a small app window, any other opens a tab) and a display.
 - **Commands you approve.** `run_with_env` runs the command the agent proposes, with real values injected, only after you click Allow in a dialog. That command is yours: whatever network access *it* makes is outside this plugin's control. The plugin also runs `git` locally (read-only status queries, with hooks disabled) to tell whether a file is tracked or ignored.
 
@@ -661,7 +661,7 @@ boundaries of the tracking, surfaced in the trust note when they apply:
   setup, a shell builtin), it isn't drift-monitored — the trust-grant note says so explicitly
   when it applies.
 
-**The vault matters too.** Adding, removing, or rotating any secret drops the *entire* trust cache immediately — the cached decrypted values a trusted command would inject are now stale. The next trusted run needs the password again. Cached values are also scoped to exactly what each trusted command was approved to see (a command trusted with a narrow `only_vars` doesn't leave the rest of the vault resident in memory too) and kept obfuscated in memory, not as plain, greppable text — see `thyra_vault/runner/trust.py`'s own comments for exactly what that obfuscation does and doesn't protect against (short version: it raises the bar against passive exposure like crash dumps, not against a targeted attacker who can already read this process's memory).
+**The vault matters too.** Adding, removing, or rotating any secret drops the *entire* trust cache immediately — the cached decrypted values a trusted command would inject are now stale. The next trusted run needs the password again. Cached values are also scoped to exactly what each trusted command was approved to see (a command trusted with a narrow `only_vars` doesn't leave the rest of the vault resident in memory too) and kept obfuscated in memory, not as plain, greppable text — see `src/runner/trust.py`'s own comments for exactly what that obfuscation does and doesn't protect against (short version: it raises the bar against passive exposure like crash dumps, not against a targeted attacker who can already read this process's memory).
 
 **This is a convenience feature, not a security boundary — deliberately.** Everything is
 time-limited (8-hour TTL), in-memory, and gone on restart. Making it survive a restart with zero prompts would require persisting something capable of decrypting the vault (the password, the derived key, or equivalent), which breaks the one real invariant this project is built on: the master password never touches disk. Any persisted equivalent would ultimately be usable in plaintext-equivalent form by any process running under your OS account — the same account the AI agent runs as. Against an actively malicious agent with local code execution, no purely local/software mechanism is a real boundary; genuine protection there would need a separate, more-privileged OS principal gated by hardware-backed human presence (e.g. Windows Hello), which is out of scope. Use trusted commands to stop re-typing your password; don't rely on them to stop an agent already working against you.
@@ -680,7 +680,7 @@ Earlier releases also had native Tkinter windows, which an AI agent could neithe
 - a **single-use launch code** in the URL `#fragment` (never sent to any server), swapped once for a session token; a second use fails loudly, so a raced link shows up as an error page. The browser is not started with that URL on its command line (which any process could read in the process list): it is given a tiny local start page (`file://`, in a private temp folder, deleted the moment the page connects) that forwards to it. Another process **of your own user** could still read that file in the instant before the page connects, so this narrows the window rather than closing it; failed code attempts never end a session that is already connected;
 - every API call needs that token; `Host`, `Origin` and `Sec-Fetch-Site` are checked (DNS-rebinding and cross-site requests are refused); request bodies must be JSON; there are no CORS headers;
 - passwords and decrypted values are never put in a URL, a log line or a response; the page is shown a secret only where the dialog exists to show it (the recovery key you are about to write down);
-- a strict `Content-Security-Policy`, no third-party scripts or fonts, and a build you can read: the shipped page in `thyra_vault/web_dist/` is unminified text, built from `web/` (a CI job rebuilds it and fails if it differs).
+- a strict `Content-Security-Policy`, no third-party scripts or fonts, and a build you can read: the shipped page in `src/web_dist/` is unminified text, built from `web/` (a CI job rebuilds it and fails if it differs).
 
 What an attacker who wins the race for a session still cannot do: unlock anything without your master password, which the unlock throttle (a doubling cool-down after five wrong attempts) protects from guessing through the page. It can deny you the dialog, and it can use a session you have already unlocked. If an assistant with a shell or browser tool is part of your threat model, treat the master password and the unlocked window accordingly, and do not leave the app unlocked.
 
@@ -689,8 +689,8 @@ Environment: `THYRA_VAULT_NO_BROWSER=1` prints the link instead of opening anyth
 Try the dialogs without an assistant, against a throwaway vault in a temporary directory:
 
 ```bash
-python -m thyra_vault.webui_demo --list
-python -m thyra_vault.webui_demo unlock-run     # the demo master password is printed
+python -m src.webui_demo --list
+python -m src.webui_demo unlock-run     # the demo master password is printed
 ```
 
 Rebuilding the page needs Node and pnpm and is only for development: `cd web && pnpm install && pnpm build:embed` (see `web/README.md`). Users of the plugin never need either.
@@ -700,9 +700,9 @@ Rebuilding the page needs Node and pnpm and is only for development: `cd web && 
 Separate from the dialogs an assistant triggers, there is an app **you** open: a small window in the style of a password-manager popup, with a lock screen, your secrets as a searchable list (filter by type), add / edit / delete, a password and passphrase generator, and settings (language, theme, auto-lock, clipboard wipe, account security).
 
 ```bash
-python -m thyra_vault.app            # your real vault
-python -m thyra_vault.app --where    # print the vault folder and exit
-python -m thyra_vault.webui_demo app # a throwaway demo vault (the demo password is printed)
+python -m src.app            # your real vault
+python -m src.app --where    # print the vault folder and exit
+python -m src.webui_demo app # a throwaway demo vault (the demo password is printed)
 ```
 
 From an installed plugin, run **`/thyra-vault:open`** instead (it opens the same vault the assistant's tools use). It is a command you run, **not an MCP tool**, on purpose: the app can put a secret on your clipboard, and an assistant must not be able to open it.
@@ -914,15 +914,15 @@ commands/           the /thyra-vault:* slash commands
 launch.sh           picks a Python 3 and starts plugin_launcher.py
 plugin_launcher.py  first-run provisioning (venv, hash-pinned install), then runs the server or the app
 mcp_server.py       thin entry point (a script, so the project folder never lands on sys.path)
-thyra_vault/
+src/
   mcp_server.py     the MCP tools
   vault/            crypto, store (formats, disk, locks), items, datadir (where the vault lives), envvars
   runner/           trust (trusted-command cache), procs, singleview (max_reads), legacy_swap (retired feature cleanup)
   webui/            dialogs and the app: server, schema, flows, appflow, prefs, uihelpers, clipboard
   web_dist/         the built page the local server serves (committed; CI checks it matches web/)
-  app.py            `python -m thyra_vault.app`
+  app.py            `python -m src.app`
   webui_demo.py     throwaway-vault demo for development
-web/                the React page (Turborepo); `pnpm build:embed` writes thyra_vault/web_dist
+web/                the React page (Turborepo); `pnpm build:embed` writes src/web_dist
 tests/              pytest suite (map below)
 docs/               background documents (index inside)
 ```

@@ -32,8 +32,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import thyra_vault.vault.crypto as crypto  # noqa: E402
-from thyra_vault.vault import store  # noqa: E402
+import src.vault.crypto as crypto  # noqa: E402
+from src.vault import store  # noqa: E402
 
 TEST_PASSWORD = "safety-regression-password-123"
 _FAST_PARAMS = crypto.ScryptParams(n=2 ** 12, r=8, p=1)
@@ -406,7 +406,7 @@ def test_secure_delete_ex_reports_both_phases() -> None:
 def test_a_leftover_sibling_does_not_block_a_run_that_writes_elsewhere() -> None:
     """run_with_env restores into the command's cwd, not beside the .levault.
     A leftover plaintext next to the sidecar is irrelevant to it."""
-    from thyra_vault import mcp_server
+    from src import mcp_server
     with workspace() as project:
         store.encrypt_file_in_place(_pem(project), TEST_PASSWORD)
         # A previous decrypt_file left a copy beside the sidecar.

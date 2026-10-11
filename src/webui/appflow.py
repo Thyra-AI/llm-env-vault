@@ -4,13 +4,13 @@ Unlike the dialogs in flows.py -- each answers one question an AI assistant
 asked and then goes away -- this is a persistent app: unlock once, browse the
 secrets, add / edit / delete, copy, generate a password, change settings.
 
-It is opened by the person (``python -m thyra_vault.app``), never by a tool call:
+It is opened by the person (``python -m src.app``), never by a tool call:
 an assistant must not be able to put this window on screen, because the app can
 put a secret on the clipboard. That is the one new power it has, and it is
 bounded:
 
   * a value NEVER travels to the page. "Copy" is a server-side clipboard write
-    (thyra_vault/webui/clipboard.py) that is wiped after a few seconds; there is no
+    (src/webui/clipboard.py) that is wiped after a few seconds; there is no
     "show value" and no value in any screen -- only names, placeholder numbers,
     a coarse type and the files an item is used in;
   * the master password and the decrypted dict stay in this generator's local

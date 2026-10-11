@@ -20,12 +20,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from thyra_vault import mcp_server  # noqa: E402
-import thyra_vault.vault.crypto as crypto  # noqa: E402
-from thyra_vault.runner import trust  # noqa: E402
-from thyra_vault.vault import store
-from thyra_vault.runner import legacy_swap, procs
-from thyra_vault import webui as gui  # noqa: E402
+from src import mcp_server  # noqa: E402
+import src.vault.crypto as crypto  # noqa: E402
+from src.runner import trust  # noqa: E402
+from src.vault import store
+from src.runner import legacy_swap, procs
+from src import webui as gui  # noqa: E402
 
 TEST_PASSWORD = "swap-suite-password-123"
 _FAST_PARAMS = crypto.ScryptParams(n=2 ** 12, r=8, p=1)

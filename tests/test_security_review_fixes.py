@@ -19,11 +19,11 @@ from _vault_workspace import SECRETS, TEST_PASSWORD, workspace  # noqa: E402
 from test_appflow import App, Clock, FakeClipboard  # noqa: E402
 from test_webui_server import Harness, _restore_seams, assets  # noqa: E402,F401
 
-from thyra_vault import mcp_server  # noqa: E402
-from thyra_vault.vault import store  # noqa: E402
-from thyra_vault.vault import crypto, datadir
-from thyra_vault.webui import clipboard
-from thyra_vault.webui import prefs, server  # noqa: E402
+from src import mcp_server  # noqa: E402
+from src.vault import store  # noqa: E402
+from src.vault import crypto, datadir
+from src.webui import clipboard
+from src.webui import prefs, server  # noqa: E402
 
 IDLE = 15 * 60 + 5
 posix_only = pytest.mark.skipif(os.name != "posix", reason="POSIX files and links")
@@ -296,7 +296,7 @@ def test_setting_the_clock_back_locks_instead_of_keeping_the_vault_open():
 
 def test_the_app_measures_idle_time_with_wall_clock_time():
     import inspect
-    from thyra_vault.webui import appflow
+    from src.webui import appflow
     assert inspect.signature(appflow.vault_app).parameters["clock"].default is time.time
 
 
@@ -449,7 +449,7 @@ def test_the_real_dialog_object_is_paced():
 # --------------------------------------------------------------------------
 
 from test_trust import _allow, _deny, fake_dialog, isolated_vault  # noqa: E402
-from thyra_vault.runner import trust  # noqa: E402
+from src.runner import trust  # noqa: E402
 
 
 def _project(path):
@@ -568,7 +568,7 @@ def test_a_relative_program_is_shown_with_the_path_it_resolves_to_in_that_folder
 
 
 def test_the_browser_dialog_shows_both_lines():
-    from thyra_vault.webui import flows
+    from src.webui import flows
     flow = flows.unlock_for_run({"secrets": None, "trust": False}, "make test", None, ["A"], None, None, None,
                                 "/work/proj", "/usr/bin/make")
     scr = next(flow)
@@ -580,7 +580,7 @@ def test_the_browser_dialog_shows_both_lines():
 def test_a_forged_index_cannot_hide_variables_from_the_dialog():
     """Finding F2 (partly): the names shown come from the plaintext index, so after unlocking
     the dialog compares them with what is really in the vault and refuses a mismatch."""
-    from thyra_vault.webui.uihelpers import _disclosure_mismatch
+    from src.webui.uihelpers import _disclosure_mismatch
     assert _disclosure_mismatch(["A"], ["A", "SECRET_THE_INDEX_DID_NOT_LIST"])
     assert _disclosure_mismatch(["A", "B"], ["A", "B"]) is None
 
@@ -604,7 +604,7 @@ def test_a_relative_program_path_is_resolved_against_the_commands_folder_not_the
 # Forged state files (targets.json / the swap journal) cannot rewrite or destroy files
 # --------------------------------------------------------------------------
 
-from thyra_vault.runner import legacy_swap  # noqa: E402
+from src.runner import legacy_swap  # noqa: E402
 
 
 def test_a_forged_target_pointing_at_an_ordinary_file_is_not_touched(tmp_path):

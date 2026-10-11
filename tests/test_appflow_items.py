@@ -14,10 +14,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from _vault_workspace import SECRETS, TEST_PASSWORD, workspace  # noqa: E402
 from test_appflow import Clock, FakeClipboard  # noqa: E402
 
-from thyra_vault.vault import store  # noqa: E402
-from thyra_vault.vault import items
-from thyra_vault.webui import appflow  # noqa: E402
-from thyra_vault.webui.flows import Act  # noqa: E402
+from src.vault import store  # noqa: E402
+from src.vault import items
+from src.webui import appflow  # noqa: E402
+from src.webui.flows import Act  # noqa: E402
 
 LOGIN_PASSWORD = "Gh-pa55-w0rd-xyz"
 CARD_NUMBER = "4111111111111111"

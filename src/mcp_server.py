@@ -2,9 +2,9 @@
 """MCP server exposing thyra-vault's operations as tools an AI coding
 assistant calls directly -- instead of shelling out to standalone
 scripts and parsing stdout. Every mutating tool opens a consent dialog (a
-small local browser window, see thyra_vault/webui); nothing is written to disk
+small local browser window, see src/webui); nothing is written to disk
 until a human clicks Allow and types the master password themselves.
-thyra_vault holds the crypto, parsing, atomic writes and the dialogs -- this
+src holds the crypto, parsing, atomic writes and the dialogs -- this
 file only exposes those operations as MCP tools.
 
 Run directly for local testing:
@@ -15,11 +15,11 @@ file and this venv's python.exe -- see README.md.
 """
 import sys
 
-# Set before importing thyra_vault: when this runs as an installed plugin, the
+# Set before importing src: when this runs as an installed plugin, the
 # import below resolves out of ${CLAUDE_PLUGIN_ROOT} -- a version-scoped
 # directory the plugin manager owns and treats as immutable. Without this,
-# Python drops a thyra_vault/__pycache__ into it on every start. Must stay above
-# the thyra_vault import; after it, it's a no-op.
+# Python drops a src/__pycache__ into it on every start. Must stay above
+# the src import; after it, it's a no-op.
 sys.dont_write_bytecode = True
 
 import base64
@@ -38,15 +38,15 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from thyra_vault import webui
-from thyra_vault.vault import envvars, store
-from thyra_vault.runner import legacy_swap, procs, singleview, trust
-from thyra_vault.webui.uihelpers import command_display_lines, command_refusal_reason
-from thyra_vault.vault.crypto import (WrongPassword, TooManyAttempts, WrongRecoveryKey,
+from src import webui
+from src.vault import envvars, store
+from src.runner import legacy_swap, procs, singleview, trust
+from src.webui.uihelpers import command_display_lines, command_refusal_reason
+from src.vault.crypto import (WrongPassword, TooManyAttempts, WrongRecoveryKey,
                               MalformedRecoveryKey, NoRecoverySlot, VaultCorrupted,
                               VaultTampered)
 
-# The consent dialogs: local browser pages served by thyra_vault/webui. Every tool
+# The consent dialogs: local browser pages served by src/webui. Every tool
 # that needs the human calls one of the ``*_dialog`` functions and blocks until
 # they answer.
 
@@ -331,7 +331,7 @@ def _redact_secrets(text: str, secrets: dict) -> tuple:
 
 # Dialog-opening tools are deliberately plain, synchronous functions: the tool call
 # blocks while the human answers in the browser window, and the loopback server that
-# serves it runs on its own thread (thyra_vault/webui/server.py). Trade-off: only one
+# serves it runs on its own thread (src/webui/server.py). Trade-off: only one
 # tool call can be in flight while a dialog is open (no ping, cancellation or
 # concurrent calls until it is answered) -- acceptable for the single-agent,
 # one-call-at-a-time usage this is built for.
@@ -1856,7 +1856,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
 
     # Trust is scoped to this exact (command, cwd, only_vars, materialize,
     # background) shape AND the content of every file named directly on
-    # the command line -- see thyra_vault/runner/trust.py. Everything it tracks
+    # the command line -- see src/runner/trust.py. Everything it tracks
     # lives only in this server process's memory; it's forgotten the
     # moment the process exits, same as if the feature didn't exist.
     signature = trust.make_signature(command, cwd, only_vars, materialize, background,

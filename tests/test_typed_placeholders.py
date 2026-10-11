@@ -31,10 +31,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from thyra_vault import mcp_server  # noqa: E402
-import thyra_vault.vault.crypto as crypto  # noqa: E402
-from thyra_vault.vault import store  # noqa: E402
-from thyra_vault import webui as gui  # noqa: E402
+from src import mcp_server  # noqa: E402
+import src.vault.crypto as crypto  # noqa: E402
+from src.vault import store  # noqa: E402
+from src import webui as gui  # noqa: E402
 from _vault_workspace import _isolate, _reset_trust, TEST_PASSWORD, _FAST_PARAMS  # noqa: E402
 
 # A settings file of the shape that actually broke: typed fields a loader
@@ -322,7 +322,7 @@ def test_vault_status_reports_a_real_value_on_a_typed_line() -> None:
 def test_legacy_recovery_writes_typed_placeholders_not_the_old_form() -> None:
     """A pre-2.0 journal recovered into a vault that has since been retyped
     must put back the line the file's consumers can parse."""
-    from thyra_vault.runner import legacy_swap
+    from src.runner import legacy_swap
     with typed_workspace() as (_project, env_path, shapes):
         env_path.write_text(
             "SMTP_PORT=2525\nSMTP_USE_SSL=true\nADMIN_EMAIL=ops@example.com\n",

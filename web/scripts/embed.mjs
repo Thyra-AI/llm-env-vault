@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Copies the production build of apps/web into ../thyra_vault/web_dist, which the
-// Python server (thyra_vault/webui/server.py) serves. The result is committed, so
+// Copies the production build of apps/web into ../src/web_dist, which the
+// Python server (src/webui/server.py) serves. The result is committed, so
 // users of the plugin never need Node: `git clone` is the whole install.
 import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import path from 'node:path'
@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const src = path.join(root, 'apps/web/dist')
-const dest = path.resolve(root, '../thyra_vault/web_dist')
+const dest = path.resolve(root, '../src/web_dist')
 
 if (!existsSync(path.join(src, 'index.html'))) {
   console.error('apps/web/dist is missing: run `pnpm build` first.')

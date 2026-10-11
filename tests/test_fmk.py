@@ -41,8 +41,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import thyra_vault.vault.crypto as crypto  # noqa: E402
-from thyra_vault.vault import store  # noqa: E402
+import src.vault.crypto as crypto  # noqa: E402
+from src.vault import store  # noqa: E402
 
 TEST_PASSWORD = "fmk-regression-password-123"
 NEW_PASSWORD = "fmk-regression-password-456"

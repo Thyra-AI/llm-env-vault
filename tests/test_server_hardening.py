@@ -1,4 +1,4 @@
-"""Hardening of the loopback dialog server (see thyra_vault/webui/server.py)."""
+"""Hardening of the loopback dialog server (see src/webui/server.py)."""
 import os
 import socket
 import stat
@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from thyra_vault.webui import server  # noqa: E402
+from src.webui import server  # noqa: E402
 from tests.test_webui_server import Harness, assets, _restore_seams  # noqa: E402,F401
 
 
@@ -45,7 +45,7 @@ def test_the_launch_code_is_never_printed_only_a_private_link_file(assets, capsy
 
 
 def _one_screen():
-    from thyra_vault.webui import schema
+    from src.webui import schema
     yield schema.screen("unlock.title", fields=[], actions=[schema.action("cancel", "common.cancel")])
 
 
@@ -190,7 +190,7 @@ def test_the_browser_is_started_with_parent_death_signal_and_own_session(monkeyp
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_PDEATHSIG is Linux-only")
 def test_die_with_parent_sets_the_signal_in_the_child():
     code = ("import ctypes,signal,sys; sys.path.insert(0,%r)\n"
-            "from thyra_vault.webui import server\n"
+            "from src.webui import server\n"
             "server._die_with_parent()\n"
             "v=ctypes.c_int(0); ctypes.CDLL(None).prctl(2, ctypes.byref(v))\n"
             "print(v.value==signal.SIGKILL)") % str(Path(__file__).parent.parent)

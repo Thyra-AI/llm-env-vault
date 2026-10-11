@@ -1353,7 +1353,7 @@ def write_materialized_env(path: Path, secrets: dict) -> None:
 #                        agent could already rewrite wholesale.
 #
 # swap.journal.json and its lock are NOT here any more: nothing in 2.x writes
-# one, and the names live in thyra_vault/runner/legacy_swap.py, which is the only
+# one, and the names live in src/runner/legacy_swap.py, which is the only
 # thing that still reads them.
 
 STYLES_FILE_NAME = "target_styles.json"

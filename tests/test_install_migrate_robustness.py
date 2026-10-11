@@ -17,8 +17,8 @@ from pathlib import Path
 # Make sure the worktree root is importable regardless of cwd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from thyra_vault import mcp_server
-from thyra_vault.vault import store
+from src import mcp_server
+from src.vault import store
 
 
 def _write_temp_env(content: str) -> str:

@@ -6,7 +6,7 @@ browser is ever opened), then talks to it with http.client -- which, unlike a
 browser or urllib, lets a test send any Host/Origin header it likes.
 
 What is being proven is the security posture documented in
-thyra_vault/webui/server.py: loopback only, DNS-rebinding and cross-site requests
+src/webui/server.py: loopback only, DNS-rebinding and cross-site requests
 refused, a single-use launch code, a bearer token for every API call,
 JSON-only bodies, no CORS, no path traversal, and a server that goes away when
 the human does.
@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from thyra_vault.webui import schema, server  # noqa: E402
+from src.webui import schema, server  # noqa: E402
 
 PASSWORD = "Hunter2-Hunter2-Hunter2"
 
@@ -482,7 +482,7 @@ def test_binds_loopback_only(assets):
 def test_the_throwaway_browser_profile_starts_without_password_or_analytics_prompts(tmp_path):
     """A fresh profile made Brave offer to save the master password and show its analytics notice."""
     import json
-    from thyra_vault.webui import server
+    from src.webui import server
     server._seed_profile(str(tmp_path))
     prefs = json.loads((tmp_path / "Default" / "Preferences").read_text(encoding="utf-8"))
     assert prefs["credentials_enable_service"] is False

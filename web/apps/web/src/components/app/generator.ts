@@ -1,6 +1,6 @@
 import { WORDS } from './wordlist'
 
-/** Mirrors thyra_vault/webui/prefs.py DEFAULT_GENERATOR (the server validates the same ranges). */
+/** Mirrors src/webui/prefs.py DEFAULT_GENERATOR (the server validates the same ranges). */
 export interface GeneratorOptions {
   mode: 'password' | 'passphrase' | 'username'
   length: number

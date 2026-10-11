@@ -1,5 +1,5 @@
 """
-Regression tests for the pure, display-text helpers in thyra_vault/webui/uihelpers.py.
+Regression tests for the pure, display-text helpers in src/webui/uihelpers.py.
 
 These functions had zero test coverage before this file was written.
 All tests here are headless -- no window is created and no display is
@@ -23,7 +23,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Import only the helpers we are testing, so the file runs headless
-from thyra_vault.webui.uihelpers import (_safe_display, _collapse_whitespace, _strip_hidden,
+from src.webui.uihelpers import (_safe_display, _collapse_whitespace, _strip_hidden,
                            _is_common_password, _password_rejection_reason,
                            _COMMON_PASSWORDS, MIN_PASSWORD_LEN)
 

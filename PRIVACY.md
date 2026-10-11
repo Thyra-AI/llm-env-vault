@@ -52,7 +52,7 @@ provider does with the conversation is governed by that provider's policy, not t
 
 ## The Thyra Vault app and your clipboard
 
-If you open the app yourself (`python -m thyra_vault.app`), pressing Copy on a secret writes its value to your system clipboard through your OS clipboard tool, and the app clears it again after a short delay (30 s by default) if it is still there. The value is never sent to the browser page, to a log, or to anyone else. Other programs on your machine that read the clipboard, and clipboard history features of your OS, are outside this software's control. The app also stores your language, theme and timer choices in a plaintext `ui_prefs.json` next to the vault; it holds no secrets.
+If you open the app yourself (`python -m src.app`), pressing Copy on a secret writes its value to your system clipboard through your OS clipboard tool, and the app clears it again after a short delay (30 s by default) if it is still there. The value is never sent to the browser page, to a log, or to anyone else. Other programs on your machine that read the clipboard, and clipboard history features of your OS, are outside this software's control. The app also stores your language, theme and timer choices in a plaintext `ui_prefs.json` next to the vault; it holds no secrets.
 
 ## Personal items
 

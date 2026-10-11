@@ -40,9 +40,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import thyra_vault.vault.crypto as crypto  # noqa: E402
-from thyra_vault.runner import trust  # noqa: E402
-from thyra_vault.vault.crypto import (  # noqa: E402
+import src.vault.crypto as crypto  # noqa: E402
+from src.runner import trust  # noqa: E402
+from src.vault.crypto import (  # noqa: E402
     FILE_HDR_CAP,
     FILE_MAGIC,
     FILE_META_CAP,

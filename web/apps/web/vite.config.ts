@@ -23,7 +23,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss(), csp],
   resolve: { alias: { '@': path.resolve(__dirname, 'src') } },
   server: { host: '127.0.0.1', port: 5173, strictPort: true },
-  // The build is embedded in the Python plugin (thyra_vault/web_dist) and reviewed as
+  // The build is embedded in the Python plugin (src/web_dist) and reviewed as
   // source: keep it readable (no minification) and free of binary assets.
   build: { minify: false, sourcemap: false, assetsInlineLimit: 0 },
 })

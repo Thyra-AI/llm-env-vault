@@ -1,5 +1,5 @@
 """
-Regression suite for the v2 storage layer additions to thyra_vault/vault/store.py.
+Regression suite for the v2 storage layer additions to src/vault/store.py.
 
 Covers the v2 AES-256-GCM/scrypt vault format introduced in 1.4.0:
 
@@ -40,8 +40,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from thyra_vault.vault import store  # noqa: E402
-from thyra_vault.vault import crypto
+from src.vault import store  # noqa: E402
+from src.vault import crypto
 
 # ---------------------------------------------------------------------------
 # Monkeypatch SCRYPT_DEFAULT to n=2**12 for the entire module (speed).

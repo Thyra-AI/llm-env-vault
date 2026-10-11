@@ -14,11 +14,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from test_security_review_fixes import (_allow, _project, _run, fake_dialog,  # noqa: E402
                                         isolated_vault)
 
-from thyra_vault import mcp_server  # noqa: E402
-from thyra_vault.runner import trust  # noqa: E402
-from thyra_vault.webui.uihelpers import (command_display_lines, command_refusal_reason,  # noqa: E402
+from src import mcp_server  # noqa: E402
+from src.runner import trust  # noqa: E402
+from src.webui.uihelpers import (command_display_lines, command_refusal_reason,  # noqa: E402
                                    escape_argument)
-from thyra_vault.webui import flows, schema  # noqa: E402
+from src.webui import flows, schema  # noqa: E402
 
 posix_only = pytest.mark.skipif(os.name != "posix", reason="POSIX files and links")
 

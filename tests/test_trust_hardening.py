@@ -1,6 +1,6 @@
 """
 Regression suite for the three security-hardening items applied to
-thyra_vault/runner/trust.py in release 1.3.0:
+src/runner/trust.py in release 1.3.0:
 
   B1 - monitored_summary() data function: returns (monitored_paths,
        is_executable_only) so callers can warn the user when a bare command
@@ -32,13 +32,13 @@ import tempfile
 import time
 from pathlib import Path
 
-# Project root must be in sys.path so thyra_vault is importable as a package.
+# Project root must be in sys.path so src is importable as a package.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 # Tests dir must be in sys.path so we can borrow helpers from test_trust.
 sys.path.insert(0, str(Path(__file__).parent))
 
-from thyra_vault.runner import trust  # noqa: E402
-from thyra_vault.vault import store
+from src.runner import trust  # noqa: E402
+from src.vault import store
 
 # Borrow isolation helpers from the existing suite rather than duplicating them.
 # isolated_vault handles store-path redirection, vault creation, and trust-state

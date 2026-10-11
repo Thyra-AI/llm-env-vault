@@ -150,7 +150,7 @@ jobs:
           tests/test_webui_flows.py tests/test_webui_server.py tests/test_mcp_over_browser.py
           tests/test_security_review_fixes.py
 
-  # thyra_vault/web_dist is a committed build of web/. Rebuild it from the lockfile and
+  # src/web_dist is a committed build of web/. Rebuild it from the lockfile and
   # fail if it differs, so the page that ships is provably the page in the source.
   web-bundle-matches-source:
     name: shipped page matches web/ source
@@ -175,9 +175,9 @@ jobs:
 
       - name: Fail if the committed page differs
         run: |
-          if [ -n "$(git status --porcelain -- thyra_vault/web_dist)" ]; then
-            git status --porcelain -- thyra_vault/web_dist
-            echo "::error::thyra_vault/web_dist does not match a clean build of web/. Run 'pnpm build:embed' in web/ and commit."
+          if [ -n "$(git status --porcelain -- src/web_dist)" ]; then
+            git status --porcelain -- src/web_dist
+            echo "::error::src/web_dist does not match a clean build of web/. Run 'pnpm build:embed' in web/ and commit."
             exit 1
           fi
           echo "shipped page is exactly what web/ builds"

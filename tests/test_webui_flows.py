@@ -20,11 +20,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from _vault_workspace import SECRETS, TEST_PASSWORD, workspace  # noqa: E402
 
-from thyra_vault import webui  # noqa: E402
-from thyra_vault.vault import store
-from thyra_vault.vault.crypto import format_recovery_key  # noqa: E402
-from thyra_vault.webui import flows  # noqa: E402
-from thyra_vault.webui.flows import Act  # noqa: E402
+from src import webui  # noqa: E402
+from src.vault import store
+from src.vault.crypto import format_recovery_key  # noqa: E402
+from src.webui import flows  # noqa: E402
+from src.webui.flows import Act  # noqa: E402
 
 # Values that must never be found inside any screen sent to the browser.
 FORBIDDEN = [TEST_PASSWORD, *SECRETS.values(), "brand-new-secret-value", "Another-Pa55word!"]
@@ -228,7 +228,7 @@ def test_remove_secret_deny_keeps_it():
 @pytest.fixture()
 def empty_vault(tmp_path):
     from _vault_workspace import _FAST_PARAMS, _isolate
-    from thyra_vault.vault import crypto
+    from src.vault import crypto
     originals = _isolate(tmp_path)
     old = crypto.SCRYPT_DEFAULT
     crypto.SCRYPT_DEFAULT = _FAST_PARAMS

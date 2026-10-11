@@ -36,13 +36,13 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-# Project root must be on sys.path so thyra_vault and mcp_server are importable.
+# Project root must be on sys.path so src and mcp_server are importable.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 # tests/ dir must be on sys.path so we can borrow helpers from test_trust.
 sys.path.insert(0, str(Path(__file__).parent))
 
-from thyra_vault import mcp_server  # noqa: E402
-from thyra_vault.runner import trust  # noqa: E402
+from src import mcp_server  # noqa: E402
+from src.runner import trust  # noqa: E402
 from test_trust import (  # noqa: E402
     isolated_vault,
     fake_dialog,

@@ -20,7 +20,7 @@ COMMAND = (REPO / "commands" / "open.md").read_text(encoding="utf-8")
 
 def test_the_app_runs_in_the_plugins_own_venv_as_a_module():
     command = plugin_launcher._app_command(Path("/data/venv/bin/python"), ["--where"])
-    assert command == ["/data/venv/bin/python", "-m", "thyra_vault.app", "--where"]
+    assert command == ["/data/venv/bin/python", "-m", "src.app", "--where"]
 
 
 def test_an_installed_plugin_refuses_to_guess_the_data_directory(monkeypatch, capsys):
@@ -92,3 +92,37 @@ def test_an_empty_data_directory_is_refused_for_an_installed_plugin(monkeypatch,
                         Path("/home/me/.claude/plugins/cache/thyra-vault/thyra-vault/3.0.0"))
     with pytest.raises(SystemExit):
         plugin_launcher._require_data_dir_for_app()
+
+
+def _hostile_project(tmp_path):
+    """A project folder with its own `src` package, as many real projects have."""
+    pkg = tmp_path / "src"
+    pkg.mkdir(parents=True)
+    for name in ("__init__.py", "app.py", "mcp_server.py"):
+        (pkg / name).write_text('print("HIJACKED")\nraise SystemExit(99)\n', encoding="utf-8")
+    return tmp_path
+
+
+def test_the_server_entry_point_is_not_shadowed_by_the_projects_own_src_folder(tmp_path):
+    """The server runs with the user's project as its working directory. The entry point is a script, so
+    only its own folder lands on sys.path, never the project's `src`."""
+    import subprocess
+    project = _hostile_project(tmp_path / "project")
+    home = tmp_path / "home"
+    home.mkdir()
+    done = subprocess.run([sys.executable, str(REPO / "mcp_server.py"), "--recover"], cwd=str(project),
+                          env={**__import__("os").environ, "THYRA_VAULT_HOME": str(home)},
+                          capture_output=True, text=True, timeout=60)
+    assert "HIJACKED" not in done.stdout + done.stderr
+    assert done.returncode == 0 and "nothing to recover" in done.stdout
+
+
+def test_the_app_is_started_from_the_plugin_folder_so_a_projects_src_cannot_shadow_it(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(plugin_launcher.os, "chdir", lambda p: seen.setdefault("cwd", Path(p)))
+    monkeypatch.setattr(plugin_launcher.os, "execv", lambda exe, argv: seen.setdefault("argv", argv))
+    monkeypatch.setattr(plugin_launcher.subprocess, "call", lambda argv: seen.setdefault("argv", argv) and 0)
+    monkeypatch.setattr(plugin_launcher.sys, "platform", "linux")
+    plugin_launcher._run_app(Path("/venv/bin/python"), [])
+    assert seen["cwd"] == plugin_launcher.PLUGIN_ROOT
+    assert seen["argv"][1:3] == ["-m", "src.app"]
