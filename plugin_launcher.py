@@ -229,7 +229,7 @@ def _install_marker() -> str:
     Installed plugin (CLAUDE_PLUGIN_ROOT set): keyed on CLAUDE_PLUGIN_ROOT's
     own resolved path, NOT requirements.txt's content hash. A real `claude
     plugin update` always moves the plugin to a new version-scoped
-    directory -- that's the same fact behind thyra_vault/store.py's ROOT
+    directory -- that's the same fact behind thyra_vault/vault/store.py's ROOT
     relocation: an update orphans whatever was in the OLD version's
     directory precisely because it creates a new one. So a path change IS
     a genuine update event, and requirements.txt's content is replaced

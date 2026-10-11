@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import store
+from ..vault import store
 
 # Bounds on the file-scanning below -- not security controls (nothing here
 # is), just guards against a pathological command list (hundreds of args,

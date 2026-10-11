@@ -15,8 +15,8 @@ so nothing in it may be trusted:
 import json
 from typing import Any, Dict
 
-from .. import store
-from ..uihelpers import _CLIPBOARD_CLEAR_SECONDS
+from ..vault import store
+from .uihelpers import _CLIPBOARD_CLEAR_SECONDS
 
 FILE_NAME = "ui_prefs.json"
 

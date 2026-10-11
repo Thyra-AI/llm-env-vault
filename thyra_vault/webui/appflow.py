@@ -10,7 +10,7 @@ put a secret on the clipboard. That is the one new power it has, and it is
 bounded:
 
   * a value NEVER travels to the page. "Copy" is a server-side clipboard write
-    (thyra_vault/clipboard.py) that is wiped after a few seconds; there is no
+    (thyra_vault/webui/clipboard.py) that is wiped after a few seconds; there is no
     "show value" and no value in any screen -- only names, placeholder numbers,
     a coarse type and the files an item is used in;
   * the master password and the decrypted dict stay in this generator's local
@@ -27,12 +27,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .. import clipboard as _clipboard
-from .. import items as personal
-from .. import store
-from ..crypto import (MalformedRecoveryKey, NoRecoverySlot, VaultCorrupted, VaultTampered,
+from ..vault import items as personal
+from ..vault import store
+from ..vault.crypto import (MalformedRecoveryKey, NoRecoverySlot, VaultCorrupted, VaultTampered,
                       WrongPassword, WrongRecoveryKey)
-from ..uihelpers import MIN_PASSWORD_LEN, _safe_display
+from .uihelpers import MIN_PASSWORD_LEN, _safe_display
+from . import clipboard as _clipboard
 from . import flows, prefs as prefs_mod
 from .flows import _b, _password_issue, _s, _save_failed, _vault_error
 from .schema import (action, check_field, field_rows, history, item_header, menu, msg, notice,

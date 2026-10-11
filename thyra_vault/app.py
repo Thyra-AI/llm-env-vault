@@ -13,7 +13,7 @@ it. See thyra_vault/webui/appflow.py for what the app can and cannot do.
 
 Where the vault lives: THYRA_VAULT_HOME, else CLAUDE_PLUGIN_DATA, else next to
 the code (a checkout) or in your user data directory (a package install). See
-thyra_vault/datadir.py.
+thyra_vault/vault/datadir.py.
 """
 import argparse
 import sys
@@ -25,7 +25,8 @@ def main(argv=None) -> int:
     parser.add_argument("--where", action="store_true", help="print the vault folder and exit")
     args = parser.parse_args(argv)
 
-    from thyra_vault import store, webui
+    from thyra_vault import webui
+    from thyra_vault.vault import store
     if args.where:
         print(store.ROOT)
         return 0

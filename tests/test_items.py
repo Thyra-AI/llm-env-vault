@@ -8,7 +8,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from _vault_workspace import SECRETS, TEST_PASSWORD, workspace  # noqa: E402
 
-from thyra_vault import items, store  # noqa: E402
+from thyra_vault.vault import store  # noqa: E402
+from thyra_vault.vault import items
 
 NOTE_TEXT = "datbase: gocycling pass-FmAu95LWizdGy2"
 NEW_PASSWORD = "A-brand-new-passphrase-7"

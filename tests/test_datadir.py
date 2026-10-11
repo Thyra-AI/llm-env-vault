@@ -9,12 +9,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from thyra_vault import datadir  # noqa: E402
+from thyra_vault.vault import datadir  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOME = Path("/home/ana")
 CHECKOUT_MODULE = REPO_ROOT / "thyra_vault" / "store.py"
-SITE_MODULE = Path("/home/ana/.cache/uv/archive-v0/x/lib/python3.12/site-packages/thyra_vault/store.py")
+SITE_MODULE = Path("/home/ana/.cache/uv/archive-v0/x/lib/python3.12/site-packages/thyra_vault/vault/store.py")
 
 
 def resolve(env, module=CHECKOUT_MODULE, frozen=False, platform="linux"):
@@ -42,7 +42,7 @@ def test_a_source_checkout_keeps_the_old_location():
 
 
 @pytest.mark.parametrize("module,frozen", [(SITE_MODULE, False), (CHECKOUT_MODULE, True),
-                                           (Path("/usr/lib/python3/dist-packages/thyra_vault/store.py"), False)])
+                                           (Path("/usr/lib/python3/dist-packages/thyra_vault/vault/store.py"), False)])
 def test_package_and_frozen_installs_use_the_user_data_dir(module, frozen):
     assert resolve({}, module, frozen) == HOME / ".local" / "share" / "thyra-vault"
 
@@ -82,7 +82,7 @@ def test_store_honours_thyra_vault_home_in_a_fresh_process():
     with tempfile.TemporaryDirectory(prefix="thyra_home_") as home:
         env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PLUGIN_DATA"}
         env["THYRA_VAULT_HOME"] = home
-        out = subprocess.run([sys.executable, "-c", "from thyra_vault import store; print(store.ROOT)"],
+        out = subprocess.run([sys.executable, "-c", "from thyra_vault.vault import store; print(store.ROOT)"],
                              cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, check=True)
         assert out.stdout.strip() == str(Path(home).resolve())
 
@@ -94,13 +94,15 @@ def test_explicit_home_disarms_the_plugin_cache_refusal():
         plugin = Path(fake) / "plugins" / "cache" / "thyra-vault" / "1.0.0"
         lib = plugin / "thyra_vault"
         lib.mkdir(parents=True)
-        for name in ("__init__.py", "store.py", "crypto.py", "procs.py", "datadir.py"):
-            (lib / name).write_bytes((REPO_ROOT / "thyra_vault" / name).read_bytes())
+        for rel in ("__init__.py", "vault/__init__.py", "vault/store.py", "vault/crypto.py", "vault/datadir.py",
+                    "runner/__init__.py", "runner/procs.py"):
+            (lib / rel).parent.mkdir(parents=True, exist_ok=True)
+            (lib / rel).write_bytes((REPO_ROOT / "thyra_vault" / rel).read_bytes())
         env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PLUGIN_DATA"}
         env["THYRA_VAULT_HOME"] = home
         proc = subprocess.run(
             [sys.executable, "-c",
-             "from thyra_vault import store; store.create_secrets_vault('a-long-enough-pass'); print('ok')"],
+             "from thyra_vault.vault import store; store.create_secrets_vault('a-long-enough-pass'); print('ok')"],
             cwd=str(plugin), env=env, capture_output=True, text=True)
         assert proc.returncode == 0, proc.stderr
 
@@ -225,12 +227,12 @@ def test_an_explicit_home_disables_adoption():
 
 def test_a_real_vault_made_under_the_old_plugin_id_opens_under_the_new_one():
     """End to end, in fresh processes exactly as Claude Code would start them."""
-    code_make = ("from thyra_vault import store, crypto\n"
+    code_make = ("from thyra_vault.vault import store, crypto\n"
                  "crypto.SCRYPT_DEFAULT = crypto.ScryptParams(n=2**12, r=8, p=1)\n"
                  "store.create_v2_vault('a-long-enough-pass')\n"
                  "store.save_secrets('a-long-enough-pass', {'API_TOKEN': 'tok-123'})\n"
                  "store.save_index({'API_TOKEN': 1})\n")
-    code_open = ("from thyra_vault import store\n"
+    code_open = ("from thyra_vault.vault import store\n"
                  "print(store.load_secrets('a-long-enough-pass')['API_TOKEN'], store.load_index())\n")
     with tempfile.TemporaryDirectory(prefix="adopt_e2e_") as tmp:
         base = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PLUGIN_DATA", "THYRA_VAULT_HOME")}

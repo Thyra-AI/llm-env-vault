@@ -18,8 +18,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from _vault_workspace import TEST_PASSWORD, workspace  # noqa: E402
 
-import mcp_server  # noqa: E402
-from thyra_vault import store, webui  # noqa: E402
+from thyra_vault import mcp_server  # noqa: E402
+from thyra_vault import webui  # noqa: E402
+from thyra_vault.vault import store
 from thyra_vault.webui import server  # noqa: E402
 
 
@@ -156,6 +157,6 @@ def test_nobody_opening_the_page_makes_the_tool_report_a_cancel(monkeypatch, fak
 
 
 def test_envvars_treats_an_empty_value_as_unset():
-    from thyra_vault import envvars
+    from thyra_vault.vault import envvars
     assert envvars.get("X", "d", {"THYRA_VAULT_X": "", "LLM_ENV_VAULT_X": "old"}) == "old"
     assert envvars.get("X", "d", {}) == "d"

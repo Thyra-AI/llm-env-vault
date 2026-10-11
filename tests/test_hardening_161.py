@@ -28,8 +28,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-import mcp_server  # noqa: E402
-from thyra_vault import legacy_swap, procs, store  # noqa: E402
+from thyra_vault import mcp_server  # noqa: E402
+from thyra_vault.vault import store  # noqa: E402
+from thyra_vault.runner import legacy_swap, procs
 from _vault_workspace import (INDEX, LEGACY_SWAPPED_ENV, LEGACY_SWAPPED_NAMES,  # noqa: E402
                               PLACEHOLDER_ENV, _read_journal,
                               workspace, write_legacy_journal)
@@ -316,7 +317,8 @@ _CHILD_SWAPPER = r"""
 import json, os, sys, time
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from thyra_vault import legacy_swap, procs, store
+from thyra_vault.vault import store
+from thyra_vault.runner import legacy_swap, procs
 store.ROOT = Path(sys.argv[2])
 for attr, name in (("INDEX_FILE", "vault_index.json"), ("TARGETS_FILE", "targets.json"),
                    ("TARGETS_LOCK_FILE", "targets.json.lock")):

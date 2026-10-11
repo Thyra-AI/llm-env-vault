@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from thyra_vault import clipboard  # noqa: E402
+from thyra_vault.webui import clipboard  # noqa: E402
 
 SECRET = "tok-abcdefgh-123456"
 

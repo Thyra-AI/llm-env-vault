@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from _vault_workspace import SECRETS, TEST_PASSWORD, workspace  # noqa: E402
 
-from thyra_vault import store  # noqa: E402
+from thyra_vault.vault import store  # noqa: E402
 from thyra_vault.webui import appflow, prefs  # noqa: E402
 from thyra_vault.webui.flows import Act  # noqa: E402
 

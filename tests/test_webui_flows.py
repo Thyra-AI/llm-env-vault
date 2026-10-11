@@ -20,8 +20,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from _vault_workspace import SECRETS, TEST_PASSWORD, workspace  # noqa: E402
 
-from thyra_vault import store, webui  # noqa: E402
-from thyra_vault.crypto import format_recovery_key  # noqa: E402
+from thyra_vault import webui  # noqa: E402
+from thyra_vault.vault import store
+from thyra_vault.vault.crypto import format_recovery_key  # noqa: E402
 from thyra_vault.webui import flows  # noqa: E402
 from thyra_vault.webui.flows import Act  # noqa: E402
 
@@ -227,7 +228,7 @@ def test_remove_secret_deny_keeps_it():
 @pytest.fixture()
 def empty_vault(tmp_path):
     from _vault_workspace import _FAST_PARAMS, _isolate
-    from thyra_vault import crypto
+    from thyra_vault.vault import crypto
     originals = _isolate(tmp_path)
     old = crypto.SCRYPT_DEFAULT
     crypto.SCRYPT_DEFAULT = _FAST_PARAMS

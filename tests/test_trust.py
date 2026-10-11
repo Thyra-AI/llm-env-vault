@@ -1,5 +1,5 @@
 """
-Regression suite for thyra_vault/trust.py and the trust-cache wiring inside
+Regression suite for thyra_vault/runner/trust.py and the trust-cache wiring inside
 mcp_server._run_with_env_impl.
 
 Covers, end to end, every finding from the adversarial code review of the
@@ -47,10 +47,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import mcp_server  # noqa: E402
-from thyra_vault import store, trust  # noqa: E402
+from thyra_vault import mcp_server  # noqa: E402
+from thyra_vault.runner import trust  # noqa: E402
+from thyra_vault.vault import store
 from thyra_vault import webui as gui
-from thyra_vault import uihelpers  # noqa: E402  # noqa: E402
+from thyra_vault.webui import uihelpers  # noqa: E402  # noqa: E402
 REPO_ROOT = Path(__file__).parent.parent  # noqa: E402
 
 TEST_PASSWORD = "regression-test-password-123"
@@ -748,7 +749,7 @@ def test_root_uses_plugin_data_dir_when_set() -> None:
     with tempfile.TemporaryDirectory(prefix="fake_plugin_data_") as data_dir:
         env = {**os.environ, "CLAUDE_PLUGIN_DATA": data_dir}
         proc = subprocess.run(
-            [sys.executable, "-c", "from thyra_vault import store; print(store.ROOT)"],
+            [sys.executable, "-c", "from thyra_vault.vault import store; print(store.ROOT)"],
             cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, check=True)
         root = proc.stdout.strip()
         expected = str(Path(data_dir).resolve() / "vault")
@@ -761,7 +762,7 @@ def test_root_uses_plugin_data_dir_when_set() -> None:
 def test_root_falls_back_to_module_location_without_plugin_data_dir() -> None:
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PLUGIN_DATA"}
     proc = subprocess.run(
-        [sys.executable, "-c", "from thyra_vault import store; print(store.ROOT)"],
+        [sys.executable, "-c", "from thyra_vault.vault import store; print(store.ROOT)"],
         cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, check=True)
     root = proc.stdout.strip()
     assert root == str(REPO_ROOT.resolve()), (
@@ -807,14 +808,16 @@ def test_create_secrets_vault_refuses_inside_plugin_cache_without_plugin_data() 
         fake_plugin_dir = Path(fake_repo) / "plugins" / "cache" / "thyra-vault" / "1.0.0"
         fake_thyra_vault = fake_plugin_dir / "thyra_vault"
         fake_thyra_vault.mkdir(parents=True)
-        for name in ("__init__.py", "store.py", "crypto.py", "procs.py", "datadir.py"):
-            (fake_thyra_vault / name).write_bytes((REPO_ROOT / "thyra_vault" / name).read_bytes())
+        for rel in ("__init__.py", "vault/__init__.py", "vault/store.py", "vault/crypto.py", "vault/datadir.py",
+                    "runner/__init__.py", "runner/procs.py"):
+            (fake_thyra_vault / rel).parent.mkdir(parents=True, exist_ok=True)
+            (fake_thyra_vault / rel).write_bytes((REPO_ROOT / "thyra_vault" / rel).read_bytes())
         (fake_plugin_dir / "mcp_server.py").touch()  # not imported, just makes the layout plausible
 
         env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PLUGIN_DATA"}
         proc = subprocess.run(
             [sys.executable, "-c",
-             "from thyra_vault import store; store.create_secrets_vault('irrelevant-password')"],
+             "from thyra_vault.vault import store; store.create_secrets_vault('irrelevant-password')"],
             cwd=str(fake_plugin_dir), env=env, capture_output=True, text=True)
         assert proc.returncode != 0, "REGRESSION (NEW-1 hardening): vault creation was not refused"
         assert "CLAUDE_PLUGIN_DATA" in proc.stderr and "plugins/cache" in proc.stderr.replace("\\", "/")
@@ -1063,7 +1066,7 @@ def test_load_secrets_still_reads_an_older_unpadded_vault() -> None:
     called directly on unpadded JSON, exactly what save_secrets used to do."""
     with isolated_vault(secrets={}):
         import json
-        from thyra_vault import crypto
+        from thyra_vault.vault import crypto
         legacy_secrets = {"OLD_STYLE": "still-must-load-correctly"}
         salt = store.SALT_FILE.read_bytes()
         unpadded_token = crypto.encrypt(

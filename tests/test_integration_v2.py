@@ -22,8 +22,9 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import mcp_server  # noqa: E402
-from thyra_vault import crypto, store  # noqa: E402
+from thyra_vault import mcp_server  # noqa: E402
+from thyra_vault.vault import store  # noqa: E402
+from thyra_vault.vault import crypto
 from thyra_vault import webui as gui  # noqa: E402
 
 _STORE_PATHS = {

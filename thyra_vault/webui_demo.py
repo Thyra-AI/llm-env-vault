@@ -9,7 +9,7 @@ demo master password is printed so you can type it in.
     python -m thyra_vault.webui_demo --list
 
 Why this is NOT thyra_vault/webui/__main__.py: ``python -m thyra_vault.webui`` would
-import the webui package -- and with it thyra_vault.store -- BEFORE this code could
+import the webui package -- and with it thyra_vault.vault.store -- BEFORE this code could
 point the vault at a temp directory. store resolves its location at import time,
 so the demo would have created a vault in the real data directory. Keeping this
 module outside the package, and refusing to run unless store.ROOT really is
@@ -51,16 +51,17 @@ def main(argv=None) -> int:
         print("\n".join(DIALOGS))
         return 0
 
-    if "thyra_vault.store" in sys.modules:
-        print("refusing to run: thyra_vault.store is already imported, so the vault location "
+    if "thyra_vault.vault.store" in sys.modules:
+        print("refusing to run: thyra_vault.vault.store is already imported, so the vault location "
               "is already fixed", file=sys.stderr)
         return 2
     work = Path(tempfile.mkdtemp(prefix="thyra-vault-demo-")).resolve()
-    os.environ["CLAUDE_PLUGIN_DATA"] = str(work)  # BEFORE thyra_vault.store is imported
+    os.environ["CLAUDE_PLUGIN_DATA"] = str(work)  # BEFORE thyra_vault.vault.store is imported
     if args.no_browser:
         os.environ["THYRA_VAULT_NO_BROWSER"] = "1"
 
-    from thyra_vault import crypto, store, webui
+    from thyra_vault import webui
+    from thyra_vault.vault import crypto, store
     if work not in store.ROOT.resolve().parents:
         print(f"refusing to run: the vault would be at {store.ROOT}, not inside {work}",
               file=sys.stderr)

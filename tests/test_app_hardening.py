@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from _vault_workspace import workspace  # noqa: E402
 from test_appflow_items import ItemApp, LOGIN_PASSWORD  # noqa: E402
 
-from thyra_vault import clipboard  # noqa: E402
+from thyra_vault.webui import clipboard  # noqa: E402
 
 
 @pytest.fixture()
@@ -109,7 +109,7 @@ def test_a_real_sigterm_wipes_the_clipboard_in_a_subprocess(tmp_path):
     code = (
         "import os, signal, sys, time\n"
         f"sys.path.insert(0, {str(Path(__file__).parent.parent)!r})\n"
-        "from thyra_vault import clipboard\n"
+        "from thyra_vault.webui import clipboard\n"
         f"clipboard.wipe_now = lambda: open({str(marker)!r}, 'w').write('x')\n"
         "clipboard.install_signal_handlers()\n"
         "print('ready', flush=True)\n"

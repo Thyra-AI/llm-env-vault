@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import unquote, urlsplit
 
-from .. import envvars
+from ..vault import envvars
 from .flows import Act
 
 # Built by `pnpm build:embed` in web/ and committed, so a plain clone of this

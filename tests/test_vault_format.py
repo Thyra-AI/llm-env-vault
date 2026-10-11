@@ -1,5 +1,5 @@
 """
-Adversarial test suite for the v2 LEVAULT envelope format (thyra_vault/crypto.py).
+Adversarial test suite for the v2 LEVAULT envelope format (thyra_vault/vault/crypto.py).
 
 Lane 7 — written independently of the implementer.  The threat model is an
 attacker with filesystem write access to vault.enc who tries to weaken,
@@ -33,8 +33,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import thyra_vault.crypto as crypto  # noqa: E402
-from thyra_vault.crypto import (  # noqa: E402
+import thyra_vault.vault.crypto as crypto  # noqa: E402
+from thyra_vault.vault.crypto import (  # noqa: E402
     FORMAT_VERSION,
     MalformedRecoveryKey,
     NoRecoverySlot,
@@ -1127,7 +1127,7 @@ def test_v1_fixture_wrong_password_raises_wrong_password() -> None:
     """Wrong password on the frozen fixture must raise WrongPassword."""
     salt = (FIXTURES_DIR / "v1_vault.salt").read_bytes()
     token = (FIXTURES_DIR / "v1_vault.enc").read_bytes()
-    from thyra_vault.crypto import WrongPassword as WP
+    from thyra_vault.vault.crypto import WrongPassword as WP
     try:
         v1_decrypt("definitely-wrong-password", salt, token)
         assert False, "Expected WrongPassword"

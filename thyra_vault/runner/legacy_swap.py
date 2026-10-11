@@ -34,7 +34,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import procs, store
+from ..vault import store
+from . import procs
 
 # Names of the two journal files, kept here rather than in store because
 # nothing outside this module writes them any more. Both resolve against

@@ -21,8 +21,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-import mcp_server  # noqa: E402
-from thyra_vault import procs, singleview, trust  # noqa: E402
+from thyra_vault import mcp_server  # noqa: E402
+from thyra_vault.runner import trust  # noqa: E402
+from thyra_vault.runner import procs, singleview
 from _vault_workspace import (fake_dialog, workspace)
 
 IS_WIN = sys.platform == "win32"

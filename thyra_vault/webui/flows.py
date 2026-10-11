@@ -26,10 +26,11 @@ import hashlib
 from pathlib import Path
 from typing import Optional
 
-from .. import store, trust
-from ..crypto import (MalformedRecoveryKey, VaultCorrupted, WrongPassword,
+from ..runner import trust
+from ..vault import store
+from ..vault.crypto import (MalformedRecoveryKey, VaultCorrupted, WrongPassword,
                       format_recovery_key, new_recovery_key, parse_recovery_key)
-from ..uihelpers import (MIN_PASSWORD_LEN, _CLIPBOARD_CLEAR_SECONDS,
+from .uihelpers import (MIN_PASSWORD_LEN, _CLIPBOARD_CLEAR_SECONDS,
                          _applicable_manage_actions, _collapse_whitespace,
                          _disclosure_mismatch, _format_bytes, _parse_rk_input,
                          _password_rejection_reason, _safe_display, _shorten_path)

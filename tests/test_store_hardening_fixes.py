@@ -8,7 +8,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from thyra_vault import crypto, store  # noqa: E402
+from thyra_vault.vault import store  # noqa: E402
+from thyra_vault.vault import crypto
 
 PW = "hardening-test-password-1"
 

@@ -19,8 +19,10 @@ from _vault_workspace import SECRETS, TEST_PASSWORD, workspace  # noqa: E402
 from test_appflow import App, Clock, FakeClipboard  # noqa: E402
 from test_webui_server import Harness, _restore_seams, assets  # noqa: E402,F401
 
-import mcp_server  # noqa: E402
-from thyra_vault import clipboard, crypto, datadir, store  # noqa: E402
+from thyra_vault import mcp_server  # noqa: E402
+from thyra_vault.vault import store  # noqa: E402
+from thyra_vault.vault import crypto, datadir
+from thyra_vault.webui import clipboard
 from thyra_vault.webui import prefs, server  # noqa: E402
 
 IDLE = 15 * 60 + 5
@@ -447,7 +449,7 @@ def test_the_real_dialog_object_is_paced():
 # --------------------------------------------------------------------------
 
 from test_trust import _allow, _deny, fake_dialog, isolated_vault  # noqa: E402
-from thyra_vault import trust  # noqa: E402
+from thyra_vault.runner import trust  # noqa: E402
 
 
 def _project(path):
@@ -578,7 +580,7 @@ def test_the_browser_dialog_shows_both_lines():
 def test_a_forged_index_cannot_hide_variables_from_the_dialog():
     """Finding F2 (partly): the names shown come from the plaintext index, so after unlocking
     the dialog compares them with what is really in the vault and refuses a mismatch."""
-    from thyra_vault.uihelpers import _disclosure_mismatch
+    from thyra_vault.webui.uihelpers import _disclosure_mismatch
     assert _disclosure_mismatch(["A"], ["A", "SECRET_THE_INDEX_DID_NOT_LIST"])
     assert _disclosure_mismatch(["A", "B"], ["A", "B"]) is None
 
@@ -602,7 +604,7 @@ def test_a_relative_program_path_is_resolved_against_the_commands_folder_not_the
 # Forged state files (targets.json / the swap journal) cannot rewrite or destroy files
 # --------------------------------------------------------------------------
 
-from thyra_vault import legacy_swap  # noqa: E402
+from thyra_vault.runner import legacy_swap  # noqa: E402
 
 
 def test_a_forged_target_pointing_at_an_ordinary_file_is_not_touched(tmp_path):

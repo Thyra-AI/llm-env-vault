@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import mcp_server  # noqa: E402
+from thyra_vault import mcp_server  # noqa: E402
 from thyra_vault import webui  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -56,7 +56,7 @@ def test_the_page_never_offers_to_save_print_or_download() -> None:
 
 
 def test_the_clipboard_wipe_window_is_bounded() -> None:
-    from thyra_vault import uihelpers
+    from thyra_vault.webui import uihelpers
     assert uihelpers._CLIPBOARD_CLEAR_SECONDS <= 60, (
         "REGRESSION: the clipboard holds a copied value for over a minute; it only needs to survive "
         "long enough to paste.")
@@ -138,7 +138,7 @@ EXPECTED_TOOLS = {
 def test_tool_surface_is_exactly_what_we_intend() -> None:
     import re
     src_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mcp_server.py")
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "thyra_vault", "mcp_server.py")
     with open(src_path, encoding="utf-8") as fh:
         src = fh.read()
     found = set(re.findall(r"@mcp\.tool\(\)\s*\ndef\s+([a-z_][a-z0-9_]*)", src))

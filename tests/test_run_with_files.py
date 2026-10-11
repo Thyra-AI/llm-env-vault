@@ -35,9 +35,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import mcp_server  # noqa: E402
-import thyra_vault.crypto as crypto  # noqa: E402
-from thyra_vault import store, trust  # noqa: E402
+from thyra_vault import mcp_server  # noqa: E402
+import thyra_vault.vault.crypto as crypto  # noqa: E402
+from thyra_vault.runner import trust  # noqa: E402
+from thyra_vault.vault import store
 from thyra_vault import webui as gui  # noqa: E402
 
 TEST_PASSWORD = "run-with-files-password-123"

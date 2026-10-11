@@ -14,7 +14,7 @@ human is about to write down, in the dedicated ``keyBox`` block.
 """
 from typing import Optional
 
-from ..uihelpers import _collapse_whitespace, _safe_display
+from .uihelpers import _collapse_whitespace, _safe_display
 
 # Every raw string sent to the page is capped. Consent-critical text (commands,
 # paths) is collapsed to one line but NOT elided, for the reason written at

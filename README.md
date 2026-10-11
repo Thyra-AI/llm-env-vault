@@ -661,7 +661,7 @@ boundaries of the tracking, surfaced in the trust note when they apply:
   setup, a shell builtin), it isn't drift-monitored — the trust-grant note says so explicitly
   when it applies.
 
-**The vault matters too.** Adding, removing, or rotating any secret drops the *entire* trust cache immediately — the cached decrypted values a trusted command would inject are now stale. The next trusted run needs the password again. Cached values are also scoped to exactly what each trusted command was approved to see (a command trusted with a narrow `only_vars` doesn't leave the rest of the vault resident in memory too) and kept obfuscated in memory, not as plain, greppable text — see `thyra_vault/trust.py`'s own comments for exactly what that obfuscation does and doesn't protect against (short version: it raises the bar against passive exposure like crash dumps, not against a targeted attacker who can already read this process's memory).
+**The vault matters too.** Adding, removing, or rotating any secret drops the *entire* trust cache immediately — the cached decrypted values a trusted command would inject are now stale. The next trusted run needs the password again. Cached values are also scoped to exactly what each trusted command was approved to see (a command trusted with a narrow `only_vars` doesn't leave the rest of the vault resident in memory too) and kept obfuscated in memory, not as plain, greppable text — see `thyra_vault/runner/trust.py`'s own comments for exactly what that obfuscation does and doesn't protect against (short version: it raises the bar against passive exposure like crash dumps, not against a targeted attacker who can already read this process's memory).
 
 **This is a convenience feature, not a security boundary — deliberately.** Everything is
 time-limited (8-hour TTL), in-memory, and gone on restart. Making it survive a restart with zero prompts would require persisting something capable of decrypting the vault (the password, the derived key, or equivalent), which breaks the one real invariant this project is built on: the master password never touches disk. Any persisted equivalent would ultimately be usable in plaintext-equivalent form by any process running under your OS account — the same account the AI agent runs as. Against an actively malicious agent with local code execution, no purely local/software mechanism is a real boundary; genuine protection there would need a separate, more-privileged OS principal gated by hardware-backed human presence (e.g. Windows Hello), which is out of scope. Use trusted commands to stop re-typing your password; don't rely on them to stop an agent already working against you.
@@ -905,6 +905,27 @@ that machine. The dialog gives up after three minutes if nobody opens the link.
 **A trusted command started prompting again.** That's by design: trust is revoked when a file the
 command references changes, when the executable itself changes, or when the vault's contents
 change. The dialog says which. See Trusted commands above.
+
+## Repository layout
+
+```
+.claude-plugin/     plugin and marketplace manifests
+commands/           the /thyra-vault:* slash commands
+launch.sh           picks a Python 3 and starts plugin_launcher.py
+plugin_launcher.py  first-run provisioning (venv, hash-pinned install), then runs the server or the app
+mcp_server.py       thin entry point (a script, so the project folder never lands on sys.path)
+thyra_vault/
+  mcp_server.py     the MCP tools
+  vault/            crypto, store (formats, disk, locks), items, datadir (where the vault lives), envvars
+  runner/           trust (trusted-command cache), procs, singleview (max_reads), legacy_swap (retired feature cleanup)
+  webui/            dialogs and the app: server, schema, flows, appflow, prefs, uihelpers, clipboard
+  web_dist/         the built page the local server serves (committed; CI checks it matches web/)
+  app.py            `python -m thyra_vault.app`
+  webui_demo.py     throwaway-vault demo for development
+web/                the React page (Turborepo); `pnpm build:embed` writes thyra_vault/web_dist
+tests/              pytest suite (map below)
+docs/               background documents (index inside)
+```
 
 ## Tests
 

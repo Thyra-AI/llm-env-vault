@@ -1,6 +1,6 @@
 """
 Regression and correctness suite for the v2 LEVAULT envelope format
-implemented in thyra_vault/crypto.py (1.4.0).
+implemented in thyra_vault/vault/crypto.py (1.4.0).
 
 This suite validates the happy paths and the specific attack-surface cases
 called out in the 1.4.0 spec:
@@ -36,8 +36,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import thyra_vault.crypto as crypto  # noqa: E402
-from thyra_vault.crypto import (  # noqa: E402
+import thyra_vault.vault.crypto as crypto  # noqa: E402
+from thyra_vault.vault.crypto import (  # noqa: E402
     VAULT_MAGIC,
     FORMAT_VERSION,
     RECOVERY_KEY_BYTES,
@@ -290,7 +290,7 @@ def test_recovery_key_checksum_catches_single_char_error() -> None:
     # "RK1 " is 4 chars, first data char is at index 4
     chars = list(formatted)
     # Find first data char and flip it to a different Crockford character
-    from thyra_vault.crypto import _CROCKFORD_ALPHABET
+    from thyra_vault.vault.crypto import _CROCKFORD_ALPHABET
     for i, ch in enumerate(chars):
         if ch in _CROCKFORD_ALPHABET and ch != "RK1 "[0] if i < 4 else True:
             original = chars[i]
@@ -685,7 +685,7 @@ def test_open_body_raises_vault_tampered_on_wrong_aad() -> None:
 
 def test_v1_encrypt_decrypt_round_trip() -> None:
     """The frozen v1 encrypt/decrypt path must still work."""
-    from thyra_vault.crypto import encrypt, decrypt, new_salt
+    from thyra_vault.vault.crypto import encrypt, decrypt, new_salt
     salt = new_salt()
     token = encrypt("my-v1-password", salt, b"v1-secret-data")
     recovered = decrypt("my-v1-password", salt, token)
@@ -694,7 +694,7 @@ def test_v1_encrypt_decrypt_round_trip() -> None:
 
 def test_v1_wrong_password_still_raises_wrong_password() -> None:
     """v1 decrypt with wrong password still raises WrongPassword."""
-    from thyra_vault.crypto import encrypt, decrypt, new_salt, WrongPassword
+    from thyra_vault.vault.crypto import encrypt, decrypt, new_salt, WrongPassword
     salt = new_salt()
     token = encrypt("correct", salt, b"data")
     try:

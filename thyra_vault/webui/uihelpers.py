@@ -8,7 +8,7 @@ import re
 import unicodedata
 from typing import Optional
 
-from .crypto import MalformedRecoveryKey, parse_recovery_key
+from ..vault.crypto import MalformedRecoveryKey, parse_recovery_key
 
 
 def _strip_hidden(text: str) -> str:

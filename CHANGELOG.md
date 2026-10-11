@@ -20,12 +20,12 @@ pinning what a user installs.
   without Tk and on a headless machine. See "Browser dialogs" in the README, including why it is
   a weaker boundary than the native window and what the defences are.
 - **`python -m thyra_vault.webui_demo <dialog>`** to try any dialog against a throwaway vault.
-- **The Thyra Vault app** (`python -m thyra_vault.app`): a password-manager-style window the person opens (never an MCP tool): lock screen, searchable list with a type filter, add / edit / delete, password / passphrase / username generator, settings (language, theme, auto-lock, clipboard wipe, account security including recovery key), live in 7 languages and light/dark. A secret's value never reaches the page: Copy writes it to the OS clipboard from the server (`thyra_vault/clipboard.py`, fed on stdin) and wipes it after a delay if unchanged. The idle auto-lock is enforced server-side; preferences (`ui_prefs.json`) are validated and clamped so a hand-edited file cannot disable the timers. Try it with `python -m thyra_vault.webui_demo app`.
+- **The Thyra Vault app** (`python -m thyra_vault.app`): a password-manager-style window the person opens (never an MCP tool): lock screen, searchable list with a type filter, add / edit / delete, password / passphrase / username generator, settings (language, theme, auto-lock, clipboard wipe, account security including recovery key), live in 7 languages and light/dark. A secret's value never reaches the page: Copy writes it to the OS clipboard from the server (`thyra_vault/webui/clipboard.py`, fed on stdin) and wipes it after a delay if unchanged. The idle auto-lock is enforced server-side; preferences (`ui_prefs.json`) are validated and clamped so a hand-edited file cannot disable the timers. Try it with `python -m thyra_vault.webui_demo app`.
 - **Personal items** in the Thyra Vault app, like a password manager's: **Login, Card, Identity, Note and SSH key**
   (plus the existing environment secrets), with a type filter, a folder, created/edited history, a read-only view with
   hidden fields (reveal one field at a time, copy through the server clipboard with the usual wipe) and an edit form
   pre-filled for the owner. Stored in ONE reserved key of the encrypted vault body (`#items`,
-  `thyra_vault/items.py`): titles are encrypted too, no plaintext file mentions them, every existing tool keeps
+  `thyra_vault/vault/items.py`): titles are encrypted too, no plaintext file mentions them, every existing tool keeps
   reading variables only, and `save_secrets` / `change_password` carry the items through untouched. They are never
   exposed to an assistant (no MCP tool). The idle auto-lock is now enforced on EVERY screen, not just the list, so a
   revealed field or an open form cannot keep the session alive. Reserved keys are already ignored for variables by 2.x
@@ -35,7 +35,7 @@ pinning what a user installs.
   (`disable-model-invocation`), passes the plugin's data directory to `plugin_launcher.py app` (Claude Code
   does not export it to a shell), and the launcher refuses to guess it, so the app always opens the same vault
   as the assistant's tools, in the plugin's own Python environment.
-- **Vault location** is resolved in `thyra_vault/datadir.py`: `THYRA_VAULT_HOME`, then
+- **Vault location** is resolved in `thyra_vault/vault/datadir.py`: `THYRA_VAULT_HOME`, then
   `CLAUDE_PLUGIN_DATA` (unchanged), then next to the module for a source checkout
   (unchanged), then the user's data directory when running as an installed package or a
   frozen executable (`~/.local/share/thyra-vault`, `~/Library/Application Support/Thyra
@@ -45,6 +45,10 @@ pinning what a user installs.
 
 ### Changed
 
+- **The package is grouped by domain.** `thyra_vault/vault/` (crypto, store, items, datadir, envvars), `thyra_vault/runner/`
+  (trust, procs, singleview, legacy_swap) and `thyra_vault/webui/` (now also `uihelpers` and `clipboard`); the MCP tools moved to
+  `thyra_vault/mcp_server.py`. The repository-root `mcp_server.py` is now a thin entry point, so `python mcp_server.py` and the
+  launcher work unchanged. Import paths changed (`thyra_vault.store` is now `thyra_vault.vault.store`, and so on); no behaviour did.
 - **The plugin no longer needs a bare `python` on PATH.** `.mcp.json` and `/thyra-vault:open` now run
   `sh launch.sh`, which uses the first of `python3`, `python` or `py -3`. Machines that only have
   `python3` (current Ubuntu and others) failed to start the server before. Needs a POSIX `sh`.
@@ -59,7 +63,7 @@ pinning what a user installs.
   keys unreadable), the `# Managed by llm-env-vault` marker in migrated `.env` files, and the GitHub address.
   To update an existing plugin install, reinstall under the new name (`claude plugin install thyra-vault@thyra-vault`).
 - The pure helpers in `thyra_vault/gui.py` (password policy, display sanitising, recovery-key
-  parsing, manage-menu logic) moved verbatim to `thyra_vault/uihelpers.py` so both dialog sets share
+  parsing, manage-menu logic) moved verbatim to `thyra_vault/webui/uihelpers.py` so both dialog sets share
   one copy. `gui` re-imports every name, so existing references are unchanged.
 - `mcp_server.py` obtains its dialog module from `thyra_vault/uibackend.py` instead of importing
   `gui` directly.

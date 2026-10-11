@@ -33,9 +33,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-import mcp_server  # noqa: E402
-import thyra_vault.crypto as crypto  # noqa: E402
-from thyra_vault import store  # noqa: E402
+from thyra_vault import mcp_server  # noqa: E402
+import thyra_vault.vault.crypto as crypto  # noqa: E402
+from thyra_vault.vault import store  # noqa: E402
 from _vault_workspace import _isolate, _reset_trust, fake_dialog, TEST_PASSWORD, _FAST_PARAMS  # noqa: E402
 
 SECRETS = {

@@ -69,7 +69,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import store
+from ..vault import store
 
 # --------------------------------------------------------------------------- Win32
 if sys.platform == "win32":

@@ -59,7 +59,16 @@ def resolve_root(env: Mapping[str, str], module_file: Path, *, frozen: bool,
         return Path(plugin_data).resolve() / "vault"
     if is_installed_copy(module_file, frozen):
         return user_data_dir(platform, env, home)
-    return module_file.resolve().parent.parent
+    return _checkout_root(module_file)
+
+
+def _checkout_root(module_file: Path) -> Path:
+    """The folder that contains the `thyra_vault` package, wherever this module sits inside it."""
+    here = module_file.resolve()
+    for parent in here.parents:
+        if parent.name == "thyra_vault":
+            return parent.parent
+    return here.parent.parent
 
 
 def explicit_home_given(env: Mapping[str, str]) -> bool:

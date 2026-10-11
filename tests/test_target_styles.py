@@ -22,8 +22,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import thyra_vault.crypto as crypto  # noqa: E402
-from thyra_vault import store, trust  # noqa: E402
+import thyra_vault.vault.crypto as crypto  # noqa: E402
+from thyra_vault.runner import trust  # noqa: E402
+from thyra_vault.vault import store
 
 TEST_PASSWORD = "styles-suite-password-123"
 _FAST_PARAMS = crypto.ScryptParams(n=2 ** 12, r=8, p=1)

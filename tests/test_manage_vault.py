@@ -43,8 +43,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-import mcp_server  # noqa: E402
-from thyra_vault import crypto, store  # noqa: E402
+from thyra_vault import mcp_server  # noqa: E402
+from thyra_vault.vault import store  # noqa: E402
+from thyra_vault.vault import crypto
 from thyra_vault import webui as gui  # noqa: E402
 
 TEST_PASSWORD = "regression-mgmt-test-password-123"

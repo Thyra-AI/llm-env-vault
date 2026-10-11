@@ -6,7 +6,7 @@ dict. ``vault_app`` (appflow.py) is the separate, human-opened app.
 """
 from pathlib import Path
 
-from .. import store
+from ..vault import store
 from . import flows, server
 from .server import Limits, WebUiUnavailable  # noqa: F401 -- re-exported
 
@@ -128,7 +128,7 @@ APP_MAX_LIFETIME = 12 * 3600.0
 def vault_app() -> dict:
     """Open the Thyra Vault app and block until the person closes it."""
     from . import appflow
-    from .. import clipboard
+    from . import clipboard
     limits = Limits(launch_timeout=LIMITS.launch_timeout, heartbeat_timeout=LIMITS.heartbeat_timeout,
                     closing_grace=LIMITS.closing_grace,
                     max_lifetime=max(LIMITS.max_lifetime, APP_MAX_LIFETIME),

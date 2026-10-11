@@ -14,9 +14,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from test_security_review_fixes import (_allow, _project, _run, fake_dialog,  # noqa: E402
                                         isolated_vault)
 
-import mcp_server  # noqa: E402
-from thyra_vault import trust  # noqa: E402
-from thyra_vault.uihelpers import (command_display_lines, command_refusal_reason,  # noqa: E402
+from thyra_vault import mcp_server  # noqa: E402
+from thyra_vault.runner import trust  # noqa: E402
+from thyra_vault.webui.uihelpers import (command_display_lines, command_refusal_reason,  # noqa: E402
                                    escape_argument)
 from thyra_vault.webui import flows, schema  # noqa: E402
 
