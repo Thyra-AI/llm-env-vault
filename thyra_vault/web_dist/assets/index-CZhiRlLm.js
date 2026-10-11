@@ -42337,7 +42337,7 @@ function LockIllustration() {
     motion.svg,
     {
       viewBox: "0 0 120 120",
-      className: "size-28",
+      className: "size-24",
       role: "img",
       "aria-hidden": true,
       initial: { opacity: 0, y: 10, scale: 0.94 },
@@ -42389,7 +42389,7 @@ function LockView({ screen, busy, onAction }) {
         e.preventDefault();
         if (screen.defaultAction) fire(screen.defaultAction);
       },
-      className: "mx-auto flex min-h-dvh w-full max-w-sm flex-col gap-5 px-5 py-6",
+      className: "mx-auto flex min-h-dvh w-full max-w-sm flex-col gap-4 px-5 py-5",
       children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("header", { className: "flex items-center justify-between", children: /* @__PURE__ */ jsxRuntimeExports.jsx(ThyraLogo, {}) }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col items-center gap-3 text-center", children: [

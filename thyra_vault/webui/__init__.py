@@ -120,7 +120,7 @@ def manage_vault_dialog() -> dict:
 
 # --- the persistent app (opened by the person, never by a tool call) --------
 
-APP_WINDOW_SIZE = (440, 740)
+APP_WINDOW_SIZE = (480, 840)
 APP_MAX_LIFETIME = 12 * 3600.0
 
 
