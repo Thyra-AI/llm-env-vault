@@ -25,6 +25,7 @@ a master password than a window no other process can see:
   * Passwords and decrypted values never appear in a URL, a log line, or a
     response -- only in the request bodies of the action that needs them.
 """
+import ctypes
 import hmac
 import json
 import mimetypes
@@ -32,6 +33,8 @@ import os
 import secrets
 import shutil
 import signal
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -57,6 +60,11 @@ ASSET_DIR = Path(__file__).resolve().parent.parent / "web_dist"
 MAX_BODY_UNAUTH = 4 * 1024
 MAX_BODY = 1024 * 1024
 SOCKET_TIMEOUT = 15.0  # seconds a connection may sit silent: no thread is held forever
+# Overall budget to read one request (line + headers + body): a peer that dribbles a byte
+# every few seconds stays under SOCKET_TIMEOUT forever, but not under this.
+REQUEST_DEADLINE = 20.0
+MAX_CONNECTIONS = 64  # concurrent connections; more are closed at once, not given a thread
+STALE_TEMP_SECONDS = 24 * 3600
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
        "img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
@@ -75,12 +83,14 @@ class Limits:
     """Timeouts, in seconds. Overridable per call (tests shrink them)."""
 
     def __init__(self, launch_timeout=180.0, heartbeat_timeout=90.0, closing_grace=4.0,
-                 max_lifetime=1800.0, max_bad_codes=5):
+                 max_lifetime=1800.0, max_bad_codes=5, lockout_base=1.0, lockout_max=60.0):
         self.launch_timeout = launch_timeout        # browser never connected
         self.heartbeat_timeout = heartbeat_timeout  # tab silently gone
         self.closing_grace = closing_grace          # wait this long after pagehide
         self.max_lifetime = max_lifetime            # absolute ceiling for one dialog
-        self.max_bad_codes = max_bad_codes
+        self.max_bad_codes = max_bad_codes          # free wrong guesses before /api/exchange locks
+        self.lockout_base = lockout_base            # first lockout; doubles per further bad code
+        self.lockout_max = lockout_max
 
 
 class StaleScreen(Exception):
@@ -106,6 +116,7 @@ class Session:
         self.last_seen = 0.0
         self.closing_at: Optional[float] = None
         self.bad_codes = 0
+        self.lockout_until = 0.0
 
     # -- flow driving ------------------------------------------------------
     def start(self) -> None:
@@ -164,6 +175,31 @@ class Session:
     def touch(self) -> None:
         self.last_seen = time.monotonic()
         self.closing_at = None
+
+
+class _BoundedServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a cap on concurrent connections: past it, a new
+    connection is closed immediately instead of being handed a thread."""
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
 
 def _assets_dir() -> Path:
@@ -246,6 +282,31 @@ def _make_handler(session: Session, port: int, assets: Path, limits: Limits):
             return hmac.compare_digest(header[7:].encode("utf-8"), session.token.encode("utf-8"))
 
         timeout = SOCKET_TIMEOUT
+        _deadline_timer: Optional[threading.Timer] = None
+
+        # Overall deadline for reading a request: when it fires the socket is shut
+        # down, which unblocks whatever recv a slow peer is holding us in. It is
+        # cancelled once the body is in, so a long-running action is never cut off.
+        def handle_one_request(self):
+            timer = threading.Timer(REQUEST_DEADLINE, self._abort_slow_request)
+            timer.daemon = True
+            self._deadline_timer = timer
+            timer.start()
+            try:
+                super().handle_one_request()
+            finally:
+                timer.cancel()
+
+        def _abort_slow_request(self):
+            self.close_connection = True
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        def _request_read(self):
+            if self._deadline_timer is not None:
+                self._deadline_timer.cancel()
 
         def _read_json(self, limit: int = MAX_BODY) -> Optional[dict]:
             if not (self.headers.get("Content-Type", "").split(";")[0].strip().lower()
@@ -271,6 +332,7 @@ def _make_handler(session: Session, port: int, assets: Path, limits: Limits):
             self._get(head=True)
 
         def _get(self, head: bool):
+            self._request_read()
             if not self._guard_origin():
                 return self._deny()
             path = urlsplit(self.path).path
@@ -289,6 +351,7 @@ def _make_handler(session: Session, port: int, assets: Path, limits: Limits):
             path = urlsplit(self.path).path
             if path == "/api/exchange":
                 body = self._read_json(MAX_BODY_UNAUTH)
+                self._request_read()
                 if body is None:
                     self.close_connection = True
                     return self._deny(400, "bad_request")
@@ -300,6 +363,7 @@ def _make_handler(session: Session, port: int, assets: Path, limits: Limits):
                 self.close_connection = True
                 return self._deny(401, "unauthorized")
             body = self._read_json()
+            self._request_read()
             if body is None:
                 self.close_connection = True
                 return self._deny(400, "bad_request")
@@ -324,21 +388,37 @@ def _make_handler(session: Session, port: int, assets: Path, limits: Limits):
 
         def _exchange(self, body: dict):
             code = body.get("code")
-            if session.code_used:
-                # Once the page has connected the code is spent. Further attempts
-                # are refused WITHOUT counting: a stranger's failed guesses must not
-                # be able to end the human's session.
-                return self._deny(403, "invalid_code")
-            ok = (isinstance(code, str) and not session.code_used
-                  and hmac.compare_digest(code.encode("utf-8"), session.code.encode("utf-8")))
-            if not ok:
-                session.bad_codes += 1
-                if session.bad_codes >= limits.max_bad_codes:
-                    session.cancel("error")
-                return self._deny(403, "invalid_code")
-            session.code_used = True
-            session.connected = True
-            session.touch()
+            # Check-and-set under the session lock: the server is threaded, and two
+            # concurrent requests with the valid code must not both get a token.
+            with session.lock:
+                now = time.monotonic()
+                if session.code_used:
+                    # Once the page has connected the code is spent. Further attempts
+                    # are refused WITHOUT counting: a stranger's failed guesses must not
+                    # be able to end the human's session.
+                    return self._deny(403, "invalid_code")
+                ok = (isinstance(code, str)
+                      and hmac.compare_digest(code.encode("utf-8"), session.code.encode("utf-8")))
+                if not ok and now < session.lockout_until:
+                    # Locked out for guessing. The VALID code still gets through (it has 256
+                    # bits, so letting it pass costs nothing), otherwise a local process
+                    # could keep the human out of their own dialog by sending bad codes.
+                    wait = max(1, int(session.lockout_until - now + 0.999))
+                    return self._send(429, b'{"error": "too_many_attempts"}', "application/json",
+                                      extra={"Retry-After": str(wait)})
+                if not ok:
+                    # Wrong codes never end the dialog (any local process could
+                    # otherwise cancel it at will); they only slow the guesser down.
+                    # The code is 256 bits, so throttling is belt and braces.
+                    session.bad_codes += 1
+                    over = session.bad_codes - limits.max_bad_codes
+                    if over >= 0:
+                        session.lockout_until = now + min(limits.lockout_max,
+                                                          limits.lockout_base * (2 ** over))
+                    return self._deny(403, "invalid_code")
+                session.code_used = True
+                session.connected = True
+                session.touch()
             self._json(200, {"token": session.token})
 
         # Anything else is not part of this server.
@@ -481,6 +561,8 @@ class AppWindow:
             subprocess.run(["taskkill", "/T"] + (["/F"] if hard else []) + ["/PID", str(self.proc.pid)],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
             return
+        if self.proc.poll() is not None:
+            return  # already reaped: its pid (and group) may belong to someone else now
         try:
             os.killpg(self.proc.pid, signal.SIGKILL if hard else signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
@@ -503,6 +585,14 @@ class AppWindow:
             time.sleep(0.15)
 
 
+def _die_with_parent() -> None:
+    """Runs in the forked browser child (Linux): SIGKILL it if this server dies."""
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
+    except Exception:  # noqa: BLE001 -- best effort; the watchdog and close() still apply
+        pass
+
+
 def _launch_app_window(url: str, size_key: Optional[str] = None) -> Optional[AppWindow]:
     browser = find_app_browser()
     if not browser:
@@ -513,20 +603,22 @@ def _launch_app_window(url: str, size_key: Optional[str] = None) -> Optional[App
         # Its own process group / session, so the whole browser can be ended as one.
         group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
                  else {"start_new_session": True})
+        if sys.platform.startswith("linux"):
+            # The window must not outlive this server: an orphan keeps showing a page
+            # whose port a same-user process could then bind and fake.
+            group["preexec_fn"] = _die_with_parent
         proc = subprocess.Popen(app_command(browser, url, profile, _sizes.get(size_key or url)), stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **group)
     except OSError:
         shutil.rmtree(profile, ignore_errors=True)
         return None
     try:
-        # A browser that dies at once did not start (or handed the URL to an
-        # already-running instance and left). Exit 0 means the latter: the window
-        # exists but cannot be watched. Anything else: use a plain tab instead.
-        code = proc.wait(timeout=1.5)
+        # A browser that dies at once did not start (or handed the URL to some other
+        # instance and left, which we could neither watch nor close). Either way: a
+        # failed launch, so clean up and use a plain tab instead.
+        proc.wait(timeout=1.5)
     except subprocess.TimeoutExpired:
         return AppWindow(proc, profile, tracked=True)
-    if code == 0:
-        return AppWindow(proc, profile, tracked=False)
     shutil.rmtree(profile, ignore_errors=True)
     return None
 
@@ -567,6 +659,58 @@ def _forget_start_page(url: str) -> None:
     folder = _bootstraps.pop(url, None)
     if folder:
         shutil.rmtree(folder, ignore_errors=True)
+
+
+_link_files: dict = {}  # url -> the temp folder holding its link file
+
+
+def _write_link_file(url: str) -> Optional[str]:
+    """Write the launch link to a private file and return its PATH.
+
+    Used when no browser could be opened. The link carries the single-use code, and
+    stderr may be read by the AI assistant (it would exchange the code for the
+    session token and see the screens), so the link itself is never printed -- only
+    where to find it. A HUMAN must open that file and follow the link; the folder is
+    0700, the file 0600, and both are deleted when the dialog ends.
+    """
+    try:
+        folder = tempfile.mkdtemp(prefix="thyra-vault-link-")  # 0700
+        page = Path(folder) / "open-this-link.txt"
+        fd = os.open(page, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(url + "\n")
+    except OSError:
+        return None
+    _link_files[url] = folder
+    return str(page)
+
+
+def _forget_link_file(url: str) -> None:
+    folder = _link_files.pop(url, None)
+    if folder:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _sweep_stale_temp() -> None:
+    """Remove start-page and window-profile folders a killed run left behind: ours
+    (same uid, a real directory, not a symlink) and older than a day."""
+    cutoff = time.time() - STALE_TEMP_SECONDS
+    me = os.getuid() if hasattr(os, "getuid") else None
+    try:
+        entries = list(Path(tempfile.gettempdir()).iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.name.startswith(("thyra-vault-start-", "thyra-vault-window-",
+                                      "thyra-vault-link-")):
+            continue
+        try:
+            st = entry.lstat()
+            if (stat.S_ISDIR(st.st_mode) and (me is None or st.st_uid == me)
+                    and st.st_mtime < cutoff):
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
 
 
 def _default_open(url: str) -> bool:
@@ -622,7 +766,8 @@ def run_flow(flow, *, status_of: Optional[Callable[[], Optional[str]]] = None,
             raise session.error
         return
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+    _sweep_stale_temp()
+    server = _BoundedServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
     port = server.server_address[1]
     server.RequestHandlerClass = _make_handler(session, port, assets, limits)
     server.daemon_threads = True
@@ -641,12 +786,17 @@ def run_flow(flow, *, status_of: Optional[Callable[[], Optional[str]]] = None,
         if _on_ready is not None:
             _on_ready(url, session)
         if not _open_url(url):
-            # Never print the launch code unless there is no other way in: the
-            # MCP host may capture stderr.
-            print(f"Thyra Vault: open this link in your browser to continue: {url}",
-                  file=sys.stderr, flush=True)
+            # The launch code must never reach stderr (the MCP host, and so the
+            # assistant, may read it): print only where the link file is.
+            path = _write_link_file(url)
+            msg = (f"Thyra Vault: open the link in this file in your browser to continue: {path}"
+                   if path else "Thyra Vault: could not open a browser or write a link file.")
+            print(msg, file=sys.stderr, flush=True)
         while not session.finished.wait(0.25):
             now = time.monotonic()
+            if not thread.is_alive():
+                session.cancel("error")  # watchdog: the server died, so close the window
+                continue
             if session.connected and url in _bootstraps:
                 _forget_start_page(url)  # the code has been used: the start page is no longer needed
             if _window_closed(url):
@@ -667,6 +817,7 @@ def run_flow(flow, *, status_of: Optional[Callable[[], Optional[str]]] = None,
         server.server_close()
         _close_window(url)
         _forget_start_page(url)
+        _forget_link_file(url)
         _sizes.pop(url, None)
     if session.error:
         raise session.error

@@ -327,10 +327,13 @@ def test_failed_exchanges_cannot_end_a_session_that_is_already_connected(assets)
     h.finish()
 
 
-def test_before_anyone_connects_too_many_wrong_codes_still_end_the_dialog(assets):
-    h = Harness(server.Limits(launch_timeout=30, max_bad_codes=3))
+def test_before_anyone_connects_too_many_wrong_codes_only_lock_the_exchange_out(assets):
+    h = Harness(server.Limits(launch_timeout=30, max_bad_codes=3, lockout_base=30, lockout_max=30))
     for _ in range(3):
         h.request("POST", "/api/exchange", {"code": "guess"})
+    assert h.request("POST", "/api/exchange", {"code": "guess"})[0] == 429
+    assert h.thread.is_alive()  # a stranger's guesses cannot cancel the dialog
+    h.session.cancel("closed")
     h.finish()
 
 

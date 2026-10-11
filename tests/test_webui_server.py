@@ -205,13 +205,17 @@ def test_launch_code_is_single_use(assets):
     h.finish()
 
 
-def test_wrong_codes_are_refused_and_too_many_end_the_dialog(assets):
-    h = Harness(server.Limits(launch_timeout=30, max_bad_codes=3))
-    for _ in range(3):
-        status, _, _, _ = h.request("POST", "/api/exchange", {"code": "guess"})
-        assert status == 403
-    h.finish()  # the dialog was cancelled, run_flow returned
-    assert h.outcome["approved"] is False
+def test_wrong_codes_are_refused_and_throttled_but_never_end_the_dialog(assets):
+    h = Harness(server.Limits(launch_timeout=30, max_bad_codes=3, lockout_base=0.4, lockout_max=0.4))
+    statuses = [h.request("POST", "/api/exchange", {"code": "guess"})[0] for _ in range(3)]
+    assert statuses == [403, 403, 403]
+    status, _, _, resp = h.request("POST", "/api/exchange", {"code": "guess"})
+    assert status == 429 and resp.getheader("Retry-After")  # locked out, not cancelled
+    assert h.thread.is_alive()
+    time.sleep(0.5)
+    h.connect()  # the real code still works once the lockout has passed
+    h.act("cancel")
+    h.finish()
 
 
 def test_api_requires_the_bearer_token(assets):
