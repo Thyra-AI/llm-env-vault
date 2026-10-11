@@ -40,14 +40,14 @@ file this command inspects.
 ## 3. Is there a usable Python?
 
 ```
-python --version
+python3 --version
 ```
 
-The plugin's `.mcp.json` launches bare `python`. **This is the single most common failure on
-macOS and Linux**, where typically only `python3` exists and bare `python` is not on PATH. If
-`python --version` fails but `python3 --version` works, that is the diagnosis — the plugin is
-Windows-first and needs a `python` on PATH. Report it as such and stop; the checks below will
-not add anything.
+The plugin's `.mcp.json` runs `sh launch.sh`, which uses the first of `python3`, `python` or
+`py -3` it finds, so any Python 3.10+ on PATH is enough. If `python3 --version` fails, try
+`python --version`; if both fail there is no Python, which is the diagnosis. If they work but the
+tools still do not appear, the likely cause is that there is no `sh` on PATH (native Windows
+without Git for Windows): report that and stop; the checks below will not add anything.
 
 ## 4. Can a dialog be shown?
 

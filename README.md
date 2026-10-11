@@ -93,11 +93,11 @@ claude plugin install thyra-vault@thyra-vault --scope user
 
 `--scope user` (the default) makes it available in **every** project you open — which is the point, since it protects other projects' `.env` files, not just this repo's.
 
-**Platform support: Windows is the tested and supported platform.** That's where the test suite runs and the only platform where dependencies install from the hash-pinned lockfile. The plugin's `.mcp.json` launches the launcher with a bare `python`, so on macOS and Linux you need a **`python`** on your PATH — `python3` alone is not enough, and if that's all you have the server fails to start with an unhelpful "MCP server not connected". Everything else is cross-platform (the dialogs are local browser pages), but treat non-Windows as untested. `/thyra-vault:doctor` diagnoses exactly this case.
+**Platform support.** The plugin's `.mcp.json` runs `sh launch.sh`, which uses the first of `python3`, `python` or `py -3` on your PATH, so a machine with only `python3` works. It needs a POSIX `sh` (Linux, macOS, or Windows with Git for Windows on PATH). Verified on Linux; macOS and native Windows are untested. `/thyra-vault:doctor` diagnoses a missing Python or `sh`.
 
 **Restart Claude Code Desktop (CCD) after installing.** A running CCD session doesn't pick up newly-registered MCP servers automatically — restart CCD (or reload the window) after `/plugin install`, or `thyra-vault`'s tools won't show up as available yet.
 
-**First run is slower on purpose:** Claude Code auto-installs Node.js plugin dependencies but has no equivalent for Python, so the plugin ships a launcher (`plugin_launcher.py`) that, on first run, creates a venv in the plugin's persistent data directory (`${CLAUDE_PLUGIN_DATA}`, survives updates), installs dependencies into it (from `requirements-lock.txt`, a hash-pinned universal lockfile, via `--require-hashes` on every platform), and then execs the real server from that venv. A stamp file means it only reinstalls when the plugin is actually updated (a new version-scoped install directory) — every subsequent run is instant, and a plain local edit to the requirements file doesn't trigger anything on its own. The only prerequisite is a `python` on your PATH — see the platform note above, since on macOS/Linux that specifically means `python` and not just `python3`.
+**First run is slower on purpose:** Claude Code auto-installs Node.js plugin dependencies but has no equivalent for Python, so the plugin ships a launcher (`plugin_launcher.py`) that, on first run, creates a venv in the plugin's persistent data directory (`${CLAUDE_PLUGIN_DATA}`, survives updates), installs dependencies into it (from `requirements-lock.txt`, a hash-pinned universal lockfile, via `--require-hashes` on every platform), and then execs the real server from that venv. A stamp file means it only reinstalls when the plugin is actually updated (a new version-scoped install directory) — every subsequent run is instant, and a plain local edit to the requirements file doesn't trigger anything on its own. The only prerequisite is a Python 3 on your PATH — see the platform note above.
 
 **Opening the app.** After installing, run `/thyra-vault:open` (see [Commands](#commands)). It is the only way the
 installed plugin opens the app. `python -m thyra_vault.app` is for a source checkout.
@@ -595,7 +595,7 @@ moved, and tells you which now-placeholder-only files are safe to commit.
 Opens the **Thyra Vault app** (the window where *you* unlock the vault, browse and edit secrets and personal
 items, and copy a value). Only you can run it: the command is marked `disable-model-invocation`, so the
 assistant cannot open the app by itself, because the app can put a secret on your clipboard. Claude Code shows
-you the one command it will run (`CLAUDE_PLUGIN_DATA=... python .../plugin_launcher.py app`) and asks you to
+you the one command it will run (`CLAUDE_PLUGIN_DATA=... sh .../launch.sh app`) and asks you to
 approve it the first time. The data directory is passed in explicitly because Claude Code exports it to the
 MCP server but not to a shell; with it, the app uses the plugin's own Python environment and **the same vault
 the assistant's tools use**. The first run sets up the environment and can take a few seconds.
@@ -825,7 +825,7 @@ From an installed plugin, run **`/thyra-vault:open`** instead (it opens the same
 - **`resync_targets`' line-matcher isn't multi-line-aware** (unlike `install_migrate`'s initial parser). A managed variable name that also appears inside an unrelated real multi-line value in the same file (a PEM body, embedded JSON) could get that line incorrectly rewritten.
 - **A resync normalizes the whole file's line endings** to its dominant terminator and ensures a trailing newline, even when nothing else changed — harmless to meaning, but can show up as a full-file diff under strict VCS line-ending settings.
 - **Background run logs linger for up to 7 days.** Each `background=True` call leaves an `thyra-vault-run-*.log` file in the system temp directory. These are reaped opportunistically once they're older than 7 days, but only when a later run happens to trigger the sweep — so a log can sit there indefinitely if you stop using the tool. Since a log can contain the process's real environment if the command prints its config, clear old ones out yourself if that matters to you.
-- **Windows is the only tested platform.** The suite runs on Windows; the platform-independent suites also run on Linux and macOS in CI, installed from the hash-pinned lockfile. The code is stdlib-portable and the dialogs are local web pages, but macOS and Linux are untested — and the plugin's `.mcp.json` launches a bare `python`, which many such systems don't provide at all. Run `/thyra-vault:doctor` if the tools don't appear.
+- **Windows is the only tested platform.** The suite runs on Windows; the platform-independent suites also run on Linux and macOS in CI, installed from the hash-pinned lockfile. The code is stdlib-portable and the dialogs are local web pages, but macOS and Linux are untested — and the plugin's launcher needs a POSIX `sh`. Run `/thyra-vault:doctor` if the tools don't appear.
 - **One dialog at a time.** GUI prompts run on the server's main thread; concurrent tool calls
   queue behind an open dialog.
 - **The master password and decrypted vault values are Python `str` objects, and CPython provides
@@ -887,9 +887,9 @@ Run `/thyra-vault:doctor` first — it performs every check below and reports on
 
 1. **CCD wasn't restarted after install.** A running session doesn't pick up newly-registered MCP
    servers. Restart it.
-2. **No bare `python` on PATH.** The plugin's `.mcp.json` launches `python`, not `python3`. On
-   macOS and Linux that often doesn't resolve, and the server never starts. See the platform note
-   under Installation.
+2. **No Python 3 or no `sh` on PATH.** The plugin's `.mcp.json` runs `sh launch.sh`, which looks for
+   `python3`, `python` or `py -3`. If none exists (or there is no `sh`), the server never starts.
+   See the platform note under Installation.
 3. **Provisioning was interrupted.** The first run builds a venv and pip-installs into it; if the
    client's MCP startup timeout fired mid-install, the venv is left half-built. The launcher
    detects this and rebuilds on the next start, so restart and give it time. `provision.log` in

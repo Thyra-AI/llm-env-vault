@@ -45,6 +45,9 @@ pinning what a user installs.
 
 ### Changed
 
+- **The plugin no longer needs a bare `python` on PATH.** `.mcp.json` and `/thyra-vault:open` now run
+  `sh launch.sh`, which uses the first of `python3`, `python` or `py -3`. Machines that only have
+  `python3` (current Ubuntu and others) failed to start the server before. Needs a POSIX `sh`.
 - **Everything is now called Thyra Vault** (it was `llm-env-vault`): plugin and MCP server id `thyra-vault`,
   commands `/thyra-vault:protect` and `/thyra-vault:doctor`, Python package `thyra_vault` -> `thyra_vault`
   (`python -m thyra_vault.app`), environment variables `THYRA_VAULT_*`, temp-file prefixes

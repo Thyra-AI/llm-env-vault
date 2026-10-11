@@ -53,8 +53,8 @@ def test_only_the_user_can_run_the_open_command():
 
 
 def test_the_open_command_passes_the_data_dir_and_runs_the_app_mode():
-    assert ('CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" python '
-            '"${CLAUDE_PLUGIN_ROOT}/plugin_launcher.py" app') in COMMAND
+    assert ('CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" sh '
+            '"${CLAUDE_PLUGIN_ROOT}/launch.sh" app') in COMMAND
 
 
 def test_the_open_command_does_not_grant_blanket_shell_access():

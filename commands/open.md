@@ -13,7 +13,7 @@ Run exactly this one command with the Bash tool, with `run_in_background` set to
 stays open until the person closes it, longer than a Bash call may run), and nothing else:
 
 ```
-CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" python "${CLAUDE_PLUGIN_ROOT}/plugin_launcher.py" app
+CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" sh "${CLAUDE_PLUGIN_ROOT}/launch.sh" app
 ```
 
 Then tell the person, in one sentence, that the Thyra Vault window is opening (the first run
@@ -23,4 +23,4 @@ Do not read the app's output beyond confirming it started. Do not read `vault.en
 or any file in the plugin's data directory, do not try to open the link the app may print, and do
 not try to operate the window: nothing in it is meant for you.
 
-If the command fails because there is no `python` on PATH, say so and point at `/thyra-vault:doctor`.
+If the command fails because there is no Python 3 on PATH, say so and point at `/thyra-vault:doctor`.
