@@ -484,4 +484,5 @@ def test_the_throwaway_browser_profile_starts_without_password_or_analytics_prom
     assert prefs["credentials_enable_service"] is False
     assert prefs["profile"]["password_manager_enabled"] is False
     assert prefs["autofill"]["profile_enabled"] is False
-    assert prefs["brave"]["p3a"]["notice_acknowledged"] is True
+    state = json.loads((tmp_path / "Local State").read_text(encoding="utf-8"))
+    assert state["brave"]["p3a"]["notice_acknowledged"] is True

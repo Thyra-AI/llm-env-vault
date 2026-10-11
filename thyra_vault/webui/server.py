@@ -440,11 +440,14 @@ def app_command(browser: str, url: str, profile: str, size: Optional[tuple] = No
 
 # Preferences written into the throwaway profile before the browser starts, so a fresh profile does not
 # nag: no "save this password?" bubble for the master password, no autofill, and no analytics notice
-# (Brave shows one on the first run of every new profile).
+# (Brave shows one on the first run of every new profile). The first group lives in the profile
+# (Default/Preferences); Brave's analytics settings live in the browser-wide "Local State" file.
 _PROFILE_PREFS = {
     "credentials_enable_service": False,
     "profile": {"password_manager_enabled": False},
     "autofill": {"profile_enabled": False, "credit_card_enabled": False},
+}
+_LOCAL_STATE = {
     "brave": {"p3a": {"enabled": False, "notice_acknowledged": True},
               "stats": {"reporting_enabled": False}},
 }
@@ -452,9 +455,11 @@ _PROFILE_PREFS = {
 
 def _seed_profile(profile: str) -> None:
     try:
-        default = Path(profile) / "Default"
+        root = Path(profile)
+        default = root / "Default"
         default.mkdir(mode=0o700, exist_ok=True)
         (default / "Preferences").write_text(json.dumps(_PROFILE_PREFS), encoding="utf-8")
+        (root / "Local State").write_text(json.dumps(_LOCAL_STATE), encoding="utf-8")
     except OSError:
         pass  # only cosmetic: the window still works, it just may show the browser's own prompts
 
