@@ -39,6 +39,7 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from thyra_vault import envvars, legacy_swap, procs, singleview, store, trust, webui
+from thyra_vault.uihelpers import command_display_lines, command_refusal_reason
 from thyra_vault.crypto import (WrongPassword, TooManyAttempts, WrongRecoveryKey,
                               MalformedRecoveryKey, NoRecoverySlot, VaultCorrupted,
                               VaultTampered)
@@ -279,6 +280,25 @@ def _redaction_forms(value: str) -> list:
     return sorted((f for f in forms if len(f) >= REDACT_MIN_VALUE_LEN), key=lambda f: -len(f))
 
 
+def _redaction_units(value: str) -> list:
+    """The value itself, then -- for a multi-line value (a PEM key, a certificate) --
+    each of its lines on its own (length >= REDACT_MIN_VALUE_LEN, indentation and CR
+    stripped): a command that prints the lines separately, indented, or with CRLF line
+    ends never prints the whole value as one string."""
+    units = [value]
+    if "\n" in value or "\r" in value:
+        for line in value.splitlines():
+            line = line.strip()
+            if len(line) >= REDACT_MIN_VALUE_LEN and line not in units:
+                units.append(line)
+    return units
+
+
+def _wrapped_form_pattern(form: str):
+    """A regex matching ``form`` with an optional (CR)LF between any two characters."""
+    return re.compile(r"(?:\r?\n)?".join(re.escape(c) for c in form))
+
+
 def _redact_secrets(text: str, secrets: dict) -> tuple:
     """Replace every vault value in text with [REDACTED:VAR_NAME].
 
@@ -296,8 +316,14 @@ def _redact_secrets(text: str, secrets: dict) -> tuple:
             skipped.append(name)
             continue
         marker = f"[REDACTED:{name}]"
-        for form in _redaction_forms(value):
-            text = text.replace(form, marker)
+        for unit in _redaction_units(value):
+            for form in _redaction_forms(unit):
+                text = text.replace(form, marker)
+                # `base64`, `xxd -p` and friends wrap long output (76 / 60 columns), so
+                # the same spelling may be broken by a (CRLF) newline between any two
+                # characters. Only worth the regex when there is a newline at all.
+                if "\n" in text:
+                    text = _wrapped_form_pattern(form).sub(marker, text)
     return text, skipped
 
 
@@ -1797,22 +1823,35 @@ def _shown_executable(command, cwd) -> Optional[str]:
     return str(found) if found is not None else None
 
 
+_spawn_state = threading.local()   # fingerprint taken right before the spawn (see _run_with_env_impl)
+
+
 def _run_with_env_impl(command: list, materialize: Optional[str], background: bool,
                         cwd: Optional[str], only_vars: Optional[list] = None,
                         files: Optional[list] = None,
                         timeout: Optional[int] = None,
                         max_reads: Optional[int] = None) -> dict:
+    _spawn_state.tree = None
     result = _with_swap_recovery(
         lambda: _run_with_env_core(command, materialize, background, cwd, only_vars, files,
                                    timeout, max_reads))
     # Re-baseline a trust grant's project fingerprint ONLY when the command really
     # ran: the approved command's own output is not an edit by the assistant, but a
     # denied or refused call must never adopt whatever the assistant changed meanwhile.
-    if isinstance(result, dict) and result.get("applied") and ("exit_code" in result or result.get("started")):
+    # The baseline is only moved if the fingerprint taken just BEFORE the spawn (in the
+    # core, stashed in _spawn_state) equals the stored one: a grant approved in this call
+    # stored the fingerprint taken at approval time, and a live grant the one it was
+    # approved with, so the post-run scan can only absorb what the command itself wrote,
+    # never an edit the assistant made before the run. Trade-off: a command that writes
+    # into its own folder keeps its trust only while it keeps starting from the approved
+    # state, and an edit made while a background run is going is not covered.
+    pre_run_tree = getattr(_spawn_state, "tree", None)
+    if (pre_run_tree is not None and isinstance(result, dict) and result.get("applied")
+            and ("exit_code" in result or result.get("started"))):
         try:
             trust.refresh_project_fingerprint(
                 trust.make_signature(command, cwd, only_vars, materialize, background, files, timeout, max_reads),
-                cwd)
+                cwd, before=pre_run_tree)
         except Exception:  # noqa: BLE001 -- bookkeeping must never fail the run
             pass
     return result
@@ -1825,6 +1864,13 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                         max_reads: Optional[int] = None) -> dict:
     if not command or not all(isinstance(c, str) for c in command):
         return {"error": "command must be a non-empty list of strings."}
+    # The consent dialog shows the command one escaped argument per line. An argument
+    # it could not show faithfully (invisible / control characters, absurd length) is
+    # refused here, before any dialog, rather than shown in a form that differs from
+    # what runs.
+    _refusal = command_refusal_reason(command)
+    if _refusal:
+        return {"error": f"Refused: {_refusal}"}
     # Before anything resolves, stats or which()es these: a UNC string in
     # either would make this process open a network connection -- with the
     # user's credentials -- on an agent's say-so, before any dialog.
@@ -1988,7 +2034,9 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                                              files=file_pairs or None,
                                              timeout=timeout, max_reads=max_reads,
                                              cwd=_shown_cwd(cwd),
-                                             executable=_shown_executable(command, cwd))
+                                             executable=_shown_executable(command, cwd),
+                                             command_lines=command_display_lines(command),
+                                             background=bool(background))
         raw_secrets = outcome["secrets"]
         if raw_secrets is None:
             result = {"applied": False, "message": "Denied by user."}
@@ -2163,6 +2211,14 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
             restored_paths.append(restore_path)
 
     redact_map = dict(raw_secrets)
+
+    # Just before the spawn: the folder as it is now, for the post-run re-baseline.
+    _spawn_state.tree = None
+    if (trust._trusted.get(signature) or {}).get("tree") is not None:
+        try:
+            _spawn_state.tree = trust.project_fingerprint(cwd)
+        except Exception:  # noqa: BLE001 -- bookkeeping must never fail the run
+            pass
 
     if background:
         # Under the stdio transport this process's own stdout/stdin ARE the

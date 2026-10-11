@@ -520,20 +520,148 @@ def cached_secrets(signature) -> Optional[dict]:
 # app.py`, `pytest`, `npm test`, `bash run.sh` and `make` all load code the command
 # line never mentions. Trust once, let the assistant edit any of those files, call
 # the same command again, and it used to run with the secrets and NO dialog. So a
-# grant is also bound to a fingerprint of the folder the command runs in (name,
-# size and mtime of every file), and any difference revokes it.
+# grant is also bound to a fingerprint of the folder the command runs in, and any
+# difference revokes it.
+#
+# What goes into the fingerprint:
+#   * every regular file up to _HASH_FILE_LIMIT bytes: name, size and a SHA-256 of
+#     its CONTENT (name+size+mtime alone is forgeable: edit a file keeping its
+#     size, then `touch -r` the mtime back). A total byte budget bounds the scan.
+#   * larger files: size, mtime_ns and inode (hashing them is not affordable).
+#   * symlinks: the link target, never followed.
+#   * the dependency / VCS folders in PROJECT_SKIP_DIRS are skipped as a whole
+#     (huge, change by themselves) EXCEPT the entries that run code on their own:
+#     .git/config and everything under .git/hooks, and any *.pth, sitecustomize.py
+#     or usercustomize.py found (bounded walk, symlinks never followed) inside the
+#     other skipped folders. Plain .pyc files in a project __pycache__ are hashed.
+#
+# The scan fails closed: past the file-count, byte, entry or time budget the digest
+# is random, so it never matches and the command is asked about every time.
 #
 # The approved command's own output does not count as an edit: the fingerprint is
 # refreshed after a run that was actually executed (refresh_project_fingerprint),
-# never after a denied or refused one.
+# never after a denied or refused one, and only when it was unchanged right before
+# the run (see mcp_server._run_with_env_impl).
 #
-# Not covered, honestly: dependency and cache folders (they are skipped -- they are
-# huge and change by themselves), files outside the folder, and a change that keeps
-# a file's size AND mtime.
+# Not covered, honestly: the bulk of dependency folders (only the entry points above),
+# files outside the folder, and a swap made while a background run is still going.
 PROJECT_SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache",
                                ".pytest_cache", ".ruff_cache", ".tox", ".turbo", ".next", ".gradle"})
 _MAX_PROJECT_FILES = 20_000
 _PROJECT_BUDGET_SECONDS = 2.0
+_HASH_FILE_LIMIT = 1024 * 1024            # files up to this size are content-hashed
+_HASH_BYTE_BUDGET = 64 * 1024 * 1024      # total bytes hashed per scan
+_MAX_SKIPPED_ENTRIES = 200_000            # entries visited inside skipped folders
+_SKIPPED_BUDGET_SECONDS = 3.0
+_CODE_LOADING_NAMES = frozenset({"sitecustomize.py", "usercustomize.py"})
+
+
+class _Unbounded(Exception):
+    """The scan ran past one of its budgets."""
+
+
+def _file_token(path, st, budget: list) -> bytes:
+    """Identity of one directory entry: content hash for small regular files,
+    size+mtime+inode for big ones, link target for symlinks. Never follows links
+    and never opens anything but a regular file (a FIFO would block)."""
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            link = os.readlink(path)
+        except OSError:
+            link = "?"
+        return b"L" + link.encode("utf-8", "replace") + b"\0"
+    if not stat.S_ISREG(st.st_mode):
+        return f"O{st.st_mode}\0".encode()
+    if st.st_size > _HASH_FILE_LIMIT:
+        return f"B{st.st_size}\0{st.st_mtime_ns}\0{st.st_ino}\0".encode()
+    budget[0] -= st.st_size
+    if budget[0] < 0:
+        raise _Unbounded
+    h = hashlib.sha256()
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
+        try:
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                h.update(chunk)
+        finally:
+            os.close(fd)
+    except OSError:
+        return b"U\0"
+    return f"H{st.st_size}\0{h.hexdigest()}\0".encode()
+
+
+def _scandir_sorted(path):
+    with os.scandir(path) as it:
+        return sorted(it, key=lambda e: e.name)
+
+
+def _digest_tree_all(digest, root_path, rel, budget, state) -> None:
+    """Every entry under root_path (a .git/hooks folder), fully."""
+    stack = [(root_path, rel)]
+    while stack:
+        here, hrel = stack.pop()
+        try:
+            entries = _scandir_sorted(here)
+        except OSError:
+            digest.update(b"E" + hrel.encode("utf-8", "replace") + b"\0")
+            continue
+        for entry in entries:
+            state["skipped"] += 1
+            if state["skipped"] > _MAX_SKIPPED_ENTRIES:
+                raise _Unbounded
+            erel = hrel + "/" + entry.name
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                digest.update(b"d" + erel.encode("utf-8", "replace") + b"\0")
+                stack.append((entry.path, erel))
+            else:
+                digest.update(b"f" + erel.encode("utf-8", "replace") + b"\0" + _file_token(entry.path, st, budget))
+
+
+def _digest_skipped_dir(digest, path, rel, budget, state) -> None:
+    """The code-running entries of a skipped folder (see the block comment above)."""
+    if os.path.basename(path) == ".git":
+        for name in ("config", "hooks"):
+            full = os.path.join(path, name)
+            try:
+                st = os.lstat(full)
+            except OSError:
+                continue
+            erel = rel + "/" + name
+            if stat.S_ISDIR(st.st_mode):
+                digest.update(b"d" + erel.encode("utf-8", "replace") + b"\0")
+                _digest_tree_all(digest, full, erel, budget, state)
+            else:
+                digest.update(b"f" + erel.encode("utf-8", "replace") + b"\0" + _file_token(full, st, budget))
+        return
+    deadline = time.monotonic() + _SKIPPED_BUDGET_SECONDS
+    stack = [(path, rel)]
+    while stack:
+        here, hrel = stack.pop()
+        try:
+            entries = _scandir_sorted(here)
+        except OSError:
+            continue
+        for entry in entries:
+            state["skipped"] += 1
+            if state["skipped"] > _MAX_SKIPPED_ENTRIES or time.monotonic() > deadline:
+                raise _Unbounded
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            erel = hrel + "/" + entry.name
+            if stat.S_ISDIR(st.st_mode):
+                stack.append((entry.path, erel))
+            elif entry.name.endswith(".pth") or entry.name in _CODE_LOADING_NAMES:
+                digest.update(b"f" + erel.encode("utf-8", "replace") + b"\0" + _file_token(entry.path, st, budget))
 
 
 def project_fingerprint(cwd) -> str:
@@ -545,45 +673,63 @@ def project_fingerprint(cwd) -> str:
     root = Path(cwd) if cwd else Path.cwd()
     digest = hashlib.sha256()
     deadline = time.monotonic() + _PROJECT_BUDGET_SECONDS
+    budget = [_HASH_BYTE_BUDGET]
+    state = {"skipped": 0}
     count = 0
     stack = [root]
-    while stack:
-        here = stack.pop()
-        try:
-            with os.scandir(here) as it:
-                entries = sorted(it, key=lambda e: e.name)
-        except OSError:
-            digest.update(b"E" + str(here).encode("utf-8", "replace") + b"\0")
-            continue
-        for entry in entries:
+    try:
+        while stack:
+            here = stack.pop()
+            in_pycache = here.name == "__pycache__"
             try:
-                st = entry.stat(follow_symlinks=False)
+                entries = _scandir_sorted(here)
             except OSError:
+                digest.update(b"E" + str(here).encode("utf-8", "replace") + b"\0")
                 continue
-            rel = os.path.relpath(entry.path, root)
-            if stat.S_ISDIR(st.st_mode):
-                if entry.name not in PROJECT_SKIP_DIRS:
-                    digest.update(b"D" + rel.encode("utf-8", "replace") + b"\0")
-                    stack.append(Path(entry.path))
-                continue
-            count += 1
-            if count > _MAX_PROJECT_FILES or time.monotonic() > deadline:
-                return "unbounded:" + os.urandom(8).hex()
-            link = ""
-            if stat.S_ISLNK(st.st_mode):
+            for entry in entries:
                 try:
-                    link = os.readlink(entry.path)
+                    st = entry.stat(follow_symlinks=False)
                 except OSError:
-                    link = "?"
-            digest.update(f"F{rel}\0{st.st_size}\0{st.st_mtime_ns}\0{link}\0".encode("utf-8", "replace"))
+                    continue
+                rel = os.path.relpath(entry.path, root)
+                if stat.S_ISDIR(st.st_mode):
+                    if entry.name in PROJECT_SKIP_DIRS:
+                        if entry.name == "__pycache__":
+                            stack.append(Path(entry.path))      # only its .pyc files count
+                        else:
+                            digest.update(b"S" + rel.encode("utf-8", "replace") + b"\0")
+                            _digest_skipped_dir(digest, entry.path, rel, budget, state)
+                    else:
+                        digest.update(b"D" + rel.encode("utf-8", "replace") + b"\0")
+                        stack.append(Path(entry.path))
+                    continue
+                if in_pycache and not entry.name.endswith(".pyc"):
+                    continue
+                count += 1
+                if count > _MAX_PROJECT_FILES or time.monotonic() > deadline:
+                    return "unbounded:" + os.urandom(8).hex()
+                digest.update(b"F" + rel.encode("utf-8", "replace") + b"\0" + _file_token(entry.path, st, budget))
+    except _Unbounded:
+        return "unbounded:" + os.urandom(8).hex()
     return digest.hexdigest()
 
 
-def refresh_project_fingerprint(signature, cwd) -> None:
-    """Re-baseline a live grant after the approved command itself ran."""
+def refresh_project_fingerprint(signature, cwd, before: Optional[str] = None) -> None:
+    """Re-baseline a live grant after the approved command itself ran.
+
+    `before` is the fingerprint taken just BEFORE the run. The grant is only
+    re-baselined when it equals the stored one: if the folder already differed
+    when the run started, whatever the assistant changed in between must not be
+    adopted as the new trusted state by the run that merely followed. Trade-off:
+    a command that edits its own folder (build output, caches) re-baselines
+    itself only while it started from the approved state; a first run that writes
+    files costs one extra prompt rather than a silent trust of those files."""
     entry = _trusted.get(signature)
-    if entry is not None and entry.get("tree") is not None:
-        entry["tree"] = project_fingerprint(cwd)
+    if entry is None or entry.get("tree") is None:
+        return
+    if before is not None and before != entry["tree"]:
+        return
+    entry["tree"] = project_fingerprint(cwd)
 
 
 def trust(signature, file_hashes: dict, tree: Optional[str] = None) -> None:

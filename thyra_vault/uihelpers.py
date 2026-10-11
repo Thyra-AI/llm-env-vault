@@ -71,6 +71,68 @@ def _collapse_whitespace(text) -> str:
     return re.sub(r"\s+", " ", _strip_hidden(str(text))).strip()
 
 
+# Longest command text the consent dialog will show. A longer one is REFUSED before
+# any dialog: eliding or truncating the middle would hide part of what the human is
+# approving (padding both ends with innocuous text buries the interesting part).
+MAX_COMMAND_DISPLAY_CHARS = 4000
+
+
+def command_refusal_reason(command) -> Optional[str]:
+    """Why this argv cannot be shown faithfully in a consent dialog (None if it can).
+
+    Refused outright, because escaping them would still leave the human guessing:
+    any Unicode format character (category Cf: bidi overrides, zero-width joiners),
+    any control character other than newline and tab, and a command whose displayed
+    form would not fit in MAX_COMMAND_DISPLAY_CHARS."""
+    for index, arg in enumerate(command):
+        for ch in arg:
+            cat = unicodedata.category(ch)
+            if cat == "Cf" or (cat == "Cc" and ch not in "\n\t"):
+                return (f"argument {index} of the command contains an invisible or control "
+                        f"character (U+{ord(ch):04X}); refused, because the approval dialog "
+                        f"could not show it faithfully.")
+    if sum(len(line) + 1 for line in command_display_lines(command)) > MAX_COMMAND_DISPLAY_CHARS:
+        return (f"the command is too long to display in full (over {MAX_COMMAND_DISPLAY_CHARS} "
+                f"characters); refused rather than truncated. Put the long part in a file.")
+    return None
+
+
+def escape_argument(arg: str) -> str:
+    """One argument with everything invisible or ambiguous made visible: backslash,
+    quote, newline, tab and every control / format / separator / unassigned code point
+    become escapes, and the second and later spaces of a run become \\x20 (a browser
+    would otherwise collapse them)."""
+    out = []
+    prev_space = False
+    for ch in arg:
+        if ch == " ":
+            out.append("\\x20" if prev_space else " ")
+            prev_space = True
+            continue
+        prev_space = False
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
+        elif unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp", "Zs"):
+            out.append(f"\\u{ord(ch):04X}" if ord(ch) <= 0xFFFF else f"\\U{ord(ch):08X}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def command_display_lines(command) -> list:
+    """One line per argument, quoted and escaped, in argv order -- what the consent
+    dialog shows instead of a re-joined, whitespace-collapsed string."""
+    return [f'{i}: "{escape_argument(a)}"' for i, a in enumerate(command)]
+
+
 # Minimum acceptable master-password length (creation and change only --
 # existing vaults are never checked retroactively).
 #

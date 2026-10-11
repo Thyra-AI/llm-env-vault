@@ -22,6 +22,14 @@ from ..uihelpers import _collapse_whitespace, _safe_display
 _RAW_CAP = 20_000
 
 
+def _capped(value: str) -> str:
+    """Cap absurd input, but never silently: the cut is announced in the text itself
+    (the human must not approve something whose tail they were never shown)."""
+    if len(value) <= _RAW_CAP:
+        return value
+    return f"{value[:_RAW_CAP]} [... {len(value) - _RAW_CAP} more characters NOT shown]"
+
+
 def msg(key: str, /, **params) -> dict:
     """An i18n message: a translation key plus interpolation parameters."""
     out: dict = {"key": key}
@@ -49,22 +57,26 @@ def notice(tone: str, key: str, /, **params) -> dict:
 
 def raw_notice(tone: str, value) -> dict:
     """A notice whose text is not ours (e.g. trust_note, a store message)."""
-    return {"type": "notice", "tone": tone, "raw": _collapse_whitespace(value)[:_RAW_CAP]}
+    return {"type": "notice", "tone": tone, "raw": _capped(_collapse_whitespace(value))}
 
 
 def code(value, *, label: Optional[str] = None, **label_params) -> dict:
     """A read-only monospace box. ``value`` is untrusted text, collapsed to a
     single line (so it cannot fake extra lines), never truncated."""
-    block: dict = {"type": "code", "text": _collapse_whitespace(value)[:_RAW_CAP]}
+    block: dict = {"type": "code", "text": _capped(_collapse_whitespace(value))}
     if label:
         block["label"] = msg(label, **label_params)
     return block
 
 
-def code_lines(lines, *, label: Optional[str] = None, **label_params) -> dict:
+def code_lines(lines, *, label: Optional[str] = None, verbatim: bool = False, **label_params) -> dict:
     """A monospace box with one entry per line. Each line is sanitised on its
-    own, so an entry cannot smuggle a newline and impersonate a second one."""
-    block: dict = {"type": "code", "lines": [_collapse_whitespace(x)[:_RAW_CAP] for x in lines]}
+    own, so an entry cannot smuggle a newline and impersonate a second one.
+    ``verbatim`` is for lines the caller already escaped (uihelpers.escape_argument):
+    whitespace runs are then kept exactly, since collapsing them would make the box
+    differ from what runs."""
+    block: dict = {"type": "code", "lines": [_capped(str(x) if verbatim else _collapse_whitespace(x))
+                                             for x in lines]}
     if label:
         block["label"] = msg(label, **label_params)
     return block
@@ -75,7 +87,7 @@ def items(rows, *, label: Optional[str] = None, **label_params) -> dict:
     with an overwrite flag). Scrolls instead of eliding when long."""
     out = []
     for row in rows:
-        entry = {"text": _collapse_whitespace(row["text"])[:_RAW_CAP]}
+        entry = {"text": _capped(_collapse_whitespace(row["text"]))}
         if row.get("tag"):
             entry["tag"] = row["tag"]
         out.append(entry)
@@ -96,8 +108,8 @@ def copy_button(value: str, clear_seconds: int) -> dict:
 
 def item_header(name: str, item_type: str, folder: str = "") -> dict:
     """Title row of an item: its name, its type (for the icon) and its folder."""
-    return {"type": "itemHeader", "name": _collapse_whitespace(name)[:_RAW_CAP], "itemType": item_type,
-            "folder": _collapse_whitespace(folder)[:_RAW_CAP]}
+    return {"type": "itemHeader", "name": _capped(_collapse_whitespace(name)), "itemType": item_type,
+            "folder": _capped(_collapse_whitespace(folder))}
 
 
 def field_rows(rows, label: Optional[str] = None) -> dict:

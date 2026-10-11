@@ -738,7 +738,7 @@ def confirm_abandon_files(outcome, outstanding, registry_names):
 # --- run a command --------------------------------------------------------
 
 def unlock_for_run(outcome, command_str, materialize_path, only_vars, trust_note, files,
-                   max_reads, cwd=None, executable=None):
+                   max_reads, cwd=None, executable=None, command_lines=None, background=False):
     if only_vars is not None:
         var_names = sorted(only_vars)
     else:
@@ -753,7 +753,14 @@ def unlock_for_run(outcome, command_str, materialize_path, only_vars, trust_note
     blocks.append(text("unlockRun.expose", count=len(var_names)))
     if var_names:
         blocks.append(items([{"text": n} for n in var_names]))
-    blocks += [text("unlockRun.output", muted=True), code(command_str, label="fields.command")]
+    # The command is shown one escaped argument per line (uihelpers.command_display_lines),
+    # verbatim: a re-joined, whitespace-collapsed string can differ from what runs.
+    blocks.append(text("unlockRun.output", muted=True))
+    blocks.append(code_lines(command_lines, label="fields.command", verbatim=True)
+                  if command_lines else code(command_str, label="fields.command"))
+    if background:
+        # A background run logs to a file the assistant can read while it runs.
+        blocks.append(notice("danger", "unlockRun.backgroundUnredacted"))
     # Where it runs and which program that really is: the command line alone does not
     # say, and relative programs, Makefiles and package.json resolve against the folder.
     if cwd:
