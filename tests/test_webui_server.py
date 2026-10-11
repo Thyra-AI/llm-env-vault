@@ -473,3 +473,15 @@ def test_binds_loopback_only(assets):
             socket.create_connection((addr, h.port), timeout=1).close()
     h.act("cancel")
     h.finish()
+
+
+def test_the_throwaway_browser_profile_starts_without_password_or_analytics_prompts(tmp_path):
+    """A fresh profile made Brave offer to save the master password and show its analytics notice."""
+    import json
+    from thyra_vault.webui import server
+    server._seed_profile(str(tmp_path))
+    prefs = json.loads((tmp_path / "Default" / "Preferences").read_text(encoding="utf-8"))
+    assert prefs["credentials_enable_service"] is False
+    assert prefs["profile"]["password_manager_enabled"] is False
+    assert prefs["autofill"]["profile_enabled"] is False
+    assert prefs["brave"]["p3a"]["notice_acknowledged"] is True

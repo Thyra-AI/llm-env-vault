@@ -386,6 +386,7 @@ def _make_handler(session: Session, port: int, assets: Path, limits: Limits):
 
 WINDOW_SIZE = (560, 780)
 _APP_FLAGS = ("--no-first-run", "--no-default-browser-check", "--disable-extensions",
+              "--disable-save-password-bubble", "--disable-features=PasswordManagerOnboarding",
               "--disable-sync", "--disable-background-networking", "--disable-component-update")
 _LINUX_NAMES = ("brave-browser", "brave", "google-chrome", "google-chrome-stable", "chromium",
                 "chromium-browser", "microsoft-edge", "microsoft-edge-stable")
@@ -437,6 +438,27 @@ def app_command(browser: str, url: str, profile: str, size: Optional[tuple] = No
             *_APP_FLAGS]
 
 
+# Preferences written into the throwaway profile before the browser starts, so a fresh profile does not
+# nag: no "save this password?" bubble for the master password, no autofill, and no analytics notice
+# (Brave shows one on the first run of every new profile).
+_PROFILE_PREFS = {
+    "credentials_enable_service": False,
+    "profile": {"password_manager_enabled": False},
+    "autofill": {"profile_enabled": False, "credit_card_enabled": False},
+    "brave": {"p3a": {"enabled": False, "notice_acknowledged": True},
+              "stats": {"reporting_enabled": False}},
+}
+
+
+def _seed_profile(profile: str) -> None:
+    try:
+        default = Path(profile) / "Default"
+        default.mkdir(mode=0o700, exist_ok=True)
+        (default / "Preferences").write_text(json.dumps(_PROFILE_PREFS), encoding="utf-8")
+    except OSError:
+        pass  # only cosmetic: the window still works, it just may show the browser's own prompts
+
+
 class AppWindow:
     """A browser window this server launched, and therefore can watch and close."""
 
@@ -481,6 +503,7 @@ def _launch_app_window(url: str, size_key: Optional[str] = None) -> Optional[App
     if not browser:
         return None
     profile = tempfile.mkdtemp(prefix="thyra-vault-window-")  # 0700, ours alone
+    _seed_profile(profile)
     try:
         # Its own process group / session, so the whole browser can be ended as one.
         group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
