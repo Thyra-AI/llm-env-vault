@@ -8,6 +8,8 @@ Your AI agent sees `DATABASE_URL="value 3"`. Your app, when you deliberately run
 
 > **Naming.** The product is called **Thyra Vault** (it was `llm-env-vault`). The plugin id is `thyra-vault`, its commands are `/thyra-vault:…`, the Python package is `thyra_vault` and the environment variables are `THYRA_VAULT_*`. **Existing installs keep working:** the old `LLM_ENV_VAULT_*` variables are still read, and on first start the plugin copies a vault left under the old plugin id into its new data directory (the original is never touched). The GitHub repository keeps its current address until it is renamed there. The on-disk format identifiers (`llm-env-vault` inside the vault and encrypted-file headers, the `# Managed by llm-env-vault` marker in migrated `.env` files) are deliberately **unchanged**: they take part in key derivation and in recognising files you already migrated, so renaming them would lock you out.
 
+Background material (threat model, research, archived plans) is indexed in [docs/](docs/README.md).
+
 ---
 
 ## Why this exists
@@ -400,7 +402,7 @@ reported as `legacy_swap_live` until it exits. With no journal at all, re-run
 ### Which consumers need which mode
 
 Every program gets a value out of a `.env` in one of six ways. The full per-tool survey, with
-sources, is [docs/env-consumption-research.md](docs/env-consumption-research.md); the executable
+sources, is [docs/research/env-consumption-research.md](docs/research/env-consumption-research.md); the executable
 version is `tests/test_consumption_matrix.py`, which runs each mechanism through the vault with
 the real `python-dotenv` and `pydantic-settings` (both ship with `mcp[cli]`), Node's built-in
 `--env-file`, and bash.
@@ -906,74 +908,33 @@ change. The dialog says which. See Trusted commands above.
 
 ## Tests
 
-The suite is hand-rolled test scripts (no pytest required, though they also run under pytest),
-plus additional pytest-only files:
+Run everything from the repo root with `pytest`. Every test isolates the vault (temporary data directory, no real window or
+browser), so running the suite never touches your own vault. `tests/conftest.py` lifts the dialog rate limit
+(`THYRA_VAULT_DIALOG_LIMIT=0`) that the real server applies.
 
-- `tests/test_trust.py` — trusted-commands / drift-detection feature, vault storage and padding
-  behaviour, and plugin-launcher venv provisioning logic. Includes two true end-to-end tests that
-  spawn a real child process and assert secret injection on both the fresh-unlock and auto-allowed
-  paths. Fully isolates the real vault (temp dir, no real window).
-- `tests/test_install_migrate_robustness.py` — OSError robustness (UNC paths, nonexistent paths,
-  physical drive paths all return clean error dicts), `sync_target_file`'s mass-removal guard, and
-  assertion that credential-shaped text is redacted rather than leaked in parse warnings.
-- `tests/test_webui_flows.py`, `tests/test_webui_server.py`, `tests/test_mcp_over_browser.py` — the browser dialogs: every dialog's logic driven as a generator (and asserted never to put a password or secret in a screen), the loopback server's security surface over real HTTP, backend selection, and a real MCP tool run end to end through a simulated browser. Pytest-only.
-- `tests/test_appflow.py`, `tests/test_clipboard.py`, `tests/test_datadir.py` — the Thyra Vault app (lock/unlock, copy never puts a value in a screen, add / edit / delete, server-enforced auto-lock, validated preferences, change password in place), the server-side clipboard (stdin only, wipe only if unchanged) and where the vault lives. Pytest-only.
-- `tests/test_trust_hardening.py`, `tests/test_store_hardening.py`, `tests/test_uihelpers.py`,
-  `tests/test_redaction.py` — 1.3.0 security-hardening coverage: TTL enforcement, output
-  redaction, dialog sanitizers, and store scoping.
-- `tests/test_crypto_v2.py`, `tests/test_vault_format.py`, `tests/test_store_v2.py`,
-  `tests/test_uihelpers_policy.py`, `tests/test_manage_vault.py`, `tests/test_integration_v2.py` — 1.4.0
-  coverage: v2 format round-trips, AES-256-GCM authentication, scrypt KDF, envelope encryption,
-  DEK rotation, recovery key setup and use, manage_vault / recover_vault flows, and end-to-end
-  tests across both format versions.
-- `tests/test_fmk.py`, `tests/test_file_vault_crypto.py`, `tests/test_file_store.py`,
-  `tests/test_file_tools.py`, `tests/test_run_with_files.py`, `tests/test_fmk_rotation.py` — 1.5.0
-  whole-file encryption: the `LEVFILE` envelope and its tamper/DoS/transplant resistance, the file
-  master key surviving every credential operation, the encrypt ordering and its rollback, every
-  refusal rule, the registry, `run_with_env(files=)` cleanup, and key rotation and retirement.
-  `tests/fixtures/file_envelope/golden.levault.b64` (base64 text of the frozen envelope) is a byte-frozen format tripwire: every other test
-  round-trips through the current code and would stay green if the on-disk format changed, which
-  would silently make real users' committed files unopenable.
-- `tests/test_single_view.py` — 1.7.0 `max_reads`: every test runs a real child in a real Job
-  against a real oplock. The headline: the child reads the real value, sleeps, reads again while
-  still running and gets the placeholder. Also: `max_reads=2` serves both reads; `stat` alone is
-  not a read; a holder outside the Job is reported as foreign and not counted while the
-  command's own read still counts; a materialize file is emptied after its first read; every
-  pre-dialog refusal; the self-test refuses when another process holds the file; no thread or
-  handle survives the run.
-- `tests/test_hardening_161.py` — the post-1.6.0 review, one test per finding, still current
-  for the parts 2.0 kept. The git probe cannot run a repo's `core.fsmonitor`, resolves git from
-  `PATH` only, refuses a `gitdir:` file pointing at a share; journal entries off the registry are
-  quarantined and a UNC path is never stat-ed; the restore writes in place against a process
-  holding the file; an unreadable index yields the `value ?` marker that resync numbers; **a real
-  `TerminateProcess` of a pre-2.0 server mid-swap is recovered by the next call in another
-  process** (and a live one is left strictly alone); `--force`; `vault_status` sees real values
-  without a journal.
-- `tests/test_legacy_swap_recovery.py` — cleaning up after 1.6–1.7, built entirely from golden
-  bytes captured from the real 1.7.1 writers before they were deleted (`tests/fixtures/
-  legacy_swap/`). A dead owner is restored, a **live** one is left alone and reported, a failed
-  restore is retried regardless of pid, a recycled pid is caught by process start time, and the
-  degraded paths (corrupt journal, unreadable index, missing target) all fail safe. Nothing in
-  it calls a swap writer — that is what keeps it alive now they are gone.
-- `tests/test_typed_placeholders.py` — the 2.0 replacement: the shape grammar and the proof that
-  a placeholder never carries content, exact index-aware detection, the shape tombstone that
-  keeps resync's data-loss guard counting, monotonic numbering, and the three guards a mistake
-  would break — chiefly the one that stops `false` being vaulted as `SMTP_USE_SSL`'s real value.
-- `tests/test_consumption_matrix.py` — the executable form of
-  `docs/env-consumption-research.md`: one real child process per consumption mechanism. Its
-  centrepiece is mechanism F run with **no vault in the room at all** — plain `subprocess.run`
-  against a placeholder-only `.env` and a real `pydantic-settings` class. The control (legacy
-  placeholders) fails with "should be a valid integer"; the typed file loads.
+| Area | Files |
+|---|---|
+| Vault format and cryptography | `test_crypto_v2`, `test_vault_format`, `test_store_v2`, `test_fmk`, `test_fmk_rotation`, `test_unlock_throttle`, `test_manage_vault`, `test_integration_v2` |
+| Store hardening | `test_store_hardening`, `test_store_hardening_fixes`, `test_security_invariants`, `test_hardening_161`, `test_security_review_fixes` |
+| Whole-file encryption | `test_file_vault_crypto`, `test_file_store`, `test_file_tools`, `test_file_safety_regressions`, `test_run_with_files` |
+| Running commands: trust, consent, redaction | `test_trust`, `test_trust_hardening`, `test_consent_hardening`, `test_redaction`, `test_uihelpers`, `test_uihelpers_policy`, `test_single_view` |
+| Placeholders and `.env` consumption | `test_typed_placeholders`, `test_target_styles`, `test_consumption_matrix`, `test_install_migrate_robustness` |
+| Legacy (pre-2.0) cleanup | `test_legacy_swap_recovery` |
+| Browser dialogs and local server | `test_webui_flows`, `test_webui_server`, `test_server_hardening`, `test_mcp_over_browser` |
+| The Thyra Vault app | `test_appflow`, `test_appflow_items`, `test_app_hardening`, `test_items`, `test_clipboard`, `test_datadir` |
+| Plugin launcher | `test_launcher_app`, `test_launcher_install` |
 
-All tests fully isolate the real vault — running the suite never touches your actual vault. Run
-from the project venv:
+Things worth knowing:
 
-```bash
-python tests/test_trust.py
-python tests/test_install_migrate_robustness.py
-```
-
-Or all at once with `pytest` from the repo root.
+- `tests/fixtures/file_envelope/golden.levault.b64` (base64 of a frozen envelope) is a byte-frozen format tripwire: every other
+  test round-trips through the current code and would stay green if the on-disk format changed, which would silently make real
+  users' committed files unopenable.
+- `tests/fixtures/legacy_swap/` holds golden bytes captured from the real 1.7.1 writers before they were deleted;
+  `test_legacy_swap_recovery` is built only from them.
+- `test_consumption_matrix` is the executable form of `docs/research/env-consumption-research.md`: one real child process per
+  consumption mechanism, including mechanism F run with no vault involved at all.
+- `test_trust` also spawns real child processes (secret injection on the fresh-unlock and auto-allowed paths). Eleven tests are
+  Windows-oriented and fail on Linux (hard links, `cmd`, venv layout); CI runs the platform-independent subset on Linux and macOS.
 
 ---
 

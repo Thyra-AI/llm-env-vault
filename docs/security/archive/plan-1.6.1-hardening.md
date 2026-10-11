@@ -7,7 +7,7 @@
 
 Status: WP1–WP6 SHIPPED in 1.6.1; WP8 (single-view) SHIPPED in 1.7.0, Windows-only, with pipe
 mode and background+swap deferred per the pre-implementation review. Deviations from
-the text below are recorded in CHANGELOG 1.6.1. Source: the hostile second read of `docs/security-posture-1.6.0.md`
+the text below are recorded in CHANGELOG 1.6.1. Source: the hostile second read of `docs/security/archive/security-posture-1.6.0.md`
 (27 findings; 4 disputed and verified wrong against the code, 23 accepted). This plan turns the
 23 into seven work packages, ordered by what each one takes away from an agent versus what it
 merely tidies. Every item names the function it touches, the test that proves it, and what

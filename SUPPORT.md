@@ -18,7 +18,7 @@ fine; values are not.
 Please do not publish exploit details in a public issue. Open an issue at
 <https://github.com/Thyra-AI/llm-env-vault/issues> titled "Security: <one-line summary>" with no
 reproduction details, and the maintainer will arrange a private channel to receive them. The
-README's Security notes and `docs/security-posture-2.0.0.md` describe the threat model and known
+README's Security notes and `docs/security/security-posture-2.0.0.md` describe the threat model and known
 limitations, so you can tell a known limit from a new finding.
 
 ## Platform support

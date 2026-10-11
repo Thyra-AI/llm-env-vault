@@ -6,7 +6,7 @@
 > command runs, and no software under the same OS account prevents it. 2.0.0 has one
 > standing exception to the invariant (`materialize`, a fresh path, never the project's own
 > file) rather than four. Kept as the record of what was built and why it was not enough;
-> read docs/security-posture-2.0.0.md for what is true now.
+> read docs/security/security-posture-2.0.0.md for what is true now.
 
 This is a maintainer-facing map of the system as it stands after the in-place swap landed
 (1.6.0, `3dabd7e`) and its hardening (1.6.1). It is organised around one question: **where can
@@ -286,7 +286,7 @@ that path *is* tested by simulating a dead owner).
 ## 9. 1.7.0 addendum — single-view (`max_reads`)
 
 Shipped in `ed7de9c`, hardened in `6029601` and `73f83eb` (the push-time reviews of each).
-Plan and mechanics: `docs/plan-1.6.1-hardening.md` WP8, D7/D8. This section is written to the
+Plan and mechanics: `docs/security/archive/plan-1.6.1-hardening.md` WP8, D7/D8. This section is written to the
 same question as the rest of the document: where can a real value be, who reaches it, what puts
 it back — and now also *when*.
 

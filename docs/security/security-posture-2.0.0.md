@@ -73,7 +73,7 @@ and restored the placeholders afterwards. Four reasons it went:
 
 ### What replaces it
 
-| Mechanism (see `env-consumption-research.md`) | 1.7.1 | 2.0.0 |
+| Mechanism (see `../research/env-consumption-research.md`) | 1.7.1 | 2.0.0 |
 |---|---|---|
 | B-when-scrubbed — a harness builds the child env from an allowlist, so the file is the only source | `swap` | **typed placeholders** — the file parses; nothing on disk |
 | F — a settings library validates types at load | unfixed (deferred) | **typed placeholders** |

@@ -74,7 +74,7 @@ pinning what a user installs.
   not be seen or driven by an AI agent; a page on a loopback port can be reached by anything on the account that can open a
   socket. The defences (single-use code kept off the command line, bearer token, Host/Origin/Fetch-Metadata checks, unlock
   throttle, short-lived listener) make that hard and visible, not impossible, and an attacker who wins a session still lacks the
-  master password. See "The dialogs" in the README and `docs/security-posture-2.0.0.md`. Python no longer needs `tkinter`.
+  master password. See "The dialogs" in the README and `docs/security/security-posture-2.0.0.md`. Python no longer needs `tkinter`.
 - The Tkinter-only tests (`tests/_tk_checks.py`, the dialog-construction sweep, the static checks on `gui.py`) and the
   backend-selection tests; the pure-helper tests moved to `tests/test_uihelpers.py` / `test_uihelpers_policy.py`, and the
   end-to-end MCP-over-browser tests to `tests/test_mcp_over_browser.py`. Security invariants that were about Tk code now
@@ -200,7 +200,7 @@ Fixes from the Claude plugin directory validator. No change to vault behavior.
 
 ### Fixed
 
-- **`docs/env-consumption-research.md` named a credential-style variable next to remote URLs.**
+- **`docs/research/env-consumption-research.md` named a credential-style variable next to remote URLs.**
   The mechanism-A example used `DATABASE_URL`, which the validator read as the plugin consuming a
   credential from the user's machine. The example is now `EXAMPLE_SETTING`; the point it makes
   (a child process reads whatever the parent environment holds) is unchanged.
@@ -445,8 +445,8 @@ typed settings loader until you run it once.
   by the suite. And it was structurally unreachable for its most common trigger, a pre-push hook
   whose tests read `.env`, because a swap is refused for `git`.
 
-  See `docs/security-posture-2.0.0.md` §3, and the status banner on
-  `docs/env-consumption-research.md`.
+  See `docs/security/security-posture-2.0.0.md` §3, and the status banner on
+  `docs/research/env-consumption-research.md`.
 
 - **Not supported any more:** a loader that lets the file win (`load_dotenv(override=True)`,
   `godotenv.Overload`, `dotenvx --overload`, tox `set_env = file|.env`, `direnv`), a shell that
@@ -473,7 +473,7 @@ typed settings loader until you run it once.
   | anything else | `"value N"` — an opaque string has no shape to preserve |
 
   This closes mechanism F and mechanism B-when-scrubbed from
-  `docs/env-consumption-research.md` — the latter being the case that kept failing: a test
+  `docs/research/env-consumption-research.md` — the latter being the case that kept failing: a test
   harness that builds its child's environment from an allowlist, so nothing injected survives
   and the file is the only source.
 
@@ -495,7 +495,7 @@ typed settings loader until you run it once.
   where `"value 17"` announced itself. Whole-line only: `docker run --env-file` treats
   everything after `=` as the value.
 
-- **`docs/security-posture-2.0.0.md`** — the invariant, its two remaining exceptions, the
+- **`docs/security/security-posture-2.0.0.md`** — the invariant, its two remaining exceptions, the
   ceiling of the threat model, and what a reviewer should check first.
 
 ### Changed
@@ -610,7 +610,7 @@ since `claude plugin update` compares versions rather than commits.
     the headline test reads the real value, sleeps, reads again while still running, and gets
     the placeholder.
 
-  Not in this release, deferred with reasons in `docs/plan-1.6.1-hardening.md` §WP8: Linux
+  Not in this release, deferred with reasons in `docs/security/archive/plan-1.6.1-hardening.md` §WP8: Linux
   (fanotify `FAN_OPEN`, which names the opener natively), a named-pipe `materialize` mode
   (a dotenv loader's `isfile()` check would consume a single-instance pipe), and
   `background=True` + `swap` + `max_reads` (needs a non-killing Job and a status query).
@@ -641,10 +641,10 @@ since `claude plugin update` compares versions rather than commits.
 
 ### Security
 
-A hostile review of the 1.6.0 posture document (`docs/security-posture-1.6.0.md`) found two
+A hostile review of the 1.6.0 posture document (`docs/security/archive/security-posture-1.6.0.md`) found two
 things the swap feature had handed an agent that it did not have before, and a set of ways the
 "real values never stay on disk unnoticed" promise could be broken. All are closed here; the
-plan and its reasoning are in `docs/plan-1.6.1-hardening.md`.
+plan and its reasoning are in `docs/security/archive/plan-1.6.1-hardening.md`.
 
 - **The git probe can no longer execute repo-controlled code.** `run_with_env(swap=...)`
   asks git whether the file is tracked *before* the dialog opens. That ran a bare `git` --
@@ -756,7 +756,7 @@ plan and its reasoning are in `docs/plan-1.6.1-hardening.md`.
   swapped — computed from the registry, the index and the file's current placeholder lines —
   are part of the signature, and any edit to the file revokes the grant.
 
-- **`docs/env-consumption-research.md`** — the survey behind all of this: six consumption
+- **`docs/research/env-consumption-research.md`** — the survey behind all of this: six consumption
   mechanisms, per-tool precedence and parsing rules with primary-source citations, and the
   quoting divergence. **`tests/test_consumption_matrix.py`** is its executable form: one real
   child process per mechanism, using the `python-dotenv` and `pydantic-settings` that ship with
