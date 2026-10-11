@@ -104,6 +104,7 @@ def make_private_dir(path: Path) -> None:
 
 LEGACY_DIR_PREFIX = "llm-env-vault-"
 ADOPTED_NOTE = "migrated-from.txt"
+AMBIGUOUS_NOTE = "migrate-ambiguous.txt"
 # Only these are copied: the vault and the bookkeeping that belongs with it.
 ADOPT_ALLOWLIST = ("vault_index.json", "targets.json", "files.json", "placeholder_shapes.json",
                    "target_styles.json", "vault.format.txt", "vault.salt", "vault.enc")
@@ -124,13 +125,18 @@ def _is_plain_dir(path: Path) -> bool:
 
 
 def find_legacy_vault(plugin_data: Path) -> Optional[Path]:
-    """The newest ``<legacy plugin data dir>/vault`` that holds a vault.enc, or None."""
+    """The one ``<legacy plugin data dir>/vault`` that holds a vault.enc, or None.
+
+    With several candidates there is no safe way to tell the real one from a
+    decoy someone planted next to it, so none is adopted: a note is left in
+    ``plugin_data`` (best-effort) and the user can copy the right one by hand.
+    """
     parent = plugin_data.parent
     try:
         siblings = sorted(parent.iterdir())
     except OSError:
         return None
-    best, best_mtime = None, -1.0
+    found = []
     for d in siblings:
         if not d.name.startswith(LEGACY_DIR_PREFIX) or d.name == plugin_data.name:
             continue
@@ -144,9 +150,17 @@ def find_legacy_vault(plugin_data: Path) -> Optional[Path]:
                 continue
         except OSError:
             continue
-        if st.st_mtime > best_mtime:
-            best, best_mtime = vault, st.st_mtime
-    return best
+        found.append(vault)
+    if len(found) > 1:
+        try:
+            plugin_data.mkdir(parents=True, exist_ok=True)
+            (plugin_data / AMBIGUOUS_NOTE).write_text(
+                "More than one old vault was found, so none was copied:\n"
+                + "".join(f"  {v}\n" for v in found), encoding="utf-8")
+        except OSError:
+            pass
+        return None
+    return found[0] if found else None
 
 
 def _copy_nofollow(src: Path, dst: Path) -> None:
@@ -157,15 +171,31 @@ def _copy_nofollow(src: Path, dst: Path) -> None:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or not _mine(st) or st.st_size > _MAX_ADOPT_BYTES:
             raise OSError(f"{src.name}: not a plain file of ours")
-        with os.fdopen(fd, "rb", closefd=False) as fin, open(dst, "xb") as fout:
+        out_fd = os.open(str(dst), os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | getattr(os, "O_BINARY", 0), 0o600)
+        with os.fdopen(fd, "rb", closefd=False) as fin, os.fdopen(out_fd, "wb") as fout:
             while True:
                 chunk = fin.read(1 << 20)
                 if not chunk:
                     break
                 fout.write(chunk)
-        os.chmod(dst, 0o600)
     finally:
         os.close(fd)
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """True when ``b`` is a plain file whose bytes equal ``a``'s."""
+    try:
+        if b.is_symlink() or not b.is_file() or b.stat().st_size != a.stat().st_size:
+            return False
+        return _read_all(a) == _read_all(b)
+    except OSError:
+        return False
+
+
+def _read_all(path: Path) -> bytes:
+    with open(path, "rb") as f:
+        return f.read(_MAX_ADOPT_BYTES + 1)
 
 
 def adopt_legacy_vault(root: Path, plugin_data: Optional[str]) -> Optional[Path]:
@@ -206,9 +236,15 @@ def _adopt_legacy_vault(root: Path, plugin_data: Path) -> Optional[Path]:
         for name in names:
             _copy_nofollow(source / name, stage / name)
         for name in names:
-            if (root / name).exists() and name not in _ADOPT_LAST:
+            dest = root / name
+            if not dest.exists() and not dest.is_symlink():
+                continue
+            if name not in _ADOPT_LAST:
                 continue  # never overwrite what is already here
-            if (root / name).exists():
+            # A crash after vault.salt landed but before vault.enc must not
+            # wedge adoption: a leftover from our own earlier copy is
+            # byte-identical to the source; anything else is not ours.
+            if not _same_file(stage / name, dest):
                 raise OSError(f"{name} already exists")
         for name in names:  # vault.enc last: until it lands, a retry starts over
             if not (root / name).exists():

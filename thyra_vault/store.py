@@ -531,16 +531,54 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o644) -> None:
     _atomic_write_bytes(path, text.encode("utf-8"), mode=mode)
 
 
+_MAX_VAULT_BYTES = 64 * 1024 * 1024
+
+
+def _read_vault_file(path: Path, limit: Optional[int] = None) -> bytes:
+    """Read a vault-side file without trusting what is sitting at the path.
+
+    This project's threat model grants filesystem write access, so vault.enc
+    can be a FIFO (open/read blocks forever), a symlink to /dev/zero (read
+    never ends) or simply enormous. Open without following links and without
+    blocking, require a regular file, and cap the size. ``limit`` reads only
+    that many leading bytes (vault_exists needs just the magic).
+    """
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    fd = os.open(str(path), flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"{path.name} is not a regular file")
+        if limit is None and st.st_size > _MAX_VAULT_BYTES:
+            raise OSError(f"{path.name} is larger than {_MAX_VAULT_BYTES} bytes")
+        want = limit if limit is not None else _MAX_VAULT_BYTES + 1
+        chunks, got = [], 0
+        while got < want:
+            chunk = os.read(fd, min(1 << 20, want - got))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+        if limit is None and got > _MAX_VAULT_BYTES:
+            raise OSError(f"{path.name} is larger than {_MAX_VAULT_BYTES} bytes")
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _read_secrets_file() -> bytes:
+    return _read_vault_file(SECRETS_FILE)
+
+
 def vault_exists() -> bool:
     """Return True if a usable vault exists on disk.
 
     v2 vault: SECRETS_FILE exists and starts with the v2 magic bytes.
     v1 vault: SECRETS_FILE exists AND SALT_FILE exists (both required for decryption).
     """
-    if not SECRETS_FILE.exists():
-        return False
     try:
-        data = SECRETS_FILE.read_bytes()
+        data = _read_vault_file(SECRETS_FILE, limit=len(crypto.VAULT_MAGIC))
     except OSError:
         return False
     if crypto.is_v2(data):
@@ -762,6 +800,28 @@ def _targets_lock():
         yield
 
 
+def _sweep_stale_backup() -> None:
+    """Remove a vault.enc.bak left by a credential change that died midway.
+
+    It holds the old password slot and old DEK, which undoes key rotation.
+    Runs under the vault lock, so no live credential change owns it. Removed
+    ONLY when vault.enc is present and structurally sound: if vault.enc is
+    missing or damaged the .bak may be the only good copy, so it stays and the
+    existing recovery behaviour applies. Best-effort; never raises.
+    """
+    try:
+        if not BAK_FILE.is_symlink() and not BAK_FILE.exists():
+            return
+        data = _read_secrets_file()
+        if crypto.is_v2(data):
+            crypto.parse_envelope(data)  # raises VaultCorrupted on a bad header
+        elif not data.startswith(b"gAAAAA"):  # v1 Fernet token
+            return
+        BAK_FILE.unlink()
+    except Exception:
+        pass
+
+
 @contextlib.contextmanager
 def _vault_lock():
     """Serialises the ENTIRE read-modify-write of vault.enc across processes.
@@ -789,6 +849,7 @@ def _vault_lock():
     failure to acquire leaves the vault exactly as it was.
     """
     with _json_lock(VAULT_LOCK_FILE, "vault.enc"):
+        _sweep_stale_backup()
         yield
 
 
@@ -1771,7 +1832,7 @@ def _backup_vault() -> bytes:
     _cleanup_backup() after a successful read-back so the old password slot is
     not left alive on disk.
     """
-    original = SECRETS_FILE.read_bytes()
+    original = _read_secrets_file()
     _atomic_write_bytes(BAK_FILE, original, mode=0o600)
     return original
 
@@ -2223,7 +2284,7 @@ def load_vault_body(password: str) -> dict:
 
 def load_vault_body_ex(password: str) -> tuple:
     """``(full_body, envelope_bytes_or_None, fingerprint)`` -- see load_secrets_ex."""
-    data = SECRETS_FILE.read_bytes()
+    data = _read_secrets_file()
     fingerprint = hashlib.sha256(data).hexdigest()
     if crypto.is_v2(data):
         with _unlock_attempt():
@@ -2483,7 +2544,7 @@ def _write_body_locked(
         _atomic_write_bytes(SECRETS_FILE, token)
         return
 
-    data = SECRETS_FILE.read_bytes()
+    data = _read_secrets_file()
 
     if expect_fingerprint is not None:
         fp = hashlib.sha256(data).hexdigest()
@@ -2583,7 +2644,7 @@ def _change_password_locked(old_password: str,
             "Create a vault first before changing the password."
         )
 
-    data = SECRETS_FILE.read_bytes()
+    data = _read_secrets_file()
 
     if not crypto.is_v2(data):
         # ---- v1 path (legacy) ----
@@ -2597,7 +2658,7 @@ def _change_password_locked(old_password: str,
         # sidesteps the merge entirely, which is also more obviously correct:
         # a password change should change the password and nothing else.
         body = load_vault_body(old_password)
-        original_bytes = SECRETS_FILE.read_bytes()
+        original_bytes = _read_secrets_file()
         # The salt is deliberately reused -- rotating it would require a
         # two-file atomic write that does not exist, creating a crash window
         # that can permanently brick the vault.
@@ -2634,56 +2695,57 @@ def _change_password_locked(old_password: str,
 
     # Back up before the write.
     original_bytes = _backup_vault()
-
-    # Rotate DEK.  An adversary who later learns the old password and has a
-    # snapshot of the old vault.enc cannot decrypt future bodies, because the
-    # new DEK is independent of the old one -- re-wrapping alone would make
-    # change_password security theater in this threat model.
-    new_dek = crypto.new_dek()
-
-    # New password slot.
-    new_pw_slot = _build_password_slot(bytes(new_dek), new_password, params, vault_id)
-    new_slots = [new_pw_slot]
-
-    # New recovery slot (new key) if one existed.
-    new_recovery_raw: Optional[bytearray] = None
-    if rk_slot_exists:
-        new_recovery_raw = crypto.new_recovery_key()
-        rec_slot, _ = _build_recovery_slot(
-            bytes(new_dek), bytes(new_recovery_raw), vault_id
-        )
-        new_slots.append(rec_slot)
-
-    new_header = dict(header)
-    new_header["slots"] = new_slots
-
-    # Build and atomically write the new envelope.  plaintext_bytes is already
-    # padded (that is what seal_body stored).
-    new_data = crypto.build_envelope(new_header, bytes(new_dek), plaintext_bytes)
-    _atomic_write_bytes(SECRETS_FILE, new_data)
-
-    # Read-back: verify every slot written.
     try:
-        _verify_v2_slots(
-            SECRETS_FILE.read_bytes(),
-            new_password,
-            bytes(new_recovery_raw) if new_recovery_raw is not None else None,
-        )
-    except RuntimeError:
-        _atomic_write_bytes(SECRETS_FILE, original_bytes)
-        _cleanup_backup()
-        raise RuntimeError(
-            "Password change failed during read-back verification -- "
-            "vault has been restored to its previous state. "
-            "The password was NOT changed."
-        )
+        # Rotate DEK.  An adversary who later learns the old password and has a
+        # snapshot of the old vault.enc cannot decrypt future bodies, because the
+        # new DEK is independent of the old one -- re-wrapping alone would make
+        # change_password security theater in this threat model.
+        new_dek = crypto.new_dek()
 
-    _cleanup_backup()
-    return (
-        crypto.format_recovery_key(bytes(new_recovery_raw))
-        if new_recovery_raw is not None
-        else None
-    )
+        # New password slot.
+        new_pw_slot = _build_password_slot(bytes(new_dek), new_password, params, vault_id)
+        new_slots = [new_pw_slot]
+
+        # New recovery slot (new key) if one existed.
+        new_recovery_raw: Optional[bytearray] = None
+        if rk_slot_exists:
+            new_recovery_raw = crypto.new_recovery_key()
+            rec_slot, _ = _build_recovery_slot(
+                bytes(new_dek), bytes(new_recovery_raw), vault_id
+            )
+            new_slots.append(rec_slot)
+
+        new_header = dict(header)
+        new_header["slots"] = new_slots
+
+        # Build and atomically write the new envelope.  plaintext_bytes is already
+        # padded (that is what seal_body stored).
+        new_data = crypto.build_envelope(new_header, bytes(new_dek), plaintext_bytes)
+        _atomic_write_bytes(SECRETS_FILE, new_data)
+
+        # Read-back: verify every slot written.
+        try:
+            _verify_v2_slots(
+                _read_secrets_file(),
+                new_password,
+                bytes(new_recovery_raw) if new_recovery_raw is not None else None,
+            )
+        except RuntimeError:
+            _atomic_write_bytes(SECRETS_FILE, original_bytes)
+            _cleanup_backup()
+            raise RuntimeError(
+                "Password change failed during read-back verification -- "
+                "vault has been restored to its previous state. "
+                "The password was NOT changed."
+            )
+
+        return (
+            crypto.format_recovery_key(bytes(new_recovery_raw))
+            if new_recovery_raw is not None
+            else None
+        )
+    finally:
+        _cleanup_backup()  # also on OSError/KeyboardInterrupt: it holds the old key slots
 
 
 # ---------------------------------------------------------------------------
@@ -2762,7 +2824,7 @@ def _upgrade_to_v2_locked(password: str, *, recovery: bool):
     """upgrade_to_v2's body, with the vault lock assumed already held."""
     if not vault_exists():
         raise FileNotFoundError("No vault found. Create a vault first.")
-    data = SECRETS_FILE.read_bytes()
+    data = _read_secrets_file()
     if crypto.is_v2(data):
         raise RuntimeError("Vault is already v2. No upgrade needed.")
 
@@ -2774,43 +2836,46 @@ def _upgrade_to_v2_locked(password: str, *, recovery: bool):
 
     padded = _pkcs7_pad(_serialize_body(body))
     original_bytes = _backup_vault()
-
-    envelope, _dek, _vault_id = crypto.build_v2_vault(
-        password, padded, recovery_raw=bytes(recovery_raw) if recovery_raw else None
-    )
-    _atomic_write_bytes(SECRETS_FILE, envelope)
-
     try:
-        _verify_v2_slots(
-            SECRETS_FILE.read_bytes(),
-            password,
-            bytes(recovery_raw) if recovery_raw is not None else None,
+        envelope, _dek, _vault_id = crypto.build_v2_vault(
+            password, padded, recovery_raw=bytes(recovery_raw) if recovery_raw else None
         )
-    except RuntimeError:
-        _atomic_write_bytes(SECRETS_FILE, original_bytes)
-        _cleanup_backup()
-        raise RuntimeError(
-            "Upgrade to v2 failed during read-back verification -- "
-            "vault has been restored to its v1 state. "
-            "The vault was NOT upgraded."
+        _atomic_write_bytes(SECRETS_FILE, envelope)
+
+        try:
+            _verify_v2_slots(
+                _read_secrets_file(),
+                password,
+                bytes(recovery_raw) if recovery_raw is not None else None,
+            )
+        except RuntimeError:
+            _atomic_write_bytes(SECRETS_FILE, original_bytes)
+            _cleanup_backup()
+            raise RuntimeError(
+                "Upgrade to v2 failed during read-back verification -- "
+                "vault has been restored to its v1 state. "
+                "The vault was NOT upgraded."
+            )
+
+        _write_format_file(2)
+        # vault.salt is deliberately left on disk -- see module docstring and
+        # the comment at the top of this function.
+
+        return (
+            crypto.format_recovery_key(bytes(recovery_raw))
+            if recovery_raw is not None
+            else None
         )
-
-    _write_format_file(2)
-    # vault.salt is deliberately left on disk -- see module docstring and
-    # the comment at the top of this function.
-    _cleanup_backup()
-
-    return (
-        crypto.format_recovery_key(bytes(recovery_raw))
-        if recovery_raw is not None
-        else None
-    )
+    finally:
+        _cleanup_backup()  # also on OSError/KeyboardInterrupt: it holds the old key slots
 
 
 def reissue_recovery_key(password: str) -> str:
     """Issue a new recovery key for a v2 vault, invalidating the old one.
 
-    The old printed recovery key is immediately invalidated.  Use this after
+    The DEK is rotated and the body re-sealed, so the old recovery key is dead
+    even against an older copy of vault.enc: the slot it opens wraps a DEK
+    that no longer decrypts anything current.  Use this after
     a recovery key has been lost, potentially compromised, or after a
     password change (which already auto-rotates the recovery key).
 
@@ -2827,43 +2892,49 @@ def _reissue_recovery_key_locked(password: str):
     """reissue_recovery_key's body, with the vault lock assumed already held."""
     if not vault_exists():
         raise FileNotFoundError("No vault found.")
-    data = SECRETS_FILE.read_bytes()
+    data = _read_secrets_file()
     if not crypto.is_v2(data):
         raise RuntimeError(
             "Recovery keys require a v2 vault. Call upgrade_to_v2 first."
         )
 
     with _unlock_attempt():
-        plaintext_bytes, dek, header = crypto.open_v2_with_password(data, password)
+        plaintext_bytes, _old_dek, header = crypto.open_v2_with_password(data, password)
     vault_id = _vault_id_from_header(header)
+    params = _params_from_header(header)  # floor-corrected
+
+    # Rotate the DEK. Re-wrapping the same DEK under a new recovery slot would
+    # leave the old recovery key able to open any older copy of vault.enc (or
+    # the .bak) and hand over the CURRENT DEK -- so "invalidated" would be a
+    # claim about this file only. Same reasoning as change_password.
+    new_dek = crypto.new_dek()
+    new_pw_slot = _build_password_slot(bytes(new_dek), password, params, vault_id)
 
     new_recovery_raw = crypto.new_recovery_key()
-    rec_slot, _ = _build_recovery_slot(bytes(dek), bytes(new_recovery_raw), vault_id)
+    rec_slot, _ = _build_recovery_slot(bytes(new_dek), bytes(new_recovery_raw), vault_id)
 
-    # Replace or add the recovery slot; keep password slot and any others.
-    new_slots = [s for s in header["slots"] if s.get("type") != "recovery"]
-    new_slots.append(rec_slot)
     new_header = dict(header)
-    new_header["slots"] = new_slots
+    new_header["slots"] = [new_pw_slot, rec_slot]
 
     original_bytes = _backup_vault()
-
-    # Same DEK and body; only the recovery slot changes.
-    new_data = crypto.build_envelope(new_header, bytes(dek), plaintext_bytes)
-    _atomic_write_bytes(SECRETS_FILE, new_data)
-
     try:
-        _verify_v2_slots(SECRETS_FILE.read_bytes(), password, bytes(new_recovery_raw))
-    except RuntimeError:
-        _atomic_write_bytes(SECRETS_FILE, original_bytes)
-        _cleanup_backup()
-        raise RuntimeError(
-            "Recovery key reissue failed during read-back verification -- "
-            "vault has been restored. The recovery key was NOT reissued."
-        )
+        # Same body, sealed under the new DEK.
+        new_data = crypto.build_envelope(new_header, bytes(new_dek), plaintext_bytes)
+        _atomic_write_bytes(SECRETS_FILE, new_data)
 
-    _cleanup_backup()
-    return crypto.format_recovery_key(bytes(new_recovery_raw))
+        try:
+            _verify_v2_slots(_read_secrets_file(), password, bytes(new_recovery_raw))
+        except RuntimeError:
+            _atomic_write_bytes(SECRETS_FILE, original_bytes)
+            _cleanup_backup()
+            raise RuntimeError(
+                "Recovery key reissue failed during read-back verification -- "
+                "vault has been restored. The recovery key was NOT reissued."
+            )
+
+        return crypto.format_recovery_key(bytes(new_recovery_raw))
+    finally:
+        _cleanup_backup()  # also on OSError/KeyboardInterrupt: it holds the old key slots
 
 
 def recover_with_recovery_key(
@@ -2905,7 +2976,7 @@ def _recover_with_recovery_key_locked(recovery_key_text: str,
     """recover_with_recovery_key's body, with the vault lock assumed already held."""
     if not vault_exists():
         raise FileNotFoundError("No vault found.")
-    data = SECRETS_FILE.read_bytes()
+    data = _read_secrets_file()
     if not crypto.is_v2(data):
         raise RuntimeError(
             "Recovery requires a v2 vault. Call upgrade_to_v2 first."
@@ -2945,28 +3016,29 @@ def _recover_with_recovery_key_locked(recovery_key_text: str,
     new_header["slots"] = [new_pw_slot, rec_slot]
 
     original_bytes = _backup_vault()
-
-    new_data = crypto.build_envelope(new_header, bytes(new_dek), plaintext_bytes)
-    _atomic_write_bytes(SECRETS_FILE, new_data)
-
     try:
-        _verify_v2_slots(
-            SECRETS_FILE.read_bytes(), new_password, bytes(new_recovery_raw)
-        )
-    except RuntimeError:
-        _atomic_write_bytes(SECRETS_FILE, original_bytes)
-        _cleanup_backup()
-        raise RuntimeError(
-            "Recovery failed during read-back verification -- "
-            "vault has been restored. The password was NOT changed."
-        )
+        new_data = crypto.build_envelope(new_header, bytes(new_dek), plaintext_bytes)
+        _atomic_write_bytes(SECRETS_FILE, new_data)
 
-    _cleanup_backup()
-    # Zero our copy; the human's paper is the only place this key lives.
-    for _i in range(len(new_recovery_raw)):
-        new_recovery_raw[_i] = 0
-    # None: nothing new to display, because the existing printout still works.
-    return None
+        try:
+            _verify_v2_slots(
+                _read_secrets_file(), new_password, bytes(new_recovery_raw)
+            )
+        except RuntimeError:
+            _atomic_write_bytes(SECRETS_FILE, original_bytes)
+            _cleanup_backup()
+            raise RuntimeError(
+                "Recovery failed during read-back verification -- "
+                "vault has been restored. The password was NOT changed."
+            )
+
+        # Zero our copy; the human's paper is the only place this key lives.
+        for _i in range(len(new_recovery_raw)):
+            new_recovery_raw[_i] = 0
+        # None: nothing new to display, because the existing printout still works.
+        return None
+    finally:
+        _cleanup_backup()  # also on OSError/KeyboardInterrupt: it holds the old key slots
 
 
 def vault_format_version() -> Optional[int]:
@@ -2979,7 +3051,7 @@ def vault_format_version() -> Optional[int]:
     if not SECRETS_FILE.exists():
         return None
     try:
-        data = SECRETS_FILE.read_bytes()
+        data = _read_secrets_file()
     except OSError:
         return None
     if crypto.is_v2(data):
@@ -2999,7 +3071,7 @@ def vault_info() -> dict:
     if not SECRETS_FILE.exists():
         return {"error": "no vault"}
     try:
-        data = SECRETS_FILE.read_bytes()
+        data = _read_secrets_file()
     except OSError as exc:
         return {"error": f"could not read vault.enc: {exc}"}
     if not crypto.is_v2(data):
@@ -3363,7 +3435,7 @@ def precheck_encrypt(path: Path) -> dict:
         raise ValueError("No vault found. Create one before encrypting files.")
     # v2 only, decided by the magic bytes of vault.enc and by nothing else.
     # vault.format.txt is never read -- see FORMAT_FILE's invariant.
-    if not crypto.is_v2(SECRETS_FILE.read_bytes()):
+    if not crypto.is_v2(_read_secrets_file()):
         raise ValueError(
             "File encryption requires a v2 vault. Run manage_vault and choose "
             "upgrade_v2 first."
@@ -3475,7 +3547,7 @@ def secure_delete(path: Path) -> bool:
     return secure_delete_ex(path)["removed"]
 
 
-def secure_delete_ex(path: Path) -> dict:
+def secure_delete_ex(path: Path, expected_id: Optional[tuple] = None) -> dict:
     """secure_delete, reporting WHICH half succeeded.
 
     Returns ``{"removed": bool, "overwritten": bool}``.
@@ -3486,21 +3558,40 @@ def secure_delete_ex(path: Path) -> dict:
     bytes, not their secret, and the encrypted copy is the authoritative one.
     Telling them "this file still contains the real secret" in that state is
     not just wrong, it points them at deleting the wrong file.
+
+    ``expected_id`` is the ``(st_dev, st_ino)`` of the file the caller hashed
+    and verified. A non-regular file, a file with other hard links, or a
+    different inode is refused (``removed`` False) without a single write.
     """
     overwritten = False
     try:
-        size = path.stat().st_size
-        with open(path, "r+b") as handle:
-            remaining = size
-            while remaining > 0:
-                chunk = min(remaining, 1024 * 1024)
-                handle.write(os.urandom(chunk))
-                remaining -= chunk
-            handle.flush()
-            os.fsync(handle.fileno())
-        overwritten = True
+        # O_NOFOLLOW: a symlink swapped in after the caller's checks must not
+        # redirect the overwrite onto whatever it points at.
+        fd = os.open(str(path), os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_BINARY", 0))
     except OSError:
-        pass  # fall through and still try to unlink
+        fd = None  # fall through and still try to unlink (removes a link, not its target)
+    if fd is not None:
+        try:
+            st = os.fstat(fd)
+            if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+                    or (expected_id is not None
+                        and (st.st_dev, st.st_ino) != tuple(expected_id))):
+                # Not the file the caller verified: touch nothing, delete nothing.
+                return {"removed": False, "overwritten": False}
+            with os.fdopen(fd, "r+b", closefd=False) as handle:
+                remaining = st.st_size
+                while remaining > 0:
+                    chunk = min(remaining, 1024 * 1024)
+                    handle.write(os.urandom(chunk))
+                    remaining -= chunk
+                handle.flush()
+                os.fsync(handle.fileno())
+            overwritten = True
+        except OSError:
+            pass  # fall through and still try to unlink
+        finally:
+            os.close(fd)
 
     for attempt in range(_LOCK_RETRIES):
         try:
@@ -3660,6 +3751,7 @@ def encrypt_file_in_place(path: Path, password: str, *, allow_resume: bool = Fal
         recheck = resolved.stat()
         if getattr(recheck, "st_nlink", 1) > 1:
             raise ValueError("it gained a hard link")
+        verified_id = (recheck.st_dev, recheck.st_ino)
         if hashlib.sha256(resolved.read_bytes()).hexdigest() != digest:
             raise ValueError("its contents changed")
     except (OSError, ValueError) as exc:
@@ -3679,6 +3771,29 @@ def encrypt_file_in_place(path: Path, password: str, *, allow_resume: bool = Fal
                 f"still what you want."),
         }
 
+    # Last identity check before the overwrite; secure_delete_ex itself then
+    # opens without following links and refuses a non-regular or multiply
+    # linked file. (Callers with the identity in hand can pass expected_id.)
+    try:
+        now = resolved.lstat()
+        if (now.st_dev, now.st_ino) != verified_id:
+            raise ValueError("it was replaced")
+    except (OSError, ValueError) as exc:
+        return {
+            "path": str(resolved),
+            "vault_path": str(vault_path),
+            "original_name": resolved.name,
+            "plaintext_size": len(file_bytes),
+            "mode": info["mode"],
+            "fmk_id": sealed_gen,
+            "original_destroyed": False,
+            "resumed": resumed,
+            "not_destroyed_reason": (
+                f"{resolved.name} was not deleted because {exc} while it was being "
+                f"encrypted. The encrypted copy holds the contents as they were when "
+                f"this started; check the file and delete it yourself if that is "
+                f"still what you want."),
+        }
     outcome = secure_delete_ex(resolved)
 
     return {
@@ -3850,7 +3965,7 @@ def rotate_file_key(password: str) -> dict:
     reverse order would leave files sealed under a key the vault never
     recorded, which is unrecoverable.
     """
-    if not vault_exists() or not crypto.is_v2(SECRETS_FILE.read_bytes()):
+    if not vault_exists() or not crypto.is_v2(_read_secrets_file()):
         raise ValueError("File key rotation requires a v2 vault.")
 
     with _vault_lock():

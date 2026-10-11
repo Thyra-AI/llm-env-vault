@@ -148,14 +148,50 @@ def test_adoption_happens_once_and_never_overwrites_a_vault(tmp_path):
     assert (root / "vault.enc").read_bytes() == b"CHANGED"
 
 
-def test_the_newest_legacy_vault_wins(tmp_path):
+def test_several_legacy_vaults_are_ambiguous_so_none_is_adopted(tmp_path):
     _legacy(tmp_path, "llm-env-vault-marketplace-a", {"vault.enc": b"OLD"}, mtime=1_000_000)
     _legacy(tmp_path, "llm-env-vault-marketplace-b", {"vault.enc": b"NEW"}, mtime=2_000_000)
     new_data = tmp_path / "thyra-vault-thyra-vault"
     root = new_data / "vault"
     root.mkdir(parents=True)
-    datadir.adopt_legacy_vault(root, str(new_data))
-    assert (root / "vault.enc").read_bytes() == b"NEW"
+    assert datadir.adopt_legacy_vault(root, str(new_data)) is None
+    assert not (root / "vault.enc").exists()
+    assert (new_data / datadir.AMBIGUOUS_NOTE).exists()
+
+
+def test_adoption_resumes_after_a_crash_between_salt_and_vault(tmp_path):
+    _legacy(tmp_path)
+    new_data = tmp_path / "thyra-vault-thyra-vault"
+    root = new_data / "vault"
+    root.mkdir(parents=True)
+    (root / "vault.salt").write_bytes(b"SALT")           # landed before the crash
+    assert datadir.adopt_legacy_vault(root, str(new_data)) is not None
+    assert (root / "vault.enc").read_bytes() == b"ENC"
+
+
+def test_a_different_leftover_salt_is_still_not_overwritten(tmp_path):
+    _legacy(tmp_path)
+    new_data = tmp_path / "thyra-vault-thyra-vault"
+    root = new_data / "vault"
+    root.mkdir(parents=True)
+    (root / "vault.salt").write_bytes(b"NOT-THE-SAME")
+    assert datadir.adopt_legacy_vault(root, str(new_data)) is None
+    assert (root / "vault.salt").read_bytes() == b"NOT-THE-SAME"
+    assert not (root / "vault.enc").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX modes")
+def test_adopted_files_are_owner_only(tmp_path):
+    _legacy(tmp_path)
+    new_data = tmp_path / "thyra-vault-thyra-vault"
+    root = new_data / "vault"
+    root.mkdir(parents=True)
+    old_umask = os.umask(0)
+    try:
+        datadir.adopt_legacy_vault(root, str(new_data))
+    finally:
+        os.umask(old_umask)
+    assert (root / "vault.enc").stat().st_mode & 0o777 == 0o600
 
 
 def test_unrelated_plugins_and_missing_vaults_are_ignored(tmp_path):
