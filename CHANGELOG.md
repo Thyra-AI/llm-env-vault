@@ -90,6 +90,28 @@ pinning what a user installs.
 Fixes from a five-agent review (MCP boundary, loopback server, crypto/storage, app/clipboard, supply chain).
 Every item has a regression test in `tests/test_security_review_fixes.py` (or the suite named).
 
+- **Second review pass (final check, five agents).** Fixed:
+  - *Trust cache* now hashes file contents (≤ 1 MiB) and includes `.git/hooks`, `.git/config`, `*.pth`, `sitecustomize.py`,
+    `usercustomize.py` and `.pyc` files from skipped folders, so a same-size edit with a restored timestamp or a planted
+    hook revokes trust. An edit made between or during runs is no longer adopted by the post-run refresh.
+  - *Consent dialog* shows the command as one escaped argument per line (newlines visible), refuses commands containing
+    format or control characters or longer than 4000 displayed characters instead of truncating, and says when a
+    background run's output is **not redacted** while it runs.
+  - *Redaction* also covers base64 wrapped at 76 columns, CRLF-wrapped values and each line of a multi-line value.
+  - *Recovery key reissue* now rotates the data key, so an old recovery key plus an old copy of the vault no longer opens the
+    current one. The `.bak` copy is removed on every failure path. Vault reads are size-capped (64 MiB) and never follow links
+    or block on a FIFO. Secure delete refuses links and hard links. Adopting the old plugin's vault only happens when exactly
+    one candidate exists and resumes after a crash.
+  - *Local server:* the launch code is never printed (the link goes to a private 0600 file), the exchange is atomic, wrong codes
+    no longer cancel the dialog (they back off, and the valid code still gets through), per-request deadline and a connection
+    cap, the window dies with the server (Linux) and a page that loses the server ends its session, a browser that exits at once
+    is a failed launch, stale temp folders are swept.
+  - *App:* idle auto-lock now covers every screen, the master password is cleared after any error, the clipboard is wiped on
+    `SIGTERM`/`SIGHUP`.
+  - *Install:* `uv` runs with `--no-config` and from the data folder, and an installed plugin refuses to install without its
+    hash-pinned lockfile.
+  - *Not fixed (documented):* rollback to an older `vault.enc` is accepted (needs state outside the data folder); a file the
+    assistant writes and asks to run is shown by path, not by content.
 - **Trusted-command cache bound to the working folder.** A grant is now also bound to a fingerprint of the folder the
   command runs in, so "trust `pytest`, let the assistant edit a file it imports, run it again with no dialog" no longer
   works; the dialog returns with the reason. The approved command's own output does not revoke it; a denied call never
