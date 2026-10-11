@@ -188,8 +188,11 @@ def _run_logged(cmd: list[str], step: str) -> None:
     an uncaught UnicodeDecodeError before this function ever gets a chance
     to log anything, defeating the entire point of it existing."""
     _log(f"Running ({step}): {' '.join(cmd)}")
+    # Run from the data directory, never the caller's folder: the MCP server's working directory is
+    # the user's project, and uv/pip read configuration (indexes, sources) from the current directory.
     result = subprocess.run(cmd, capture_output=True, text=True,
-                             encoding="utf-8", errors="replace")
+                             encoding="utf-8", errors="replace",
+                             cwd=str(DATA_DIR) if DATA_DIR.is_dir() else None)
     if result.stdout:
         _log(result.stdout.rstrip())
     if result.returncode != 0:
@@ -311,6 +314,11 @@ def _is_up_to_date(python: Path, current_marker: str) -> bool:
 
 def _provision(python: Path, current_marker: str) -> None:
     """The actual (re)install, called with _provision_lock held."""
+    if _IS_INSTALLED_PLUGIN and REQUIREMENTS is not _LOCKFILE:
+        # The unpinned fallback is for a developer's checkout. An installed plugin without its
+        # hash-pinned lockfile is a damaged install: refuse rather than install unverified code.
+        raise RuntimeError("thyra-vault: requirements-lock.txt is missing from the installed plugin, "
+                           "so dependencies cannot be installed with pinned hashes. Reinstall the plugin.")
     _reset_log()
     last_attempt_marker = ATTEMPT_FILE.read_text().strip() if ATTEMPT_FILE.exists() else None
     same_target_as_last_attempt = last_attempt_marker == current_marker
@@ -376,7 +384,7 @@ def _provision(python: Path, current_marker: str) -> None:
             venv_old = DATA_DIR / "venv-old"
             _rmtree_best_effort(venv_next)
             _rmtree_best_effort(venv_old)
-            venv_cmd = ([uv, "venv", "--seed", "--python", sys.executable, str(venv_next)]
+            venv_cmd = ([uv, "--no-config", "venv", "--seed", "--python", sys.executable, str(venv_next)]
                         if uv else [sys.executable, "-m", "venv", str(venv_next)])
             _run_logged(venv_cmd, "venv creation")
             try:
@@ -400,7 +408,7 @@ def _provision(python: Path, current_marker: str) -> None:
             if uv:
                 # uv has no --clear flag; delete the tree first (same effect).
                 _rmtree_best_effort(VENV_DIR)
-                venv_cmd = [uv, "venv", "--seed", "--python", sys.executable, str(VENV_DIR)]
+                venv_cmd = [uv, "--no-config", "venv", "--seed", "--python", sys.executable, str(VENV_DIR)]
             else:
                 venv_cmd = [sys.executable, "-m", "venv", "--clear", str(VENV_DIR)]
             _run_logged(venv_cmd, "venv creation")
@@ -410,7 +418,7 @@ def _provision(python: Path, current_marker: str) -> None:
     # which matters on first run where the full pip install is what pushes
     # provisioning past MCP startup timeouts and causes silent failures.
     if uv:
-        pip_cmd = [uv, "pip", "install", "--python", str(python)]
+        pip_cmd = [uv, "--no-config", "pip", "install", "--python", str(python)]
     else:
         pip_cmd = [str(python), "-m", "pip", "install"]
     if REQUIREMENTS is _LOCKFILE:

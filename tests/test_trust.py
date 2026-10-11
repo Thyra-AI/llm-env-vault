@@ -911,6 +911,12 @@ def _make_fake_plugin_root(path: Path, requirements_content: str) -> None:
     (path / "plugin_launcher.py").write_bytes(
         (REPO_ROOT / "plugin_launcher.py").read_bytes())
     (path / "requirements.txt").write_text(requirements_content)
+    # An installed plugin refuses to install without its hash-pinned lockfile, so the fake has one.
+    lock = ("colorama==0.4.6 \\\n"
+            "    --hash=sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44 \\\n"
+            "    --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6\n"
+            if "colorama" in requirements_content else "\n")
+    (path / "requirements-lock.txt").write_text(lock)
 
 
 def test_venv_is_functional_detects_a_venv_with_no_pip() -> None:
