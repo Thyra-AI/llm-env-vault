@@ -78,3 +78,18 @@ def pytest_terminal_summary(terminalreporter):
         f"window tripwire: {len(ATTEMPTS)} Tk/MessageBox creation attempt(s) "
         f"in-process"
         + ("" if not ATTEMPTS else " -- " + "; ".join(ATTEMPTS[:5])))
+
+
+@pytest.fixture(autouse=True)
+def _allowlist_isolation(tmp_path, monkeypatch):
+    """The always-allow rollback sidecar never touches the real per-user state
+    directory, and no armed entries / test profiles leak between tests."""
+    from vault_lib import allowlist, profiles
+    monkeypatch.setattr(allowlist, "SIDECAR_DIR", str(tmp_path / "rollback-sidecar"))
+    allowlist.reset()
+    profiles.reset_cache()
+    yield
+    allowlist.reset()
+    for kind in list(profiles._injected):
+        profiles.unregister_profile(kind)
+    profiles.reset_cache()

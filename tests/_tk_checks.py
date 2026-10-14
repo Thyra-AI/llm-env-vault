@@ -418,6 +418,321 @@ def _():
         "the unlock dialog no longer states the single-view rule honestly")
 
 
+class _FakeOffer:
+    """Stands in for allowlist.Offer (.pattern .label .commit(password))."""
+
+    def __init__(self, pattern="git push origin <branch>", fail=None):
+        self.pattern = pattern
+        self.label = "git push origin"
+        self.fail = fail
+        self.commits = []
+
+    def commit(self, password):
+        self.commits.append(password)
+        if self.fail is not None:
+            raise self.fail
+        return "entry-id-1"
+
+
+_AA_BOX = "always allow (survives restarts)"
+
+
+_EVENTS = []
+
+
+def _drive_unlock(tick=(), click_allow=False, command="echo hello", **kw):
+    """Build unlock_for_run_dialog, optionally tick checkboxes whose text
+    contains one of *tick* (lowercased) and press "Unlock && Run" with a typed
+    password. Returns (outcome, snapshot, texts): snapshot is a list of
+    (class, text, checked) taken before any click (checked is None for
+    widgets that are not checkbuttons); texts is the content of every Text
+    widget (the scrollable read-only boxes keep it outside -text)."""
+    snap = []
+    texts = []
+    real_tk = tk.Tk
+    orig_load = store.load_secrets
+
+    def _nodes(widget, out):
+        for child in widget.winfo_children():
+            out.append(child)
+            _nodes(child, out)
+
+    class _Driver(real_tk):
+        def mainloop(self, n=0):
+            nodes = []
+            _nodes(self, nodes)
+            for w in nodes:
+                cls = w.winfo_class()
+                try:
+                    text = str(w.cget("text"))
+                except Exception:  # noqa: BLE001
+                    text = ""
+                checked = None
+                if cls == "Checkbutton":
+                    checked = bool(self.getvar(str(w.cget("variable"))))
+                if cls == "Text":
+                    texts.append(w.get("1.0", "end"))
+                label = _button_label(w)
+                snap.append((cls if label is None else "Canvas",
+                             text if label is None else label, checked))
+            for w in nodes:
+                if w.winfo_class() == "Checkbutton" and any(
+                        t in str(w.cget("text")).lower() for t in tick):
+                    w.invoke()
+            if click_allow:
+                for w in nodes:
+                    if w.winfo_class() == "Entry":
+                        w.insert("end", "hunter2-hunter2")
+                        break
+                # on_allow ends in root.destroy(); defer that to the single
+                # destroy below so the teardown matches every other check
+                # (destroying from inside the button command made the NEXT
+                # window's deiconify hang intermittently).
+                self.destroy = lambda: _EVENTS.append("destroy")
+                try:
+                    for w in nodes:
+                        if _button_label(w) == "Unlock && Run":
+                            w._command()
+                            break
+                    else:
+                        raise AssertionError("no Unlock && Run button")
+                finally:
+                    del self.destroy
+            self.destroy()
+
+    orig_notice = gui._show_blocking_error
+    _EVENTS.clear()
+    gui.tk.Tk = _Driver
+    gui._show_blocking_error = lambda root, text, *a, **k: _EVENTS.append(("notice", text))
+    store.load_secrets = lambda password: {"A": "value-a-value", "B": "value-b-value"}
+    try:
+        outcome = gui.unlock_for_run_dialog(command, only_vars=["A"], **kw)
+    finally:
+        gui.tk.Tk = real_tk
+        gui._show_blocking_error = orig_notice
+        store.load_secrets = orig_load
+        _drop_dead_root()
+    return outcome, snap, texts
+
+
+def _aa_boxes(snap):
+    return [(t, c) for cls, t, c in snap if cls == "Checkbutton" and _AA_BOX in t.lower()]
+
+
+@check("always_allow_checkbox_absent_without_an_offer")
+def _():
+    outcome, snap, _t = _drive_unlock()
+    assert not _aa_boxes(snap), "always-allow checkbox shown with always_allow=None"
+    blob = " ".join(t for _c, t, _k in snap).lower()
+    assert "survives restarts" not in blob and "would match" not in blob, (
+        "always-allow text shown although no Offer was given")
+    assert outcome["always_allow"] is False, "outcome lost its always_allow key"
+    assert "always-allow status" not in blob, "status area shown without an arm_report"
+    assert sum(1 for c, _t2, _k in snap if c == "Checkbutton") == 1, (
+        "the 8 h trust checkbox is no longer the only checkbox")
+
+
+@check("always_allow_checkbox_present_and_off_by_default")
+def _():
+    offer = _FakeOffer()
+    _outcome, snap, _t = _drive_unlock(always_allow=offer)
+    boxes = _aa_boxes(snap)
+    assert len(boxes) == 1, f"expected one always-allow checkbox, got {boxes!r}"
+    assert boxes[0][1] is False, "the always-allow checkbox starts ticked"
+    blob = " ".join(t for _c, t, _k in snap).lower()
+    assert "git push origin <branch>" in blob, "the canonical pattern is not shown"
+    assert "skip this dialog" in blob and "read the injected values" in blob, (
+        "the honest warning (skips the dialog; command/hooks can read the values) is missing")
+    assert "test-grade" in blob, "no recommendation to use test-grade credentials"
+    assert offer.commits == [], "commit ran without any ticking"
+    # The pattern line comes before the checkbox, so it is visible before ticking.
+    texts = [t.lower() for _c, t, _k in snap]
+    assert next(i for i, t in enumerate(texts) if "would match" in t) < \
+        next(i for i, t in enumerate(texts) if _AA_BOX in t)
+
+
+@check("always_allow_pattern_is_escaped")
+def _():
+    nasty = "git push ‮origin​ <b>\x07\nx\\y z"
+    shown = gui._escape_pattern(nasty)
+    for bad in ("‮", "​", "\x07", "\n", " "):
+        assert bad not in shown, f"{bad!r} survived escaping: {shown!r}"
+    for good in ("\\u202e", "\\u200b", "\\x07", "\\x0a", "\\\\y", "\\xa0"):
+        assert good in shown, f"{good!r} missing from {shown!r}"
+    assert shown.startswith("'") and shown.endswith("'")
+    # And the dialog really uses it.
+    _outcome, snap, _t = _drive_unlock(always_allow=_FakeOffer(pattern=nasty))
+    blob = " ".join(t for _c, t, _k in snap)
+    for bad in ("‮", "​", "\x07"):
+        assert bad not in blob, f"{bad!r} reached a dialog widget"
+    assert "\\u202e" in blob, "the dialog does not show the escaped pattern"
+
+
+@check("always_allow_commit_only_when_ticked")
+def _():
+    offer = _FakeOffer()
+    outcome, _s, _t = _drive_unlock(click_allow=True, always_allow=offer)
+    assert offer.commits == [] and outcome["always_allow"] is False, (
+        "commit ran although the box was not ticked")
+    assert outcome["secrets"] == {"A": "value-a-value"}, "run was not allowed"
+    offer = _FakeOffer()
+    outcome, _s, _t = _drive_unlock(tick=(_AA_BOX,), click_allow=True, always_allow=offer)
+    assert offer.commits == ["hunter2-hunter2"], f"commit calls: {offer.commits!r}"
+    assert outcome["always_allow"] is True and outcome["secrets"] == {"A": "value-a-value"}
+
+
+@check("always_allow_commit_failure_still_runs_once")
+def _():
+    offer = _FakeOffer(fail=OSError("disk full"))
+    outcome, _s, _t = _drive_unlock(tick=(_AA_BOX,), click_allow=True, always_allow=offer)
+    assert len(offer.commits) == 1, "commit must be attempted exactly once"
+    assert outcome["secrets"] == {"A": "value-a-value"}, (
+        "a failed always-allow save must not block the approved run")
+    assert outcome["always_allow"] is False, "failed commit reported as success"
+    assert "disk full" in outcome.get("always_allow_error", ""), (
+        "the failure is not surfaced to the caller")
+    # The human must see it too: a modal notice, shown before the window is
+    # destroyed (an error label set right before root.destroy() is never seen).
+    notices = [e for e in _EVENTS if isinstance(e, tuple)]
+    assert len(notices) == 1 and "disk full" in notices[0][1], (
+        f"the commit failure was not shown to the human: {_EVENTS!r}")
+    assert _EVENTS.index(notices[0]) < _EVENTS.index("destroy"), (
+        f"the notice came after the window was destroyed: {_EVENTS!r}")
+    ok = _FakeOffer()
+    _drive_unlock(tick=(_AA_BOX,), click_allow=True, always_allow=ok)
+    assert not [e for e in _EVENTS if isinstance(e, tuple)], (
+        "a notice was shown although the commit succeeded")
+
+
+@check("always_allow_failed_commit_does_not_record_the_8h_trust")
+def _():
+    """Both boxes ticked and the save fails: the human asked for a persistent
+    entry, not an 8 h grant, so trust must stay off."""
+    offer = _FakeOffer(fail=OSError("disk full"))
+    outcome, _s, _t = _drive_unlock(tick=(_AA_BOX, "trust this exact command"),
+                                    click_allow=True, always_allow=offer)
+    assert outcome["secrets"] == {"A": "value-a-value"}, "the approved run was blocked"
+    assert outcome["always_allow"] is False and outcome["trust"] is False, (
+        f"a failed always-allow save still granted the 8 h trust: {outcome!r}")
+    assert "disk full" in outcome.get("always_allow_error", "")
+
+
+@check("always_allow_wins_over_trust_when_both_ticked")
+def _():
+    both, _s, _t = _drive_unlock(tick=(_AA_BOX, "trust this exact command"),
+                                 click_allow=True, always_allow=_FakeOffer())
+    assert both["always_allow"] is True and both["trust"] is False, (
+        f"both ticked: expected always_allow only, got {both!r}")
+    only_trust, _s, _t = _drive_unlock(tick=("trust this exact command",),
+                                       click_allow=True, always_allow=_FakeOffer())
+    assert only_trust["trust"] is True and only_trust["always_allow"] is False
+
+
+@check("hide_trust_hides_the_8h_checkbox")
+def _():
+    _o, shown, _t = _drive_unlock()
+    assert any("trust this exact command" in t.lower()
+               for c, t, _k in shown if c == "Checkbutton")
+    _o, hidden, _t = _drive_unlock(hide_trust=True, always_allow=_FakeOffer())
+    assert not any("trust this exact command" in t.lower() for _c, t, _k in hidden), (
+        "hide_trust=True still shows the 8 h trust checkbox")
+    assert _aa_boxes(hidden), "hide_trust must not hide the always-allow checkbox"
+
+
+@check("arm_report_is_shown_and_sanitised")
+def _():
+    report = "Armed by this unlock:\n- git push origin (git, GH_TOKEN)\n‮evil"
+    _o, snap, texts = _drive_unlock(arm_report=report)
+    assert "Always-allow status" in " ".join(t for _c, t, _k in snap)
+    joined = "\n".join(texts)
+    assert "git push origin (git, GH_TOKEN)" in joined, "arm_report content not shown"
+    assert "‮" not in joined, "hidden characters reached the report box"
+
+
+@check("arm_report_lines_are_escaped_not_stripped")
+def _():
+    report = ("Always-allow armed: git push\u200b origin\n"
+              "Always-allow NOT armed: a\u202eb -- c\x07d\n"
+              "\u0301lead")
+    _o, _snap, texts = _drive_unlock(arm_report=report)
+    joined = "\n".join(texts)
+    for bad in ("\u200b", "\u202e", "\x07", "\u0301"):
+        assert bad not in joined, f"{bad!r} reached the report box unescaped"
+    for good in ("\\u200b", "\\u202e", "\\x07", "\\u0301"):
+        assert good in joined, f"{good!r} missing: the hidden character is not made visible"
+    assert "Always-allow armed: git push" in joined
+
+
+@check("command_box_shows_hidden_characters_instead_of_stripping_them")
+def _():
+    _o, _snap, texts = _drive_unlock(command="g\u200bit push\u202e origin\nmain")
+    joined = "\n".join(texts)
+    assert "\u200b" not in joined and "\u202e" not in joined, (
+        "a hidden character reached the Command box raw")
+    assert "g\\u200bit push\\u202e origin main" in joined, (
+        f"the Command box does not show what actually runs: {joined!r}")
+
+
+@check("show_blocking_error_builds_and_closes_without_a_human")
+def _():
+    # _drive_unlock stubs gui._show_blocking_error, so this is the one check that
+    # builds the real notice. It is modal (wait_window), so the close is
+    # scheduled with after() BEFORE the call; a second, later after() is the
+    # backstop so a broken close can never leave the sweep waiting on a human.
+    _drop_dead_root()
+    root = tk.Tk()
+    root.withdraw()
+    seen = []
+
+    def _close():
+        tops = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]
+        seen.append([(w.title(), [c.winfo_class() for c in w.winfo_children()])
+                     for w in tops])
+        for w in tops:
+            w.destroy()
+
+    try:
+        root.after(300, _close)
+        root.after(20000, lambda: [w.destroy() for w in root.winfo_children()
+                                   if isinstance(w, tk.Toplevel)])
+        gui._show_blocking_error(root, "Could not save the entry:\nboom")
+        assert len(seen) == 1 and len(seen[0]) == 1, (
+            f"expected exactly one notice window when it was closed, saw {seen}")
+        title, kids = seen[0][0]
+        assert title == "llm-env-vault", title
+        assert len(kids) >= 2, f"the notice should hold its text and an OK button: {kids}"
+        assert not [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)], (
+            "the notice window was not destroyed")
+    finally:
+        try:
+            root.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+        _drop_dead_root()
+
+
+@check("manage_vault_dialog_lists_always_allow_actions")
+def _():
+    orig_info, orig_ver = store.vault_info, store.vault_format_version
+    store.vault_info = lambda: {
+        "format": 2, "kdf": "scrypt", "kdf_params": {"n": 65536, "r": 8, "p": 1},
+        "recovery_slot": True, "recovery_slot_id": "AB12",
+        "recovery_slot_created": "2026-08-16T00:00:00+00:00",
+        "created": "2026-08-16T00:00:00+00:00"}
+    store.vault_format_version = lambda: 2
+    try:
+        labels = [t for c, t in build_dialog(gui.manage_vault_dialog) if c == "Canvas"]
+        assert "List Always-Allowed Commands" in labels, labels
+        assert "Remove an Always-Allowed Command" in labels, labels
+        rm = build_dialog(gui.manage_vault_dialog,
+                          click="Remove an Always-Allowed Command")
+        assert sum(1 for c, _t in rm if c == "Entry") == 2, (
+            "remove screen needs a password field and an entry-id field")
+        assert "entry id" in all_text(rm)
+    finally:
+        store.vault_info, store.vault_format_version = orig_info, orig_ver
+
+
 @check("every_dialog_constructs")
 def _():
     orig_info, orig_ver = store.vault_info, store.vault_format_version
@@ -435,6 +750,9 @@ def _():
             "change_password_dialog": gui.change_password_dialog,
             "unlock_for_run_dialog": lambda: gui.unlock_for_run_dialog(
                 "echo hello", only_vars=["A"]),
+            "unlock_for_run_dialog_always_allow": lambda: gui.unlock_for_run_dialog(
+                "git push origin main", only_vars=["A"], always_allow=_FakeOffer(),
+                hide_trust=True, arm_report="Armed: git push origin (git, A)"),
             "encrypt_file_dialog": lambda: gui.encrypt_file_dialog(
                 _FAKE_PLAINTEXT),
             "decrypt_file_dialog": lambda: gui.decrypt_file_dialog(

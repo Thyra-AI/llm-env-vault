@@ -31,3 +31,6 @@ manual_check.py
 manual_check_results.txt
 manual_step.py
 manual_whereami.py
+
+# delegate-kit run ledgers
+.delegate-kit/

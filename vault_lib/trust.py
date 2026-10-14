@@ -34,6 +34,20 @@ Trust is also tied to the vault's own content: if the vault changes
 different password) after secrets were cached here, the cache is stale
 for every trusted command at once, not just one, so it's dropped
 entirely rather than silently serving pre-rotation values.
+
+Two kinds of grant live here.  Ordinary trust (trust()) expires after
+_TRUST_TTL_SECONDS.  Persistent entries (arm()) belong to the "always allow"
+feature: they are re-created from the vault's own sealed list on every
+password unlock and have NO time limit -- they end when disarm() is called,
+when the vault file changes, or when the process exits.  The caller (allowlist
+module) owns the policy of which entries to arm; this module only stores them.
+
+Cached secret values are held AES-256-GCM encrypted under a random
+per-process session key that is never written anywhere (see _seal).  That
+keeps values out of memory dumps, swap and crash reports as readable text for
+anything that does not also capture the session key from the same process;
+it is NOT a defence against code running inside this process or one that can
+read its memory -- the key sits in the same address space.
 """
 import hashlib
 import os
@@ -42,6 +56,9 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from . import store
 
@@ -66,17 +83,19 @@ _MAX_HASH_BYTES = 64 * 1024 * 1024  # 64 MiB
 # stays empty and every run behaves exactly as it did before this feature
 # existed (decrypt, use, discard).
 #
-# signature -> {var_name: xor'd bytes}. Scoped per-signature -- a command
-# trusted with only_vars=["ONE_VAR"] caches only that one value, not the
-# whole vault, so approving one narrow command doesn't leave every other
-# secret resident in memory too.
+# signature -> {var_name: nonce || AES-256-GCM(ciphertext+tag)}. Scoped
+# per-signature -- a command trusted with only_vars=["ONE_VAR"] caches only
+# that one value, not the whole vault, so approving one narrow command doesn't
+# leave every other secret resident in memory too.
 _cached_secrets: dict = {}
 
-# signature -> random per-grant key (fresh os.urandom(32) every cache_secrets()
-# call, never reused). Paired with _cached_secrets to obfuscate the stored
-# values -- see _xor_bytes below for exactly what this does and doesn't
-# protect against. NOT a secret in the security sense: it lives in this same
-# process's memory right next to the ciphertext it unlocks.
+# signature -> random 16-byte per-grant context, fresh on every cache_secrets()
+# call and bound into each value's AES-GCM associated data. Not a secret and
+# not the encryption key (that is the per-process session key below): its job
+# is to make a sealed blob only decrypt for the grant it was sealed for, so
+# blobs cannot be moved between signatures. Kept as a dict named
+# _cache_keys because existing test fixtures clear it alongside
+# _cached_secrets.
 _cache_keys: dict = {}
 
 # sha256 of vault.enc at the moment _cached_secrets was last populated.
@@ -87,33 +106,71 @@ _cache_keys: dict = {}
 _cached_vault_fingerprint: Optional[str] = None
 
 # signature -> {"hashes": {resolved_path_str: sha256_hex, ...},
-#               "granted_wall": float,  "granted_mono": float}
+#               "granted_wall": float,  "granted_mono": float,
+#               "persistent": bool (only present on arm()ed entries)}
 _trusted: dict = {}
 
+_AAD_PREFIX = b"llm-env-vault/trust-cache/v1" + bytes([0])
+_NONCE_BYTES = 12
 
-def _xor_bytes(data: bytes, key: bytes) -> bytes:
-    """Cycles `key` over `data`. This is NOT encryption in any adversarial
-    sense -- the key is generated and stored in this same process's memory,
-    a few bytes away from the ciphertext it unlocks, so anything able to
-    read one can read the other. Its only purpose is to keep cached secret
-    values from sitting as recognizable, greppable plaintext for *passive*,
-    non-adversarial exposure: a crash reporter uploading a minidump, an
-    unencrypted hibernation/swap file, a pattern-based secret scanner
-    sweeping a memory dump for recognizable strings. It provides zero
-    protection against a same-process or same-account adversary -- see
-    README.md's "Trusted commands" section and this module's own docstring
-    above for what actually can't be defended against locally."""
-    if not key:
-        return data
-    return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+# Random 256-bit key, generated on first use in this process, never written to
+# disk, never logged. See the module docstring for what it does and does not
+# protect against.
+_session_key: Optional[bytearray] = None
+_session_aead: Optional[AESGCM] = None
 
 
-def _obfuscate(value: str, key: bytes) -> bytes:
-    return _xor_bytes(value.encode("utf-8"), key)
+def _aead() -> AESGCM:
+    global _session_key, _session_aead
+    if _session_aead is None:
+        _session_key = bytearray(os.urandom(32))
+        _session_aead = AESGCM(bytes(_session_key))
+    return _session_aead
 
 
-def _deobfuscate(data: bytes, key: bytes) -> str:
-    return _xor_bytes(data, key).decode("utf-8")
+def _reset_session_key() -> None:
+    """Forget the session key (test hook / hard wipe). Anything sealed under
+    the old key becomes unreadable, so the caches are dropped with it."""
+    global _session_key, _session_aead
+    if _session_key is not None:
+        for i in range(len(_session_key)):
+            _session_key[i] = 0
+    _session_key = None
+    _session_aead = None
+    _trusted.clear()
+    _cached_secrets.clear()
+    _cache_keys.clear()
+
+
+def _aad(context: bytes, name: str) -> bytes:
+    return _AAD_PREFIX + context + bytes([0]) + name.encode("utf-8")
+
+
+def _seal(value: str, context: bytes, name: str) -> bytes:
+    """AES-256-GCM under the per-process session key; returns nonce || ct+tag.
+
+    The plaintext is encoded into a bytearray that is zeroed straight after
+    sealing. That is as far as zeroising goes in Python: the original `value`
+    str (and any str handed back by cached_secrets) is immutable and lives
+    until the garbage collector frees it, which this module cannot force.
+    """
+    nonce = os.urandom(_NONCE_BYTES)
+    plain = bytearray(value.encode("utf-8"))
+    try:
+        try:
+            ct = _aead().encrypt(nonce, plain, _aad(context, name))
+        except TypeError:  # older cryptography wheels only take bytes
+            ct = _aead().encrypt(nonce, bytes(plain), _aad(context, name))
+        return nonce + ct
+    finally:
+        for i in range(len(plain)):
+            plain[i] = 0
+
+
+def _open(blob: bytes, context: bytes, name: str) -> str:
+    nonce, ct = blob[:_NONCE_BYTES], blob[_NONCE_BYTES:]
+    plain = _aead().decrypt(nonce, ct, _aad(context, name))
+    return plain.decode("utf-8")
 
 
 def make_signature(command, cwd, only_vars, materialize, background=False, files=None,
@@ -215,6 +272,40 @@ def _resolve_argv0(command, cwd) -> Optional[Path]:
         return candidate if candidate.is_file() else None
     except OSError:
         return None
+
+
+# Batch/script launchers are never trusted, for ANY tier (the 8 h trust and the
+# persistent always-allow entries alike).  cmd.exe re-parses the command line
+# (BatBadBut: argument injection, %VAR% expansion), and shutil.which may pick
+# the file from the working directory.  A single dialog-approved run is
+# unaffected; only the "trust this command" convenience is withheld.
+# BEHAVIOUR CHANGE in 2.4.0: an 8 h trust that used to be offered/matched for
+# such a command (e.g. `npm.cmd`, `build.bat`) now always falls back to the
+# dialog.
+_NO_TRUST_EXTENSIONS = (".cmd", ".bat", ".ps1")
+
+
+def persistent_or_8h_refusal(command, cwd) -> Optional[str]:
+    """Reason why no trust of any kind may exist for *command*, else None:
+    command[0], or the file it resolves to (_resolve_argv0), is a .cmd / .bat /
+    .ps1.  Windows ignores trailing dots and blanks in a name, so they are
+    stripped before the extension test."""
+    if not command or not isinstance(command[0], str):
+        return None
+    names = [command[0]]
+    try:
+        resolved = _resolve_argv0(command, cwd)
+    except Exception:
+        resolved = None
+    if resolved is not None:
+        names.append(str(resolved))
+    for name in names:
+        base = os.path.basename(name.replace("\\", "/")).rstrip(" .")
+        ext = os.path.splitext(base)[1].lower()
+        if ext in _NO_TRUST_EXTENSIONS:
+            return (f"{base!r} is a {ext} script; trust (8 hours or always) is not "
+                    f"offered for .cmd/.bat/.ps1 programs -- approve each run instead")
+    return None
 
 
 # Tools that conventionally read configuration from the working directory
@@ -476,17 +567,41 @@ def _vault_fingerprint() -> Optional[str]:
         return None
 
 
-def cache_secrets(signature, secrets: dict) -> None:
+def _drop_everything() -> None:
+    global _cached_vault_fingerprint
+    _trusted.clear()
+    _cached_secrets.clear()
+    _cache_keys.clear()
+    _cached_vault_fingerprint = None
+
+
+def cache_secrets(signature, secrets: dict, fingerprint: Optional[str] = None) -> None:
     """Caches exactly `secrets` (the caller is responsible for having
     already filtered this down to whatever was actually approved for
     `signature` -- see mcp_server.py's _run_with_env_impl, which filters to
-    only_vars before calling this) under a fresh, single-use obfuscation
-    key. A signature's previous cache entry, if any, is fully replaced."""
+    only_vars before calling this), each value sealed with AES-256-GCM under
+    the per-process session key. A signature's previous cache entry, if any,
+    is fully replaced.
+
+    *fingerprint* is the sha256 of the vault file the secrets were read from;
+    pass it when the caller already knows it (the unlock listener does) so it
+    is not re-read from disk a moment later, possibly from a different file.
+    Default: hash vault.enc now.
+
+    If a cache stamped with a DIFFERENT vault fingerprint is still resident, it
+    is dropped first -- otherwise stamping the new fingerprint would make those
+    stale entries look current again.
+    """
     global _cached_vault_fingerprint
-    key = os.urandom(32)
-    _cache_keys[signature] = key
-    _cached_secrets[signature] = {name: _obfuscate(value, key) for name, value in secrets.items()}
-    _cached_vault_fingerprint = _vault_fingerprint()
+    fp = fingerprint if fingerprint is not None else _vault_fingerprint()
+    if (_cached_vault_fingerprint is not None and fp != _cached_vault_fingerprint
+            and (_cached_secrets.keys() - {signature})):
+        _drop_everything()
+    context = os.urandom(16)
+    _cache_keys[signature] = context
+    _cached_secrets[signature] = {name: _seal(value, context, name)
+                                  for name, value in secrets.items()}
+    _cached_vault_fingerprint = fp
 
 
 def has_cached_secrets() -> bool:
@@ -498,14 +613,22 @@ def has_cached_secrets() -> bool:
 
 
 def cached_secrets(signature) -> Optional[dict]:
-    """The already-scoped subset cached for this exact signature, or None
-    if nothing is cached for it. Never returns more than what was approved
-    for this signature -- there is no longer a single shared full-vault
-    cache other signatures could accidentally read from."""
-    if signature not in _cached_secrets:
+    """The already-scoped subset cached for this exact signature (decrypted
+    to a plain {name: value} dict), or None if nothing is cached for it or it
+    cannot be authenticated. Never returns more than what was approved for
+    this signature -- there is no single shared full-vault cache other
+    signatures could accidentally read from.
+
+    The returned strs are ordinary immutable Python strings: callers should
+    use them for the run and drop the dict; this module cannot zero them."""
+    blobs = _cached_secrets.get(signature)
+    context = _cache_keys.get(signature)
+    if blobs is None or context is None:
         return None
-    key = _cache_keys[signature]
-    return {name: _deobfuscate(data, key) for name, data in _cached_secrets[signature].items()}
+    try:
+        return {name: _open(blob, context, name) for name, blob in blobs.items()}
+    except (InvalidTag, ValueError):
+        return None
 
 
 def trust(signature, file_hashes: dict) -> None:
@@ -514,6 +637,69 @@ def trust(signature, file_hashes: dict) -> None:
         "granted_wall": time.time(),
         "granted_mono": time.monotonic(),
     }
+
+
+def arm(key, snapshot: dict, secrets: dict, vault_fp: Optional[str] = None) -> None:
+    """Install a persistent (no-TTL) entry for the "always allow" feature.
+
+    *key* must not collide with make_signature tuples (use
+    ("always_allow", entry_id)). *snapshot* is stored as the entry's
+    approved-state record. *secrets* are the already-scoped values the entry
+    may inject; they are sealed like any cached secrets. *vault_fp* is the
+    sha256 of the vault file the values were read from (default: hash it now).
+
+    If anything cached belongs to a different vault fingerprint, ALL of it is
+    cleared first (see cache_secrets): the vault changed, so nothing resident
+    is trustworthy. The caller re-arms what should survive from the new body.
+    """
+    cache_secrets(key, secrets, fingerprint=vault_fp)
+    _trusted[key] = {
+        "hashes": snapshot,
+        "granted_wall": time.time(),
+        "granted_mono": time.monotonic(),
+        "persistent": True,
+    }
+
+
+def disarm(key) -> None:
+    """Remove one entry (trusted record and cached secrets). Unknown key: no-op."""
+    _trusted.pop(key, None)
+    _cached_secrets.pop(key, None)
+    _cache_keys.pop(key, None)
+
+
+_VAULT_CHANGED_REASON = ("The vault changed since these secrets were cached (a secret was "
+                         "added, removed, or the vault was re-unlocked) -- re-enter the "
+                         "master password to refresh it.")
+
+
+def _vault_changed_reason() -> Optional[str]:
+    """If vault.enc differs from the fingerprint the cache was filled under,
+    drop EVERYTHING (every signature and every armed entry -- all were
+    approved against a vault that no longer exists) and return the reason;
+    otherwise None."""
+    if _cached_vault_fingerprint is not None and _vault_fingerprint() != _cached_vault_fingerprint:
+        _drop_everything()
+        return _VAULT_CHANGED_REASON
+    return None
+
+
+def check_armed(key) -> tuple:
+    """Returns (ok, reason) for a persistent entry installed by arm().
+
+    Only the vault-fingerprint invalidation applies (no TTL, no file hashes --
+    the profile re-verifies its own snapshot at run time). ok=True: armed and
+    the vault is unchanged. ok=False, reason=None: not armed (never armed,
+    disarmed, or not a persistent entry). ok=False, reason=<str>: the vault
+    changed since arming; everything is dropped, as in check().
+    """
+    entry = _trusted.get(key)
+    if entry is None or not entry.get("persistent") or key not in _cached_secrets:
+        return False, None
+    reason = _vault_changed_reason()
+    if reason is not None:
+        return False, reason
+    return True, None
 
 
 def check(signature, command, cwd, extra_paths=None):
@@ -533,15 +719,25 @@ def check(signature, command, cwd, extra_paths=None):
     signature) is revoked here and the reason is meant to be shown to the
     human in the fallback dialog.
     """
-    global _cached_vault_fingerprint
-
     if signature not in _trusted or signature not in _cached_secrets:
         return False, None
+
+    # .cmd/.bat/.ps1 programs are never trusted (see persistent_or_8h_refusal);
+    # a grant that somehow exists is deleted, plaintext included.
+    refusal = persistent_or_8h_refusal(command, cwd)
+    if refusal is not None:
+        del _trusted[signature]
+        _cached_secrets.pop(signature, None)
+        _cache_keys.pop(signature, None)
+        return False, refusal
 
     entry = _trusted[signature]
     elapsed_wall = time.time() - entry["granted_wall"]
     elapsed_mono = time.monotonic() - entry["granted_mono"]
-    if elapsed_wall > _TRUST_TTL_SECONDS or elapsed_mono > _TRUST_TTL_SECONDS:
+    # arm()ed entries have no TTL; they end by disarm(), a vault change, or
+    # process exit.
+    if not entry.get("persistent") and (
+            elapsed_wall > _TRUST_TTL_SECONDS or elapsed_mono > _TRUST_TTL_SECONDS):
         # Drop this signature's cached plaintext too, not just its trust
         # record. Nothing would *serve* it after expiry (mcp_server only
         # reads cached_secrets() when check() returned ok), but leaving it
@@ -555,20 +751,14 @@ def check(signature, command, cwd, extra_paths=None):
         return False, ("Trust for this command expired -- the 8-hour trust grant "
                        "limit was reached. Re-approve to trust it again.")
 
-    if _cached_vault_fingerprint is not None and _vault_fingerprint() != _cached_vault_fingerprint:
-        # The vault changed since these secrets were cached -- every
-        # trusted command was approved against a vault snapshot that no
-        # longer exists, so the whole cache is stale, not just this one
-        # signature. Drop it all at once (not just `signature`'s entry);
-        # the next call (trusted or not) re-unlocks and repopulates from
-        # the current vault.
-        _trusted.clear()
-        _cached_secrets.clear()
-        _cache_keys.clear()
-        _cached_vault_fingerprint = None
-        return False, ("The vault changed since these secrets were cached (a secret was "
-                        "added, removed, or the vault was re-unlocked) -- re-enter the "
-                        "master password to refresh it.")
+    # The vault changed since these secrets were cached -- every trusted
+    # command was approved against a vault snapshot that no longer exists, so
+    # the whole cache is stale, not just this one signature. Drop it all at
+    # once; the next call (trusted or not) re-unlocks and repopulates from the
+    # current vault.
+    changed_reason = _vault_changed_reason()
+    if changed_reason is not None:
+        return False, changed_reason
 
     approved_hashes = entry["hashes"]
     current_hashes = referenced_file_hashes(command, cwd, extra_paths)
@@ -576,6 +766,9 @@ def check(signature, command, cwd, extra_paths=None):
         return True, None
 
     del _trusted[signature]
+    # Same as the TTL and refusal branches: the plaintext must not outlive the grant.
+    _cached_secrets.pop(signature, None)
+    _cache_keys.pop(signature, None)
     # Parenthesized explicitly -- set `-` binds tighter than `|`, so
     # `a | b - c` is `a | (b - c)`, not the `(a | b) - c` this needs.
     unchanged = {p for p in approved_hashes

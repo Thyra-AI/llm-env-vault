@@ -310,7 +310,7 @@ def test_upgrade_v1_to_v2_preserves_secrets_and_keeps_salt() -> None:
         # Recovery key works too
         plaintext, _dek, _hdr = crypto.open_v2_with_recovery(data, rk_text)
         recovered = json.loads(store._pkcs7_unpad_strict(plaintext))
-        assert recovered == BASE_SECRETS, (
+        assert {k: v for k, v in recovered.items() if not k.startswith("#")} == BASE_SECRETS, (
             f"REGRESSION: recovery key cannot read secrets after upgrade -- got {recovered!r}"
         )
 
@@ -402,7 +402,7 @@ def test_change_password_v2_rotates_dek_and_issues_new_recovery_key() -> None:
                 store.SECRETS_FILE.read_bytes(), new_rk_text
             )
             recovered = json.loads(store._pkcs7_unpad_strict(plaintext))
-            assert recovered == BASE_SECRETS, (
+            assert {k: v for k, v in recovered.items() if not k.startswith("#")} == BASE_SECRETS, (
                 f"REGRESSION: new recovery key cannot read secrets after change_password"
             )
         finally:
@@ -506,7 +506,7 @@ def test_recover_with_recovery_key_restores_access() -> None:
             data = store.SECRETS_FILE.read_bytes()
             plaintext, _dek, _hdr = crypto.open_v2_with_recovery(data, orig_rk_text)
             recovered = json.loads(store._pkcs7_unpad_strict(plaintext))
-            assert recovered == BASE_SECRETS, (
+            assert {k: v for k, v in recovered.items() if not k.startswith("#")} == BASE_SECRETS, (
                 f"REGRESSION: the original recovery key can no longer read the "
                 f"vault after being used once -- got {recovered!r}"
             )
@@ -891,7 +891,7 @@ def test_reissue_recovery_key_invalidates_old_and_issues_new() -> None:
             # New key must work
             plaintext, _dek, _hdr = crypto.open_v2_with_recovery(data, new_rk_text)
             recovered = json.loads(store._pkcs7_unpad_strict(plaintext))
-            assert recovered == BASE_SECRETS, (
+            assert {k: v for k, v in recovered.items() if not k.startswith("#")} == BASE_SECRETS, (
                 f"REGRESSION: new recovery key cannot read secrets -- got {recovered!r}"
             )
         finally:

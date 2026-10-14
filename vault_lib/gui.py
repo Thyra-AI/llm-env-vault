@@ -95,6 +95,84 @@ def _collapse_whitespace(text) -> str:
     return re.sub(r"\s+", " ", _strip_hidden(str(text))).strip()
 
 
+def _hex_escape(ch: str) -> str:
+    cp = ord(ch)
+    if cp <= 0xFF:
+        return f"\\x{cp:02x}"
+    if cp <= 0xFFFF:
+        return f"\\u{cp:04x}"
+    return f"\\U{cp:08x}"
+
+
+def _escape_chars(text, quote: bool) -> str:
+    r"""The escaping shared by _escape_pattern and _escape_report. Plain
+    printable letters, spacing marks, numbers, punctuation and symbols (and the
+    ASCII space) pass through; backslashes are doubled; everything else --
+    controls, format characters (bidi overrides, zero-width joiners), non-ASCII
+    spaces, line breaks, unassigned code points, and the NON-spacing and
+    enclosing combining marks (Mn/Me: they would otherwise attach to the
+    neighbouring glyph, so "e" + U+0301 would look just like a precomposed
+    U+00E9, and a leading one would attach to the opening quote) -- is shown as
+    a \xXX / \uXXXX / \UXXXXXXXX escape. With *quote*, "'" is escaped too."""
+    out = []
+    for ch in str(text):
+        cat = unicodedata.category(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif quote and ch == "'":
+            out.append("\\'")
+        elif ch == " " or (ch.isprintable() and cat[0] in "LMNPS" and cat not in ("Mn", "Me")):
+            out.append(ch)
+        else:
+            out.append(_hex_escape(ch))
+    return "".join(out)
+
+
+def _escape_pattern(text) -> str:
+    r"""Render a server-generated always-allow pattern for the consent dialog
+    as an escaped, quoted literal. Unlike _strip_hidden (which silently drops
+    format characters) this makes them VISIBLE: any character that is not
+    plain printable text -- bidi overrides, zero-width joiners, controls,
+    non-ASCII spaces, line breaks, combining marks, unassigned code points --
+    is shown as a \uXXXX / \xXX escape, and backslashes are doubled, so two
+    patterns that differ only in an invisible character can never look
+    identical to the human who is about to make a persistent decision. No
+    length cap: a consent-critical line must not be elided."""
+    return "'" + _escape_chars(text, quote=True) + "'"
+
+
+def _escape_report(text) -> str:
+    """Make a multi-line, server-built status report safe to show: each line
+    is escaped like _escape_pattern (without the quotes), so hidden characters
+    are visible instead of dropped. The ONLY line structure kept is "\\n" (the
+    server joins one entry per line; "\\r\\n" counts as "\\n"); any other break
+    (a lone CR, U+2028, VT, ...) is shown as an escape rather than starting a
+    new line. Blank lines are dropped and each line's outer spaces trimmed."""
+    lines = []
+    for line in str(text).replace("\r\n", "\n").split("\n"):
+        line = _escape_chars(line, quote=False).strip(" ")
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _reveal_collapse(text) -> str:
+    """_collapse_whitespace for a Command box, but a hidden character (Cf
+    format characters such as zero-width joiners and bidi overrides, and C0/C1
+    controls other than ordinary whitespace) is SHOWN as a \\uXXXX / \\xXX
+    escape instead of being silently stripped, so the human reads what will
+    actually run rather than a cleaned-up version of it. Backslashes are left
+    alone (a Windows path must stay readable)."""
+    out = []
+    for ch in str(text):
+        cat = unicodedata.category(ch)
+        if cat == "Cf" or (cat == "Cc" and ch not in "\t\n\r\f\v"):
+            out.append(_hex_escape(ch))
+        else:
+            out.append(ch)
+    return re.sub(r"\s+", " ", "".join(out)).strip()
+
+
 # --- Design tokens -----------------------------------------------------
 # A single zinc-neutral scale plus one accent color, matching the dark
 # theme at thyra-ai.com -- picked over the old ad hoc dark-grey-plus-
@@ -583,6 +661,37 @@ def _show_error(root, err_label, text):
     # fixed height and clip itself, and the buttons below it, off-screen.
     err_label.config(text=text)
     _center(root)
+
+
+def _show_blocking_error(root, text, title="llm-env-vault"):
+    """Show *text* in a small modal window and return only once the human has
+    dismissed it. For a message that would otherwise be lost because the
+    window it belongs to is about to be destroyed (an error label set right
+    before root.destroy() is never seen). The notice is a child of *root*, so
+    the caller must keep *root* alive until this returns -- it does, since
+    this blocks. Display trouble never blocks the caller."""
+    try:
+        win = tk.Toplevel(root)
+        win.title(title)
+        win.configure(bg=WINDOW_BG)
+        win.transient(root)
+        win.resizable(False, False)
+        _label(win, text, fg=DANGER, justify="left", wraplength=440).grid(
+            row=0, column=0, padx=18, pady=(18, 8))
+        _button(win, "OK", command=win.destroy, kind="primary").grid(
+            row=1, column=0, pady=(6, 16))
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        win.bind("<Return>", lambda e: win.destroy())
+        win.bind("<Escape>", lambda e: win.destroy())
+        _center(win)
+        try:
+            win.grab_set()
+        except tk.TclError:
+            pass
+        win.focus_force()
+        root.wait_window(win)
+    except tk.TclError:
+        pass
 
 
 def _clear_entry(entry):
@@ -2283,6 +2392,10 @@ def _applicable_manage_actions(info: dict, encrypted_file_count: int = 0) -> lis
         if encrypted_file_count:
             actions.append("rotate_file_key")
             actions.append("retire_file_keys")
+    # Always-allow entries live in the vault body, so listing/removing them
+    # only needs a readable vault and the master password.
+    actions.append("always_allow_list")
+    actions.append("always_allow_remove")
     return actions
 
 
@@ -2293,14 +2406,17 @@ def _manage_action_result_keys(action: str) -> frozenset:
     if action == "change_password":
         return frozenset(base | {"old_password", "new_password"})
     if action in ("setup_recovery", "reissue_recovery", "upgrade_v2",
-                  "rotate_file_key", "retire_file_keys"):
+                  "rotate_file_key", "retire_file_keys", "always_allow_list"):
         return frozenset(base | {"password"})
+    if action == "always_allow_remove":
+        return frozenset(base | {"password", "entry_id"})
     return frozenset(base)
 
 
 def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_vars=None,
                           trust_note: str = None, files=None, *, timeout=None,
-                          max_reads=None):
+                          max_reads=None, always_allow=None, hide_trust=False,
+                          arm_report=None):
     """Used by the run_with_env MCP tool. Returns an outcome dict:
     {"secrets": dict_or_None, "trust": bool}. secrets is None if
     denied/failed, in which case trust is always False. When only_vars is
@@ -2329,12 +2445,30 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
     what trust monitoring covers. Shown in full (scrollable) rather than
     truncated -- consent-critical text must not be elided.
 
+    always_allow: optional Offer (vault_lib.allowlist.make_offer: .pattern,
+    .label, .commit(password)). None means no always-allow checkbox at all.
+    When given, an unchecked "Always allow (survives restarts)" checkbox is
+    shown under the escaped canonical pattern. If the human ticks it, Allow
+    calls offer.commit(password) after the secrets load; a failure there is
+    shown in a modal notice before the window closes (_show_blocking_error)
+    and recorded in outcome["always_allow_error"], but the run still happens
+    once. outcome["always_allow"] is always present (False unless a commit
+    succeeded). If both this and the 8 h trust box are ticked, always-allow
+    wins and outcome["trust"] stays False -- even when the commit failed: the
+    human asked for a persistent entry, not for an 8 h grant.
+
+    hide_trust: True removes the 8 h trust checkbox (the caller already knows
+    this command can't, or shouldn't, be time-trusted).
+
+    arm_report: optional multi-line text listing the always-allow entries
+    this unlock armed, or a rollback warning. Shown in full (scrollable).
+
     No separate "Requested by" line here -- unlike the other dialogs, this
     one already shows exactly what's about to run in the Command box
     below, so a second line repeating the same command would just be a
     redundant wall of the same long text twice.
     """
-    outcome = {"secrets": None, "trust": False}
+    outcome = {"secrets": None, "trust": False, "always_allow": False}
     pad = {"padx": 18, "pady": 7}
 
     root, _run_modal = _new_window()
@@ -2376,6 +2510,29 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
         note_frame.grid_rowconfigure(0, weight=1)
         note_frame.grid_columnconfigure(0, weight=1)
         note_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
+        row += 1
+
+    report_text = _escape_report(arm_report) if arm_report else ""
+    if report_text:
+        # What this unlock will arm (or why it refused to): consent-critical,
+        # so scrollable and never elided, and in the warning colour so an
+        # entry the human does not recognise stands out.
+        _label(root, "Always-allow status:", fg=FG_MUTED).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"], pady=(6, 0))
+        row += 1
+        report_frame = tk.Frame(root, bg=WINDOW_BG)
+        report_box = _textbox(report_frame, fg=WARNING,
+                              height=min(6, max(2, report_text.count("\n") + 1)), width=52)
+        report_yscroll = _scrollbar(report_frame, orient="vertical",
+                                    command=report_box.yview)
+        report_box.config(yscrollcommand=report_yscroll.set)
+        report_box.insert("end", report_text)
+        report_box.config(state="disabled")
+        report_box.grid(row=0, column=0, sticky="nsew")
+        report_yscroll.grid(row=0, column=1, sticky="ns")
+        report_frame.grid_rowconfigure(0, weight=1)
+        report_frame.grid_columnconfigure(0, weight=1)
+        report_frame.grid(row=row, column=0, columnspan=2, sticky="we", padx=pad["padx"])
         row += 1
 
     # B3: exposure list shown in a scrollable Text widget rather than a
@@ -2421,7 +2578,7 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
 
     cmd_frame = tk.Frame(root, bg=WINDOW_BG)
     cmd_text = _textbox(cmd_frame, fg=FG, font=FONT_BODY, height=3, width=52)
-    cmd_text.insert("end", _collapse_whitespace(command_str))
+    cmd_text.insert("end", _reveal_collapse(command_str))
     cmd_text.config(state="disabled")
     cmd_text.grid(row=0, column=0, sticky="we")
     cmd_frame.grid_columnconfigure(0, weight=1)
@@ -2497,7 +2654,7 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
                fg=FG_MUTED, justify="left").grid(
             row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 6))
         row += 1
-    else:
+    elif not hide_trust:
         trust_check = tk.Checkbutton(
             # Hours derived from trust._TRUST_TTL_SECONDS rather than written out,
             # so the number the human consents to here can never drift from the
@@ -2510,6 +2667,31 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
             selectcolor=FIELD_BG, activebackground=WINDOW_BG, activeforeground=FG,
             highlightthickness=0, wraplength=480, justify="left", anchor="w")
         trust_check.grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 6))
+        row += 1
+
+    always_var = tk.BooleanVar(value=False)
+    if always_allow is not None and not files:
+        # Persistent, so it gets its own honest wording. The pattern is shown
+        # escaped and in full BEFORE the box (never elided, never silently
+        # stripped), the box starts unticked, and the text says plainly that
+        # the agent can obtain the injected values -- see plan 2.4.0 section 1.
+        _label(root, "Would match: " + _escape_pattern(always_allow.pattern),
+               fg=FG_MUTED, justify="left", wraplength=480).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(6, 0))
+        row += 1
+        always_check = tk.Checkbutton(
+            root, text="Always allow (survives restarts)",
+            variable=always_var, bg=WINDOW_BG, fg=FG, font=FONT_BODY,
+            selectcolor=FIELD_BG, activebackground=WINDOW_BG, activeforeground=FG,
+            highlightthickness=0, wraplength=480, justify="left", anchor="w")
+        always_check.grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(2, 0))
+        row += 1
+        _label(root, "Always-allowed runs skip this dialog, and the command and "
+                     "its hooks or containers can read the injected values -- "
+                     "prefer test-grade credentials. Revoke later with "
+                     "manage_vault.",
+               fg=WARNING, justify="left", wraplength=480).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 6))
         row += 1
 
     err = _label(root, "", fg=DANGER)
@@ -2567,7 +2749,27 @@ def unlock_for_run_dialog(command_str: str, materialize_path: str = None, only_v
             outcome["secrets"] = {k: v for k, v in secrets.items() if k in only_vars}
         else:
             outcome["secrets"] = secrets
-        outcome["trust"] = trust_var.get()
+        wants_always = always_allow is not None and always_var.get()
+        if wants_always:
+            # Persist only now: the password is proven right, the secrets and
+            # any files are loaded, and nothing above can still refuse. A
+            # failure must not block the one run the human approved, but it
+            # must not be reported as success either.
+            try:
+                always_allow.commit(password)
+            except Exception as e:  # noqa: BLE001
+                msg = f"Could not save the always-allow entry: {_safe_display(e)}"
+                outcome["always_allow_error"] = msg
+                # Modal, and BEFORE root.destroy(): a label set on a window
+                # that closes in the same callback is never seen.
+                _show_blocking_error(
+                    root, msg + "\n\nThis run still goes ahead once, but nothing "
+                                "was saved: you will be asked again next time.")
+            else:
+                outcome["always_allow"] = True
+        # Always-allow wins: asking for it means no 8 h grant, whether or not
+        # the save worked (a failed save is reported, not quietly downgraded).
+        outcome["trust"] = bool(trust_var.get()) and not wants_always
         root.destroy()
 
     def on_deny():
@@ -3038,6 +3240,7 @@ def manage_vault_dialog() -> dict:
       upgrade_v2       — only for v1 vaults
       setup_recovery   — v2 vault without a recovery slot
       reissue_recovery — v2 vault that already has a recovery slot
+      always_allow_list / always_allow_remove — any readable vault
 
     Returns {"action": str|None, ...} where action is one of the strings
     above, or None if cancelled/closed.  Carries the credentials the
@@ -3046,6 +3249,8 @@ def manage_vault_dialog() -> dict:
       setup_recovery:            password
       reissue_recovery:          password
       upgrade_v2:                password
+      always_allow_list:         password
+      always_allow_remove:       password, entry_id
 
     The caller (MCP server) drives all vault I/O; this dialog is free of
     vault side-effects, matching the pattern of change_password_dialog.
@@ -3126,6 +3331,8 @@ def manage_vault_dialog() -> dict:
             ("reissue_recovery", "Reissue Recovery Key"),
             ("rotate_file_key",  "Rotate Encrypted-File Key"),
             ("retire_file_keys", "Retire Old File Keys"),
+            ("always_allow_list",   "List Always-Allowed Commands"),
+            ("always_allow_remove", "Remove an Always-Allowed Command"),
         ]
 
         if not actions:
@@ -3159,6 +3366,8 @@ def manage_vault_dialog() -> dict:
             "upgrade_v2":       "Upgrade Vault to v2",
             "rotate_file_key":  "Rotate Encrypted-File Key",
             "retire_file_keys": "Retire Old File Keys",
+            "always_allow_list":   "List Always-Allowed Commands",
+            "always_allow_remove": "Remove an Always-Allowed Command",
         }
         _label(container, titles.get(action, action), font=FONT_TITLE).grid(
             row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"],
@@ -3212,6 +3421,26 @@ def manage_vault_dialog() -> dict:
                    "rotated onto the current key and is readable right now. Files "
                    "this vault has never been told about cannot be checked.",
                    fg=DANGER, justify="left").grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+
+        if action == "always_allow_list":
+            _label(container,
+                   "Always-allowed commands run without asking you again, even "
+                   "after a restart. The list is stored inside the encrypted "
+                   "vault, so the master password is needed to read it. Entries "
+                   "are shown with their id, kind, directory, shape and label -- "
+                   "never the values they inject.",
+                   fg=FG_MUTED, justify="left", wraplength=480).grid(
+                row=row, column=0, columnspan=2, sticky="w", **pad)
+            row += 1
+
+        if action == "always_allow_remove":
+            _label(container,
+                   "Removes one always-allowed command, so it asks you again "
+                   "next time. Take the id from the list action. Anything "
+                   "already running is not stopped.",
+                   fg=FG_MUTED, justify="left", wraplength=480).grid(
                 row=row, column=0, columnspan=2, sticky="w", **pad)
             row += 1
 
@@ -3276,6 +3505,13 @@ def manage_vault_dialog() -> dict:
             pw_entry.grid(row=row, column=1, **pad)
             row += 1
 
+            entry_id_entry = None
+            if action == "always_allow_remove":
+                _label(container, "Entry id:").grid(row=row, column=0, sticky="e", **pad)
+                entry_id_entry = _entry(container, width=30)
+                entry_id_entry.grid(row=row, column=1, **pad)
+                row += 1
+
             err_lbl.grid(row=row, column=0, columnspan=2, sticky="w", padx=pad["padx"])
             row += 1
 
@@ -3285,6 +3521,8 @@ def manage_vault_dialog() -> dict:
                 "upgrade_v2":       "Upgrade to v2",
                 "rotate_file_key":  "Rotate File Key",
                 "retire_file_keys": "Retire Old Keys",
+                "always_allow_list":   "List Entries",
+                "always_allow_remove": "Remove Entry",
             }
 
             def on_confirm():
@@ -3292,6 +3530,12 @@ def manage_vault_dialog() -> dict:
                 if not pw:
                     _show_error(root, err_lbl, "Password cannot be empty.")
                     return
+                if entry_id_entry is not None:
+                    entry_id = _collapse_whitespace(entry_id_entry.get())
+                    if not entry_id:
+                        _show_error(root, err_lbl, "Entry id cannot be empty.")
+                        return
+                    outcome["entry_id"] = entry_id
                 outcome["action"] = action
                 outcome["password"] = pw
                 root.destroy()

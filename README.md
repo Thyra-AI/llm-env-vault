@@ -208,7 +208,8 @@ learns the old password, can still decrypt that earlier snapshot.
 ### `manage_vault()`
 
 Password-gated hub for vault credential management: change the master password, set up or reissue a
-paper recovery key, or upgrade the vault from v1 to v2 format. Each sub-operation opens its own
+paper recovery key, upgrade the vault from v1 to v2 format, or list and remove
+[always-allow entries](#trusted-commands-always-allow) (`always_allow_list`, `always_allow_remove`). Each sub-operation opens its own
 consent dialog; nothing is written until you allow.
 
 **Password change:** re-derives a new wrapping key from a fresh salt and rotates the DEK — a copy of
@@ -620,6 +621,8 @@ a machine suspend nor a clock adjustment extends it.
 
 **"Exact" means exact.** The full argument list, `cwd`, `only_vars` (or `all_vars=True`), `materialize`, `background` and `files` together form the trusted signature — change any one and a fresh Allow is required. `only_vars=[]` and `all_vars=True` are deliberately different signatures even though neither names a variable, because they authorize very different exposure. `tail_chars` is not part of it: it only sizes the reply.
 
+**`.cmd`, `.bat` and `.ps1` are never trusted (2.4.0).** If the program being run resolves to a batch or PowerShell script, the 8-hour checkbox is not offered and trust is never consulted: cmd.exe re-expands `%VAR%` and metacharacters in arguments, which an "exact" signature can't account for. Such a command still runs, through the dialog every time.
+
 **A run that decrypts files is never trusted.** If `files` is non-empty the checkbox isn't even
 offered, and trust is never consulted — you are asked every single time. An 8-hour unattended grant
 to inject a token into an environment is one thing; an 8-hour unattended grant to write a private key
@@ -664,6 +667,84 @@ boundaries of the tracking, surfaced in the trust note when they apply:
 time-limited (8-hour TTL), in-memory, and gone on restart. Making it survive a restart with zero prompts would require persisting something capable of decrypting the vault (the password, the derived key, or equivalent), which breaks the one real invariant this project is built on: the master password never touches disk. Any persisted equivalent would ultimately be usable in plaintext-equivalent form by any process running under your OS account — the same account the AI agent runs as. Against an actively malicious agent with local code execution, no purely local/software mechanism is a real boundary; genuine protection there would need a separate, more-privileged OS principal gated by hardware-backed human presence (e.g. Windows Hello), which is out of scope. Use trusted commands to stop re-typing your password; don't rely on them to stop an agent already working against you.
 
 One more honest limit: an auto-allowed run hashes referenced files, then runs the command — there's a small window between the check and whatever the command itself later reads from disk. Irrelevant against the adversarial case above; against an ordinary cause (an editor autosaving mid-run), it means the check is a point-in-time snapshot, not a live guarantee.
+
+## Trusted commands (always allow)
+
+*New in 2.4.0.* The 8-hour trust above forgets everything when the server restarts. For commands you run all day (a `git push`, a `docker compose up`, a `kubectl get pods`) there is a second, persistent kind: an **always-allow entry**. It is stored in the vault, survives restarts, and lives until you remove it. There is no expiry and no 8-hour re-arm.
+
+**This is not a way to hide the values from the agent.** For an always-allow entry the agent *can* obtain the values it injects: a git hook that runs your tests executes code the agent can edit, a container it starts can be inspected and logged, and objects it applies to a cluster can be queried. The pins below limit *which* values go *where*; they do not stop the agent reading them. Every dialog and result says so. **Use test-grade credentials and the smallest `only_vars` that works.** If a value would hurt you in the agent's hands, don't put it behind an always-allow entry.
+
+### How an entry is armed
+
+Entries live in the encrypted vault body (the reserved key `#always_allow`), so tampering with the list makes the vault fail to open, and only someone who holds the master password can add one. They are **armed by every successful master-password unlock** (any tool, in this server process): each entry that still passes its checks is loaded into the in-memory trust cache with only its own `only_vars` values. A recovery-key unlock **never** arms anything, including writes made during that session. Removing an entry disarms it immediately.
+
+Every unlock dialog lists the entries it is about to arm (label, kind, variables), so an entry you don't recognise is visible before you click Allow.
+
+### Adding an entry
+
+The `run_with_env` unlock dialog gets a second checkbox, **"Always allow (survives restarts)"**, next to the 8-hour one. It is **off by default**, and the dialog shows, before you can tick it:
+
+- the canonical pattern the entry will match (for example `git push origin <branch>`), not just the literal command you were asked about;
+- the findings (what the profile saw: hooks, helpers, bind mounts, ...);
+- the notice that the agent can obtain these values.
+
+If both checkboxes are ticked, always allow wins. The checkbox is not offered at all for runs with `files`, `all_vars=True`, `background=True`, `max_reads` or `materialize`, or when the command or its working directory contains characters that could spoof the dialog (bidi controls, zero-width or other non-printable characters). `only_vars` must name at least one variable, as always.
+
+**Cool-down.** If you deny the same command three times within 30 minutes, the checkbox is hidden for that command for the next 30 minutes. The dialog itself still appears.
+
+### Listing and removing entries
+
+Both go through `manage_vault()` and need the master password, because the list is inside the ciphertext:
+
+- `always_allow_list` returns each entry's `id`, `kind`, `cwd`, `shape` and `label`. It never returns snapshot hashes, remote URLs, kubeconfig material or hook inventories.
+- `always_allow_remove` (with the entry `id`) removes one entry and rebuilds the armed set from the new vault body, so a removed entry cannot stay armed.
+
+### The four profiles
+
+A matching call is auto-allowed when its `only_vars` are a subset of the entry's (only the requested subset is injected) and every pinned input still matches. Anything else, including a flag outside the grammar, simply opens the normal dialog, so you can still approve a one-off run. Each profile rebuilds the command and the child's environment itself: a clean environment (no `GIT_*`, `DOCKER_*`, `KUBE*`, proxy or `LD_*` leakage from the caller), a `PATH` limited to system directories, and the program resolved to an absolute path and hashed before it runs.
+
+**git: `push`, `pull`, `fetch`, `ls-remote`** (never `clone`)
+
+- `push` is strict: branch names only, rewritten to `refs/heads/N:refs/heads/N`, always `--atomic`. No force (`--force`, `--force-with-lease`), no `--tags`/`--delete`/`--mirror`/`--all`, and no `+`, `:` or `*` refspecs. `pull` is fast-forward only (no rebase, no merge commit); `fetch` and `ls-remote` accept a short list of flags.
+- The remote is a **configured remote name**, never a URL or a path. Its URL is recorded at approval (https only), and immediately before every run `git remote get-url --all` must print exactly that one URL.
+- Pinned at command scope, where they beat your local and global config: the credential helper list recorded at approval (your own helper, e.g. Git Credential Manager, keeps working; `!shell` helpers make the entry ineligible), `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, proxies and submodule recursion, plus `GIT_ALLOW_PROTOCOL=https`.
+- **Hooks run normally**: the approved hooks directory is pinned and fingerprinted, and your pre-push hook still fires. If it runs tests, those tests are repository code the agent can edit, and they receive the injected variables.
+- Local repository config may only hold a short list of harmless keys; filters, drivers, aliases, `url.*`/`pushurl`, `credential.*` and similar make the command ineligible. System and global config, `.gitattributes` (at every depth), `.gitmodules` and `.lfsconfig` are hashed.
+- **Git version floor.** Git below 2.50.1 (or a patched maintenance release such as 2.45.4) is refused for auto-allow because of CVE-2025-48384; the normal dialog still works. See the [security posture](docs/security-posture-2.4.0.md).
+
+**docker: `compose up|down|pull|ps|logs|build` and `docker pull|push`**
+
+- Compose commands are limited to one approved project (files, project name, profiles) and to its approved services, with a closed list of flags. `down` never takes `-v` or `--rmi`; `logs` never follows; `run`, `exec`, `cp` and the rest of docker stay exact-only.
+- The daemon endpoint is pinned and always passed as `-H`. docker runs with a vault-owned `DOCKER_CONFIG` containing only your registry hosts and credential-helper names, so a plugin dropped into `~/.docker/cli-plugins` can't take over `docker compose`.
+- The compose model is hashed with placeholder values (never the real ones) and linted. Remote includes and build contexts, `# syntax=` Dockerfile directives and vault values under `build:` make the command ineligible; privileged mode, host mounts, host networking and similar are shown as findings you approve.
+- `build` and `up --build` are limited to an approved list of buildable services and receive **no vault values**. Vault values are **never put in docker's own environment**: for `up` they travel only inside the config piped to `compose -f -`, which puts them in the containers' environment; every other subcommand receives none.
+- **Images are not pinned.** Containers for non-built services run whatever image the registry currently serves, and the agent can read container environment variables and logs. The dialog and the result warn about this.
+
+**kubectl: `get`, `describe`, `logs`, `rollout status`, `apply`**
+
+- Pinned to one kubeconfig **context** and one **namespace** (switching context needs a new approval). Server, user and certificate flags, `--kubeconfig`, `--context`, `--token`, `--as` and friends are rejected. Secrets, RBAC, service accounts and CRDs can't be read. `logs` and `rollout status` always get a size limit and a timeout cap.
+- kubectl runs against a **vault-owned, sanitised copy** of your kubeconfig for that one context (https only, no insecure-TLS, no proxy, no auth-provider; an exec plugin only by absolute, hashed path). The copy contains your cluster credentials. It is kept sealed in the entry and written to a **persistent, content-addressed** file in the vault's per-user state folder, not a per-run temp file, so while it exists the agent (same OS user) can read it. If the original is your own `~/.kube/config` that adds no exposure, but the vault does not claim to hide cluster credentials. A kubeconfig that is itself a **vault secret is not supported** for kubectl entries.
+- `apply -f <file>` applies one manifest whose SHA-256 you approved. It is checked against a policy (allowed namespaced kinds only; no Secrets, RBAC, privileged pods, hostPath or host networking, secret volumes or `secretKeyRef`; **`imagePullSecrets` is refused**), and the approved bytes are fed to kubectl **through stdin**, so the file can't change between check and use.
+
+**exact: any other command, no wildcards**
+
+An exact entry matches the whole command line and nothing else. It is only offered for **native programs** (a Windows PE or an ELF/Mach-O executable) that are resolved to an absolute path once at approval, hashed, and installed in a directory ordinary users can't write to. **Not offered:** `.cmd`, `.bat` and `.ps1` files, shells, interpreters (`python`, `node`, `powershell`, ...), launchers (`npm`, `npx`, `make`, `cargo`, `dotnet`, `go`, ...), and `git`, `docker`, `kubectl` and `helm`, which must use their own profile (or the normal dialog). Files named on the command line and the usual config files of `gh`, `aws`, `az`, `terraform` and `curl` are hashed too. An exact entry pins the command line, **not what the program does with the variables**: its own config files, plugins and the files it reads can change its behaviour.
+
+### What invalidates an entry
+
+An entry is re-checked when it is armed and again **right before every run**. If anything it pinned has changed (the git binary or its credential helper, the hooks tree, the remote URL, a local git config key, the compose model, the docker config, the kubeconfig context or the manifest, a monitored file, a `.dll` in the working directory on Windows), the entry is not used for that run and the **normal dialog appears with a note saying what changed**. Approving that dialog re-snapshots the entry. Nothing is silently widened.
+
+If `vault.enc` turns out to be **older than the last state this machine saw** (someone put back an old copy), nothing is armed, the tool result says so, and it stays that way until a write you approve raises the vault's generation. The vault itself still opens.
+
+### Output redaction and the output cap
+
+Output of an auto-allowed run is redacted more strictly than usual: besides the exact value and its base64 and URL-encoded forms, the base64url, hex, `quote_plus`, upper-case and lower-case forms are replaced with `[REDACTED:NAME]` too. Each stream is also **capped at 256 KiB** (the tail is kept, and the result says it was truncated). Redaction stays best-effort: any transformation it doesn't model gets past it, and the cap limits volume, not leakage.
+
+### Rollback sidecar
+
+To catch an old `vault.enc` being restored, the server keeps the highest vault generation it has seen in a small file **outside the vault folder** (`%LOCALAPPDATA%\llm-env-vault\rollback` on Windows, `$XDG_STATE_HOME/llm-env-vault/rollback` or `~/.local/state/llm-env-vault/rollback` elsewhere). It holds a vault id and a number, never a secret. **Don't delete it casually**: a missing sidecar is accepted (and recreated), but removing it and then restarting the server is exactly what defeats the rollback check.
+
+The full threat model and the residual risks are in [docs/security-posture-2.4.0.md](docs/security-posture-2.4.0.md).
 
 ---
 

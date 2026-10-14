@@ -24,6 +24,8 @@ sys.dont_write_bytecode = True
 
 import base64
 import os
+import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -35,10 +37,15 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from vault_lib import gui, legacy_swap, procs, runstore, singleview, store, trust
+from vault_lib import (allowlist, envnames, gui, legacy_swap, procs, profiles, runstore,
+                       singleview, store, trust)
 from vault_lib.crypto import (WrongPassword, TooManyAttempts, WrongRecoveryKey,
                               MalformedRecoveryKey, NoRecoverySlot, VaultCorrupted,
                               VaultTampered)
+
+# Arm always-allow entries whenever the master password unlocks the vault (the
+# listener is idempotent; nothing is armed until a password unlock happens).
+allowlist.install()
 
 # Standing policy handed to every client that connects, so it applies
 # unconditionally rather than depending on a skill trigger firing at the exact
@@ -194,12 +201,79 @@ def _cleanup_stale_run_logs() -> None:
 REDACT_MIN_VALUE_LEN = 8
 
 
-def _redact_secrets(text: str, secrets: dict) -> tuple:
+# Cap on the captured output of a run that an always-allow entry auto-approved
+# (plan 2.4.0 s4), per stream, in bytes of UTF-8. It limits volume, not leakage.
+STRICT_OUTPUT_CAP_BYTES = 256 * 1024
+# First characters of the note _redact_secrets(strict=True) puts at the start of
+# a capped stream, so a caller can tell the output was truncated.
+STRICT_TRUNCATION_PREFIX = "[llm-env-vault: output truncated"
+# The raw (pre-redaction) capture of an auto-allowed run is bounded too, so a
+# command that prints without end cannot balloon this process: at most this many
+# bytes per stream are kept (the tail), the rest is read and discarded.
+STRICT_RAW_CAPTURE_BYTES = 4 * STRICT_OUTPUT_CAP_BYTES
+
+
+def _strict_variants(value: str) -> list:
+    """Every textual form of *value* that strict redaction replaces, longest
+    first: the value and its upper()/lower() forms, each as raw, standard and
+    urlsafe base64 (padded and unpadded), hex (lower and upper) and URL-encoded
+    (quote and quote_plus, upper- and lower-case %XX)."""
+    out = set()
+    for base in {value, value.upper(), value.lower()}:
+        raw = base.encode("utf-8")
+        out.add(base)
+        for enc in (base64.b64encode, base64.urlsafe_b64encode):
+            padded = enc(raw).decode("ascii")
+            out.add(padded)
+            out.add(padded.rstrip("="))
+        # The same bytes embedded in a larger base64 blob start at byte offset
+        # 0, 1 or 2 of a 3-byte group. At offsets 1 and 2 the leading chars mix
+        # in the neighbouring bytes, and a partial last group mixes in the
+        # following ones, so those boundary-affected chars are dropped and the
+        # untouched middle is what gets matched (unpadded; urlsafe too).
+        for enc in (base64.b64encode, base64.urlsafe_b64encode):
+            for offset, lead in ((0, 0), (1, 2), (2, 3)):
+                coded = enc(bytes(offset) + raw).decode("ascii").rstrip("=")
+                coded = coded[lead:]
+                if (offset + len(raw)) % 3:
+                    coded = coded[:-1]
+                if len(coded) >= REDACT_MIN_VALUE_LEN:
+                    out.add(coded)
+        hexed = raw.hex()
+        out.add(hexed)
+        out.add(hexed.upper())
+        for quoted in (urllib.parse.quote(base, safe=""), urllib.parse.quote_plus(base, safe="")):
+            out.add(quoted)
+            out.add(re.sub(r"%[0-9A-Fa-f]{2}", lambda m: m.group().lower(), quoted))
+    out.discard("")
+    return sorted(out, key=lambda v: (-len(v), v))
+
+
+def _cap_strict_output(text: str) -> str:
+    """Keep the last STRICT_OUTPUT_CAP_BYTES of *text* (UTF-8) and say so.
+    Call on text that is already redacted: cutting can then split a marker but
+    never expose a raw value."""
+    raw = text.encode("utf-8")
+    if len(raw) <= STRICT_OUTPUT_CAP_BYTES:
+        return text
+    kept = raw[-STRICT_OUTPUT_CAP_BYTES:].decode("utf-8", errors="ignore")
+    return (f"{STRICT_TRUNCATION_PREFIX}: this command was auto-allowed, so only the last "
+            f"{STRICT_OUTPUT_CAP_BYTES} of {len(raw)} bytes of this stream are kept]\n" + kept)
+
+
+def _redact_secrets(text: str, secrets: dict, strict: bool = False) -> tuple:
     """Replace every vault value in text with [REDACTED:VAR_NAME].
 
     Matches the exact value, its base64-encoded form, and its
     URL-percent-encoded form. Values shorter than REDACT_MIN_VALUE_LEN
     are skipped to avoid substring-destroying false positives.
+
+    strict=True is for runs auto-allowed by an always-allow entry (plan 2.4.0
+    s4). It additionally redacts base64 and base64url (padded and unpadded),
+    hex (lower/upper), quote and quote_plus URL-encodings and the upper()/lower()
+    forms of the value (each in those encodings), and caps the result at
+    STRICT_OUTPUT_CAP_BYTES, keeping the tail and prefixing a truncation note.
+    The cap is applied AFTER redaction.
 
     Returns (redacted_text, names_skipped_as_too_short).
     """
@@ -211,6 +285,10 @@ def _redact_secrets(text: str, secrets: dict) -> tuple:
             skipped.append(name)
             continue
         marker = f"[REDACTED:{name}]"
+        if strict:
+            for variant in _strict_variants(value):
+                text = text.replace(variant, marker)
+            continue
         # Exact value
         text = text.replace(value, marker)
         # Base64-encoded form (e.g. as it might appear in an HTTP Authorization header)
@@ -219,6 +297,8 @@ def _redact_secrets(text: str, secrets: dict) -> tuple:
         # URL-percent-encoded form (e.g. as it might appear in a connection string)
         url_enc = urllib.parse.quote(value, safe="")
         text = text.replace(url_enc, marker)
+    if strict:
+        text = _cap_strict_output(text)
     return text, skipped
 
 
@@ -374,6 +454,11 @@ def _add_secret_impl(var_name: str) -> dict:
     except (OSError, UnicodeDecodeError, ValueError) as e:
         return {"applied": False, "error": str(e)}
     is_update = var_name in index
+    if not is_update and envnames.is_tool_control_name(var_name):
+        # Plan 2.4.0 s4: NEW names that steer git/docker/kubectl/proxies/the
+        # loader are refused before any dialog. Names already in the vault
+        # (is_update) keep working.
+        return {"applied": False, "error": envnames.refusal_message(var_name)}
     placeholder = index[var_name] if is_update else store.next_placeholder(index)
     is_sensitive = store.is_sensitive_env_name(var_name)
     outcome = gui.add_secret_dialog(var_name, is_update, placeholder, is_sensitive=is_sensitive)
@@ -1168,6 +1253,8 @@ def _manage_vault_impl() -> dict:
       change_password  -- "old_password" (str), "new_password" (str)
       setup_recovery   -- "password" (str)
       reissue_recovery -- "password" (str)
+      always_allow_list   -- "password" (str)
+      always_allow_remove -- "password" (str), "entry_id" (str)
       rotate_file_key  -- "password" (str)
       retire_file_keys -- "password" (str)
       upgrade_v2       -- "password" (str). The dialog never sets "recovery";
@@ -1387,13 +1474,54 @@ def _manage_vault_impl() -> dict:
         return {"applied": True, "action": "upgrade_v2",
                 "message": "Vault upgraded to v2 format successfully."}
 
+    # ------------------------------------------------------------------ #
+    # always_allow_list / always_allow_remove                             #
+    # Entries live inside the vault body, so both need the master         #
+    # password; the listing carries no snapshot, URL or value.            #
+    # ------------------------------------------------------------------ #
+    if action in ("always_allow_list", "always_allow_remove"):
+        password = outcome.get("password")
+        if password is None:
+            return {"applied": False, "message": "Cancelled by user."}
+        entry_id = outcome.get("entry_id")
+        if action == "always_allow_remove":
+            entry_id = entry_id.strip() if isinstance(entry_id, str) else ""
+            if not entry_id:
+                return {"applied": False, "error": "No always-allow entry id was given."}
+        try:
+            if action == "always_allow_list":
+                entries = allowlist.list_entries(password)
+            else:
+                removed = allowlist.remove_entry(password, entry_id)
+        except FileNotFoundError:
+            return {"applied": False, "error": "No vault found."}
+        except TooManyAttempts as e:
+            return {"applied": False, "error": str(e)}
+        except WrongPassword:
+            return {"applied": False, "error": "Incorrect master password."}
+        except (OSError, ValueError, RuntimeError, VaultCorrupted, VaultTampered) as e:
+            return {"applied": False, "error": str(e)}
+        if action == "always_allow_list":
+            return {"applied": True, "action": action, "entries": entries,
+                    "message": (f"{len(entries)} always-allow entr"
+                                f"{'y' if len(entries) == 1 else 'ies'}."
+                                if entries else "No always-allow entries.")}
+        # Whatever the vault says, make sure nothing stays armed in memory.
+        trust.disarm((allowlist.TRUST_KEY_TAG, entry_id))
+        if not removed:
+            return {"applied": False, "action": action,
+                    "error": f"No always-allow entry with id {entry_id!r}."}
+        return {"applied": True, "action": action,
+                "message": f"Always-allow entry {entry_id} removed."}
+
     return {"applied": False, "error": f"Unrecognised action from vault management dialog."}
 
 
 @mcp.tool()
 def manage_vault() -> dict:
     """Open the vault management dialog for password changes, recovery key
-    setup and reissue, and v1-to-v2 format upgrades. All sensitive input
+    setup and reissue, v1-to-v2 format upgrades, and listing or removing
+    always-allow entries. All sensitive input
     (passwords, recovery keys) is collected exclusively through native
     dialogs; nothing is returned to the agent. A cancelled dialog is a
     clean no-op.
@@ -1410,6 +1538,10 @@ def manage_vault() -> dict:
                           setup_recovery afterwards for that. Two explicit
                           steps, each with its own consent dialog, rather
                           than one that quietly does two things.
+      always_allow_list   -- list the always-allow entries (id, kind, cwd,
+                          shape, label, armed, reason) in this tool's result;
+                          never snapshots or values.
+      always_allow_remove -- remove one always-allow entry by id.
 
     Recovery keys are displayed in a dedicated write-it-down dialog and
     never appear in this tool's result. If the human closes that dialog
@@ -1691,22 +1823,186 @@ def _reparse_points_to_share(path_str: str) -> bool:
 MAX_TIMEOUT_SECONDS = 24 * 3600
 
 
+def _to_text(data) -> str:
+    """A captured stream as str (subprocess hands back bytes when no text mode
+    was asked for, and on a timeout in either mode)."""
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return data
+
+
+class _CappedRunResult(procs.RunResult):
+    """RunResult from a capped capture: raw_truncated names the streams
+    ("stdout"/"stderr") whose beginning was dropped to stay within the limit."""
+    __slots__ = ("raw_truncated",)
+
+    def __init__(self, returncode, stdout, stderr, timed_out, binding, raw_truncated=()):
+        super().__init__(returncode, stdout, stderr, timed_out, binding)
+        self.raw_truncated = tuple(raw_truncated)
+
+
+def _run_capped(command: list, env: dict, cwd: Optional[str], timeout: Optional[float],
+                stdin_bytes: Optional[bytes], limit: int) -> "_CappedRunResult":
+    """Unbound foreground run that keeps only the last *limit* bytes of each
+    output stream while the child runs (the rest is read and thrown away, so
+    the child never blocks on a full pipe). On timeout the child AND everything
+    it started are killed: a Job object (procs._windows_job, KILL_ON_JOB_CLOSE)
+    on Windows, the process group the child leads on POSIX -- the same
+    mechanism as vault_lib.profiles._common.run_probe. The same kill ends a
+    descendant that still holds an output pipe after the child exited, so the
+    call can never wait on it forever. On Windows the job is closed when the
+    run ends, which also ends any other leftover descendant (as in a bound run)."""
+    extra_popen = {} if os.name == "nt" else {"start_new_session": True}
+    proc = subprocess.Popen(
+        command, env=env, cwd=cwd, creationflags=procs.NO_WINDOW,
+        stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, **extra_popen)
+    job_terminate = close_job = None
+    if os.name == "nt":
+        try:
+            assign, job_terminate, close_job, _job = procs._windows_job()
+            if assign is None or not assign(int(proc._handle)):
+                job_terminate = None
+        except Exception:  # noqa: BLE001 -- ctypes trouble must not block a run
+            job_terminate = None
+
+    def _kill_tree() -> None:
+        if job_terminate is not None:
+            try:
+                job_terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        elif os.name != "nt":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    dropped = {"stdout": False, "stderr": False}
+
+    def _drain(name: str, pipe) -> None:
+        buf = buffers[name]
+        try:
+            while True:
+                chunk = pipe.read1(65536) if hasattr(pipe, "read1") else pipe.read(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                if len(buf) > 2 * limit:
+                    del buf[:len(buf) - limit]
+                    dropped[name] = True
+        except (OSError, ValueError):
+            pass
+
+    def _feed() -> None:
+        try:
+            proc.stdin.write(stdin_bytes)
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+
+    threads = [threading.Thread(target=_drain, args=("stdout", proc.stdout), daemon=True),
+               threading.Thread(target=_drain, args=("stderr", proc.stderr), daemon=True)]
+    if stdin_bytes is not None:
+        threads.append(threading.Thread(target=_feed, daemon=True))
+    for t in threads:
+        t.start()
+    timed_out = False
+    try:
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _kill_tree()
+            proc.wait()
+        except BaseException:
+            _kill_tree()
+            proc.wait()
+            raise
+        # The readers normally end at once (the pipes closed with the child).
+        # One still alive means a descendant holds the pipe open: end the tree
+        # and give them a moment, rather than blocking the server on it.
+        deadline = time.monotonic() + (5.0 if timed_out else 2.0)
+        for t in threads:
+            t.join(max(0.0, deadline - time.monotonic()))
+        if not timed_out and any(t.is_alive() for t in threads):
+            _kill_tree()
+            deadline = time.monotonic() + 3.0
+            for t in threads:
+                t.join(max(0.0, deadline - time.monotonic()))
+    finally:
+        if close_job is not None:
+            try:
+                close_job()
+            except Exception:  # noqa: BLE001
+                pass
+    out = {}
+    for name, buf in buffers.items():
+        if len(buf) > limit:
+            del buf[:len(buf) - limit]
+            dropped[name] = True
+        out[name] = bytes(buf).decode("utf-8", errors="replace")
+    return _CappedRunResult(None if timed_out else proc.returncode, out["stdout"], out["stderr"],
+                            timed_out, "none", [n for n in ("stdout", "stderr") if dropped[n]])
+
+
 def _run_command(command: list, env: dict, cwd: Optional[str],
                  timeout: Optional[float], bind: bool = True,
-                 on_start=None) -> procs.RunResult:
+                 on_start=None, stdin_bytes: Optional[bytes] = None,
+                 capture_limit: Optional[int] = None) -> procs.RunResult:
     """The one place a foreground command is executed. A seam for tests, and
     the point where the child is bound to this server's lifetime.
 
     bind=False keeps 1.6.0 behaviour for a plain injection run: its
     descendants may outlive it (a script that starts a daemon and exits).
     Binding is for runs that put real values on disk, where "the command
-    exited" must mean nothing of it is still reading them."""
+    exited" must mean nothing of it is still reading them.
+
+    stdin_bytes (always-allow runs only: a profile's Verdict.stdin) is written
+    to the child's stdin instead of closing it. Such runs never write values
+    to disk, so they are never bound.
+
+    capture_limit (auto-allowed runs only) bounds the raw capture per stream;
+    see _run_capped. Also unbound-only.
+
+    Which runs kill the whole process tree on a timeout: bound runs
+    (procs.run_bound), capture_limit runs and stdin_bytes runs (_run_capped).
+    Only the plain unbound run (no stdin_bytes, no capture_limit) uses
+    subprocess.run, which kills just the direct child -- see _kills_tree."""
+    if capture_limit is not None:
+        if bind:
+            raise ValueError("capture_limit is only supported for unbound runs")
+        return _run_capped(command, env, cwd, timeout, stdin_bytes, capture_limit)
+    if stdin_bytes is not None:
+        if bind:
+            raise ValueError("stdin_bytes is only supported for unbound runs")
+        # Same tree-killing runner as the capped path, with no cap: a timeout
+        # must end what the command started, not only the direct child.
+        return _run_capped(command, env, cwd, timeout, stdin_bytes, sys.maxsize)
     if not bind:
         proc = subprocess.run(command, env=env, cwd=cwd, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
                               timeout=timeout, creationflags=procs.NO_WINDOW)
         return procs.RunResult(proc.returncode, proc.stdout, proc.stderr, False, "none")
     return procs.run_bound(command, env, cwd, timeout, on_start=on_start)
+
+
+def _kills_tree(bind: bool, capture_limit: Optional[int], stdin_bytes: Optional[bytes]) -> bool:
+    """Whether _run_command ends the command's whole process tree on a timeout
+    (true for every path except the plain unbound subprocess.run one, which
+    kills only the direct child). Keep in step with _run_command."""
+    return bool(bind) or capture_limit is not None or stdin_bytes is not None
 
 
 MAX_READS_LIMIT = 1000
@@ -1725,6 +2021,53 @@ def _tail(text: str, n: int) -> str:
 def _stream_info(text: str, tail_chars: int) -> dict:
     return {"chars": len(text), "lines": runstore.count_lines(text),
             "truncated": len(text) > tail_chars}
+
+
+def _verdict_cleanup_paths(verdict) -> list:
+    """Paths a profile's verdict wants deleted after the run (kubectl's per-run
+    cache dir). Read generically: profiles without the attribute have none."""
+    paths = getattr(verdict, "cleanup_paths", None) or ()
+    return [str(x) for x in paths if x]
+
+
+def _remove_paths(paths) -> None:
+    for path in paths:
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.unlink(path)
+        except OSError:
+            pass
+
+
+def _always_allow_arm_report() -> Optional[str]:
+    """Plain text for the unlock dialog: what the latest always-allow arming
+    pass armed or could not arm, plus any rollback warning. None when there is
+    nothing to say. Names and reasons only -- never a value."""
+    lines = []
+    try:
+        warning = allowlist.rollback_warning()
+        report = allowlist.last_arm_report()
+    except Exception:  # noqa: BLE001 -- a report must never block a run
+        return None
+
+    def one_line(value) -> str:
+        # Labels and reasons derive from the command and its directory, which
+        # the agent influences: a line break inside one must never become an
+        # extra status line the human reads as a separate verdict.
+        return " ".join(str(value).splitlines())
+
+    if warning:
+        lines.append(f"Warning: {one_line(warning)}")
+    for item in report.get("armed", []):
+        lines.append(f"Always-allow armed: {one_line(item.get('label'))}")
+    for item in report.get("disarmed", []):
+        lines.append(f"Always-allow NOT armed: {one_line(item.get('label'))} -- "
+                     f"{one_line(item.get('reason'))}")
+    for note in report.get("notes", []):
+        lines.append(one_line(note))
+    return "\n".join(lines) if lines else None
 
 
 def _run_with_env_impl(command: list, materialize: Optional[str], background: bool,
@@ -1856,6 +2199,24 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
     # moment the process exits, same as if the feature didn't exist.
     signature = trust.make_signature(command, cwd, only_vars, materialize, background,
                                       files, timeout=timeout, max_reads=max_reads)
+    # Always-allow (plan 2.4.0): a persistent, vault-stored entry that a
+    # profile verifies against this concrete request. Looked up before the
+    # session trust cache, and only for requests allowlist.eligible() accepts
+    # (never files, all_vars, background, materialize, max_reads, shells).
+    aa_request = None
+    aa_match = None
+    aa_reason = None
+    if not file_pairs:
+        aa_eligible, _aa_why = allowlist.eligible(command, materialize, background, files,
+                                                  max_reads, all_vars, only_vars, cwd)
+        if aa_eligible:
+            try:
+                aa_request = profiles.Request(
+                    tuple(command), allowlist.canonical_cwd(cwd or os.getcwd()),
+                    tuple(only_vars), timeout)
+                aa_match, aa_reason = allowlist.lookup(aa_request)
+            except Exception as e:  # noqa: BLE001 -- fail closed to the dialog
+                aa_match, aa_reason = None, f"always-allow lookup failed: {e}"
     if file_pairs:
         # A run that writes decrypted files to disk is NEVER auto-allowed and
         # never grants trust: a human sees the paths and approves every single
@@ -1863,9 +2224,22 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         # one risk; writing a private key into a directory unattended is
         # another, and the trust feature was designed for the first.
         auto_ok, invalidated_reason = False, None
+    elif aa_match is not None:
+        auto_ok, invalidated_reason = False, None
     else:
         auto_ok, invalidated_reason = trust.check(signature, command, cwd)
+        if aa_reason:
+            # The always-allow entry drifted and was disarmed: say why in the
+            # dialog and the result, ahead of any session-trust revocation.
+            invalidated_reason = (f"{aa_reason} {invalidated_reason}"
+                                  if invalidated_reason else aa_reason)
     trust_info = {}
+    if aa_reason and aa_match is None:
+        trust_info["invalidated_reason"] = aa_reason
+    aa_strict = aa_match is not None
+    # Per-run paths a profile created while verifying (lookup and recheck both
+    # verify); deleted on every exit from here on.
+    aa_cleanup = _verdict_cleanup_paths(aa_match.verdict) if aa_match is not None else []
 
     # trust.check()'s own contract guarantees cached_secrets(signature) is
     # non-None whenever it returns auto_ok=True, so this should be
@@ -1877,7 +2251,13 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
     # trust.cache_secrets()'s caller below, which filters before caching.
     raw_secrets = trust.cached_secrets(signature) if auto_ok else None
 
-    if auto_ok and raw_secrets is not None:
+    if aa_match is not None:
+        raw_secrets = aa_match.secrets
+        trust_info["auto_allowed"] = True
+        trust_info["always_allow"] = aa_match.id
+        trust_info["trust_note"] = (
+            f"Auto-allowed by always-allow entry '{aa_match.label}' ({aa_match.id})")
+    elif auto_ok and raw_secrets is not None:
         trust_info["auto_allowed"] = True
         # Show the remaining TTL so the human knows how long auto-allow lasts.
         _entry = trust._trusted.get(signature, {})
@@ -1923,20 +2303,54 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                 "the executable binary is drift-monitored, so changes to "
                 "whatever config it does load will NOT revoke trust.")
         dialog_trust_note = " ".join(_dialog_parts) if _dialog_parts else None
+        # The "Always allow" checkbox: offered only for an eligible request, no
+        # files, and outside the denial cool-down. The offer is built (profile
+        # snapshot taken) BEFORE the dialog opens, like pre_hashes above.
+        aa_offer = None
+        if aa_request is not None and not file_pairs \
+                and allowlist.cooldown_remaining(aa_request) <= 0:
+            try:
+                aa_offer = allowlist.make_offer(aa_request)
+            except Exception:  # noqa: BLE001 -- no offer, the normal dialog still works
+                aa_offer = None
+        hide_trust = bool(trust.persistent_or_8h_refusal(command, cwd))
         outcome = gui.unlock_for_run_dialog(subprocess.list2cmdline(command),
                                              materialize_path=str(materialized_path)
                                              if materialized_path else None,
                                              only_vars=only_vars,
                                              trust_note=dialog_trust_note,
                                              files=file_pairs or None,
-                                             timeout=timeout, max_reads=max_reads)
+                                             timeout=timeout, max_reads=max_reads,
+                                             always_allow=aa_offer,
+                                             hide_trust=hide_trust,
+                                             arm_report=_always_allow_arm_report())
         raw_secrets = outcome["secrets"]
         if raw_secrets is None:
+            if aa_request is not None:
+                allowlist.record_denial(aa_request)
             result = {"applied": False, "message": "Denied by user."}
             if invalidated_reason:
                 result["trust_note"] = invalidated_reason
             return result
-        if outcome["trust"] and not file_pairs:
+        aa_created = bool(outcome.get("always_allow")) and aa_offer is not None
+        # A failed save of the always-allow entry never blocks the approved run,
+        # but the caller must be told it was NOT created. The message is built
+        # by the dialog from the exception text only: no password, no values.
+        aa_error = outcome.get("always_allow_error")
+        if aa_error and aa_offer is not None:
+            trust_info["always_allow_error"] = str(aa_error)[:300]
+        if aa_created:
+            # Always-allow wins over the 8 h trust when both were ticked: the
+            # entry is the stronger, longer-lived grant, and the dialog only
+            # commits one of them.
+            granted_note = (
+                f"Always-allow entry '{aa_offer.label}' created: identical runs are "
+                f"auto-allowed with no password prompt, even after a restart, for as "
+                f"long as what it pinned is unchanged. Remove it with manage_vault "
+                f"(always_allow_remove).")
+            trust_info["trust_note"] = (f"{invalidated_reason} {granted_note}"
+                                         if invalidated_reason else granted_note)
+        elif outcome["trust"] and not file_pairs:
             # The dialog hides the checkbox for a files run, so this should
             # already be False. Belt to that braces: a grant here would let a
             # later identical call decrypt a private key with no human present.
@@ -2030,6 +2444,9 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
     # environment. Refuse to launch instead.
     leaked = sorted(k for k in secrets if store.is_reserved_key(k))
     if leaked:
+        if aa_match is not None:
+            aa_match.close()
+            _remove_paths(aa_cleanup)
         return _finish({"applied": False,
                 "error": f"Internal error: reserved vault key(s) {leaked} reached the "
                           f"environment builder -- refusing to launch the command."})
@@ -2173,6 +2590,47 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                         "are merged into 'stdout' for a background run). "
                         "Use the OS/your own process manager to stop it later."})
 
+    spawn_command = command
+    spawn_stdin = None
+    spawn_timeout = timeout
+    aa_stderr_markers = ()
+    if aa_match is not None:
+        # Verify once more immediately before the process is created: the file
+        # hashes, config and vault fingerprint may have moved since lookup.
+        recheck = aa_match.recheck()
+        aa_cleanup += _verdict_cleanup_paths(recheck)
+        if not recheck.ok or not recheck.argv:
+            aa_match.close()
+            _remove_paths(aa_cleanup)
+            why = recheck.reason or "the profile returned no command to run"
+            return _finish({"applied": False,
+                            "error": f"Always-allow entry '{aa_match.label}' no longer applies "
+                                     f"and was disarmed: {why}. Nothing was run; call again "
+                                     f"to be asked.",
+                            "invalidated_reason": why})
+        spawn_command = list(recheck.argv)
+        spawn_stdin = recheck.stdin
+        # Optional KubectlVerdict-style extras, read generically: a hard wall
+        # clock (the effective timeout is the smaller of it and the caller's)
+        # and stderr markers that turn a "successful" run into an error.
+        wall_clock = getattr(recheck, "wall_clock", None)
+        if isinstance(wall_clock, (int, float)) and not isinstance(wall_clock, bool) \
+                and wall_clock > 0:
+            spawn_timeout = wall_clock if timeout is None else min(timeout, wall_clock)
+        aa_stderr_markers = tuple(getattr(recheck, "stderr_fatal_markers", None) or ())
+        if recheck.env is None:
+            env = os.environ.copy()
+        elif recheck.replace_env:
+            env = dict(recheck.env)
+        else:
+            env = os.environ.copy()
+            env.update(recheck.env)
+        # inject_secrets=False: the profile carries the values itself (docker's
+        # compose model on stdin) or they must never reach this subcommand. The
+        # output is still redacted against match.secrets (redact_map).
+        if getattr(recheck, "inject_secrets", True) is not False:
+            env.update(secrets)
+
     old_sigterm = None
     if materialized_path is not None or restored_paths:
         # `or restored_paths` is load-bearing: without it a SIGTERM during a
@@ -2186,6 +2644,7 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
     cleanup_error = None
     survivors = []
     early = None
+    _tree_kill = False
     try:
         try:
             # stdin=DEVNULL: under the stdio transport this process's own
@@ -2202,14 +2661,19 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                 for w in watchers.values():
                     w.set_job(job_handle)
 
-            proc = _run_command(command, env, cwd, timeout,
-                                bind=bool(materialized_path is not None
-                                          or restored_paths),
-                                on_start=_on_start if watchers else None)
+            extra = {"stdin_bytes": spawn_stdin} if spawn_stdin is not None else {}
+            if aa_strict:
+                extra["capture_limit"] = STRICT_RAW_CAPTURE_BYTES
+            _run_bound = bool(materialized_path is not None or restored_paths)
+            _tree_kill = _kills_tree(_run_bound, extra.get("capture_limit"), spawn_stdin)
+            proc = _run_command(spawn_command, env, cwd, spawn_timeout,
+                                bind=_run_bound,
+                                on_start=_on_start if watchers else None, **extra)
         except subprocess.TimeoutExpired as e:
             # Unbound plain run hit its timeout: subprocess.run already killed
-            # the direct child. Report it the same way a bound run does.
-            proc = procs.RunResult(None, e.stdout or "", e.stderr or "", True, "none")
+            # the direct child (only it -- see _kills_tree). Report it the same
+            # way a bound run does.
+            proc = procs.RunResult(None, _to_text(e.stdout), _to_text(e.stderr), True, "none")
         except OSError as e:
             # Not returned from inside the try: the result must be built
             # AFTER the finally block below has cleaned the materialized
@@ -2218,6 +2682,9 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
         except (KeyboardInterrupt, _Terminated):
             early = {"applied": False, "message": "Interrupted."}
     finally:
+        if aa_match is not None:
+            aa_match.close()
+            _remove_paths(aa_cleanup)
         if old_sigterm is not None:
             signal.signal(signal.SIGTERM, old_sigterm)
         # Watchers first: stop, join OUTSIDE the restore lock (a watcher
@@ -2261,9 +2728,31 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
     # the raw output) is what read_run_output later searches.
     _stdout_full = proc.stdout or ""
     _stderr_full = proc.stderr or ""
-    _stdout_redacted, _stdout_skipped = _redact_secrets(_stdout_full, redact_map)
-    _stderr_redacted, _stderr_skipped = _redact_secrets(_stderr_full, redact_map)
+    _raw_cut = tuple(getattr(proc, "raw_truncated", ()) or ())
+    if _raw_cut:
+        # The capture dropped the beginning of these streams, which can leave a
+        # fragment of a value at the very start that no redaction pattern can
+        # match: drop as many characters as the longest redactable form has.
+        _lead = max((len(v) for val in redact_map.values()
+                     if len(val) >= REDACT_MIN_VALUE_LEN for v in _strict_variants(val)),
+                    default=0)
+        if "stdout" in _raw_cut:
+            _stdout_full = _stdout_full[_lead:]
+        if "stderr" in _raw_cut:
+            _stderr_full = _stderr_full[_lead:]
+    # An always-allow run nobody watched gets the strict redactor (more
+    # encodings, plus a per-stream size cap).
+    _stdout_redacted, _stdout_skipped = _redact_secrets(_stdout_full, redact_map,
+                                                        strict=aa_strict)
+    _stderr_redacted, _stderr_skipped = _redact_secrets(_stderr_full, redact_map,
+                                                        strict=aa_strict)
     _all_skipped = sorted(set(_stdout_skipped) | set(_stderr_skipped))
+    _raw_note = (f"{STRICT_TRUNCATION_PREFIX}: this command was auto-allowed and printed more "
+                 f"than {STRICT_RAW_CAPTURE_BYTES} bytes on this stream; only the end is kept]\n")
+    if "stdout" in _raw_cut and not _stdout_redacted.startswith(STRICT_TRUNCATION_PREFIX):
+        _stdout_redacted = _raw_note + _stdout_redacted
+    if "stderr" in _raw_cut and not _stderr_redacted.startswith(STRICT_TRUNCATION_PREFIX):
+        _stderr_redacted = _raw_note + _stderr_redacted
     _run_id = _RUN_OUTPUT.put({"stdout": _stdout_redacted, "stderr": _stderr_redacted})
     result = {
         "applied": True,
@@ -2276,6 +2765,13 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
             "stderr": _stream_info(_stderr_redacted, tail_chars),
         },
     }
+    if aa_strict and (_stdout_redacted.startswith(STRICT_TRUNCATION_PREFIX)
+                      or _stderr_redacted.startswith(STRICT_TRUNCATION_PREFIX)):
+        result["output_truncated"] = True
+        result["truncation_note"] = (
+            f"This command was auto-allowed by an always-allow entry, so each stream is "
+            f"capped at {STRICT_OUTPUT_CAP_BYTES} bytes (the end is kept); the stream(s) "
+            f"starting with '{STRICT_TRUNCATION_PREFIX}' were cut.")
     if len(_stdout_redacted) > runstore.MAX_STREAM_CHARS or \
             len(_stderr_redacted) > runstore.MAX_STREAM_CHARS:
         result["retention_note"] = (
@@ -2307,10 +2803,22 @@ def _run_with_env_core(command: list, materialize: Optional[str], background: bo
                 ". Raise max_reads if that was the command.")
     if getattr(proc, "timed_out", False):
         result["timed_out"] = True
+        _killed = ("its whole process tree" if _tree_kill else
+                   "the command itself only -- a process it started may still be running")
         result["timeout_note"] = (
-            f"The command was killed after {timeout} seconds (its whole process tree) and "
-            f"every real value was restored/removed. Pass a larger timeout= if it "
+            f"The command was killed after {spawn_timeout} seconds ({_killed}) "
+            f"and every real value was restored/removed. Pass a larger timeout= if it "
             f"legitimately needs longer.")
+    if aa_stderr_markers:
+        _stderr_low = _stderr_full.lower()
+        _hit = [m for m in aa_stderr_markers if isinstance(m, str) and m and m.lower() in _stderr_low]
+        if _hit:
+            result["stderr_fatal"] = True
+            result["error"] = (
+                "The tool reported a condition on stderr that its always-allow profile "
+                "treats as fatal (a safety policy may not have applied), so this run is "
+                "an error even though it exited with code "
+                f"{proc.returncode}: matched {_hit[0]!r}.")
     _binding = getattr(proc, "binding", None)
     if _binding and _binding != "job" and os.name == "nt":
         result["process_binding"] = (
@@ -2455,7 +2963,20 @@ def run_with_env(command: list[str], materialize: Optional[str] = None,
     and it is a convenience feature, not a security boundary (see
     README.md's "Trusted commands" section, which also covers what this
     can't catch -- e.g. a Dockerfile only referenced indirectly via a
-    compose file's `context:`)."""
+    compose file's `context:`).
+
+    Always-allow: for a narrow set of commands (the git, docker and kubectl
+    profiles, or a pinned native executable) the dialog also offers "Always
+    allow (survives restarts)". The entry is stored encrypted in the vault and
+    re-verified, per profile, before every run; a run it covers shows no
+    dialog and the result carries auto_allowed, always_allow (the entry id) and
+    a trust_note. Such a run gets stricter output redaction (more encodings of
+    each value) and each stream is capped at 256 KiB (output_truncated is set
+    when the cap cut something). Never offered with files, all_vars,
+    background, materialize or max_reads, nor for shells and interpreters. If
+    an entry no longer matches (a pinned file changed ...) it is disarmed and
+    the dialog appears again with the reason in invalidated_reason. The human
+    lists and removes entries with manage_vault."""
     return _run_with_env_impl(command, materialize, background, cwd, only_vars, files,
                               timeout, max_reads, all_vars, tail_chars)
 

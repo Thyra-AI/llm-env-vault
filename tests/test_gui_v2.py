@@ -41,6 +41,9 @@ from vault_lib.gui import (
     _parse_rk_input,
     _applicable_manage_actions,
     _manage_action_result_keys,
+    _escape_pattern,
+    _escape_report,
+    _reveal_collapse,
     MIN_PASSWORD_LEN,
 )
 from vault_lib.crypto import new_recovery_key, format_recovery_key
@@ -444,6 +447,64 @@ def test_result_keys_single_password_actions() -> None:
         )
 
 
+def test_manage_actions_always_allow_listed_for_every_readable_vault() -> None:
+    for info in [{"format": 1, "recovery_slot": False},
+                 {"format": 2, "recovery_slot": False},
+                 {"format": 2, "recovery_slot": True}]:
+        actions = _applicable_manage_actions(info)
+        assert "always_allow_list" in actions and "always_allow_remove" in actions, (
+            f"REGRESSION: always-allow actions missing for {info!r}: {actions!r}")
+    assert _applicable_manage_actions({"error": "x"}) == []
+
+
+def test_result_keys_always_allow() -> None:
+    assert _manage_action_result_keys("always_allow_list") == frozenset({"action", "password"})
+    assert _manage_action_result_keys("always_allow_remove") == frozenset(
+        {"action", "password", "entry_id"})
+
+
+# ---------------------------------------------------------------------------
+# Consent-line escaping: _escape_pattern, _escape_report, _reveal_collapse
+#
+# Hidden or look-alike characters must be SHOWN as escapes in text the human
+# consents to, never silently dropped or rendered identically to another string.
+# ---------------------------------------------------------------------------
+
+def test_escape_pattern_escapes_combining_marks() -> None:
+    decomposed = _escape_pattern("e\u0301")            # e + COMBINING ACUTE
+    precomposed = _escape_pattern("\u00e9")            # precomposed e-acute
+    assert decomposed != precomposed, "REGRESSION: look-alike sequences render identically"
+    assert "\\u0301" in decomposed
+    assert _escape_pattern("a\u20dd") == "'a\\u20dd'"  # Me (enclosing mark)
+    assert _escape_pattern("\u0301x") == "'\\u0301x'"  # a leading mark cannot join the quote
+
+
+def test_escape_pattern_still_passes_plain_text() -> None:
+    assert _escape_pattern("git push origin <branch>") == "'git push origin <branch>'"
+    assert _escape_pattern("caf\u00e9") == "'caf\u00e9'"
+
+
+def test_escape_report_is_escaped_per_line_and_keeps_line_structure() -> None:
+    out = _escape_report("Always-allow armed: a\u200bb\r\nNOT armed: c\u202ed\x07\n\n  last  ")
+    assert out.split("\n") == [
+        "Always-allow armed: a\\u200bb",
+        "NOT armed: c\\u202ed\\x07",
+        "last",
+    ], out
+    assert _escape_report("x\u2028y") == "x\\u2028y"   # not a line break here
+    assert _escape_report("e\u0301") == "e\\u0301"
+    assert _escape_report("") == ""
+    assert "'" in _escape_report("it's")               # no quoting/escaping of apostrophes
+
+
+def test_reveal_collapse_shows_hidden_characters_and_collapses_whitespace() -> None:
+    assert _reveal_collapse("g\u200bit  push\n\torigin") == "g\\u200bit push origin"
+    assert _reveal_collapse("a\u202eb\x07c") == "a\\u202eb\\x07c"
+    assert _reveal_collapse("a\u0085b") == "a\\x85b"
+    assert _reveal_collapse("plain \u00e9 text") == "plain \u00e9 text"
+    assert _reveal_collapse("C:\\dir\\file") == "C:\\dir\\file"   # backslashes untouched
+
+
 # ---------------------------------------------------------------------------
 # Contract integrity: applicable actions × result keys
 #
@@ -459,7 +520,8 @@ def test_all_applicable_actions_have_defined_result_keys() -> None:
         {"format": 2, "recovery_slot": False},
         {"format": 2, "recovery_slot": True},
     ]
-    known_actions = {"change_password", "setup_recovery", "reissue_recovery", "upgrade_v2"}
+    known_actions = {"change_password", "setup_recovery", "reissue_recovery", "upgrade_v2",
+                     "always_allow_list", "always_allow_remove"}
     for info in all_infos:
         for action in _applicable_manage_actions(info):
             assert action in known_actions, (

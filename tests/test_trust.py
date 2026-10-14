@@ -212,6 +212,9 @@ def test_check_detects_content_change() -> None:
         assert reason is not None and str(ref) in reason and "changed" in reason.lower()
         # Revocation is one-shot: the entry is gone, not just "currently mismatched".
         assert sig not in trust._trusted
+        # ... and so are the sealed secrets: they must not outlive the grant.
+        assert trust.cached_secrets(sig) is None
+        assert sig not in trust._cache_keys
 
 
 def test_check_detects_disappearance() -> None:
@@ -684,11 +687,12 @@ def test_auto_allow_still_respects_only_vars_filtering() -> None:
                 "auto-allowed run leaked a secret outside its approved only_vars")
 
 
-def test_cached_secret_is_obfuscated_not_plaintext_in_the_cache_dict() -> None:
+def test_cached_secret_is_encrypted_not_plaintext_in_the_cache_dict() -> None:
     """Cached values must not sit as recognizable plaintext bytes in
-    _cached_secrets -- proves the XOR obfuscation actually runs (not
-    present-but-unused), while cached_secrets() still round-trips to the
-    real value via the matching key in _cache_keys."""
+    _cached_secrets -- proves the AES-GCM sealing actually runs (not
+    present-but-unused): the stored blob is nonce || ciphertext || tag, so it
+    is exactly 28 bytes longer than the value and does not contain it, while
+    cached_secrets() still round-trips to the real value."""
     with isolated_vault():
         cmd = _py()
         with fake_dialog(_allow(trust_it=True)):
@@ -699,6 +703,8 @@ def test_cached_secret_is_obfuscated_not_plaintext_in_the_cache_dict() -> None:
         plaintext_bytes = BASE_SECRETS["DOCKER_TEST_TOKEN"].encode("utf-8")
         assert stored != plaintext_bytes, (
             "REGRESSION: cached secret is stored as raw plaintext bytes")
+        assert plaintext_bytes not in stored
+        assert len(stored) == 12 + len(plaintext_bytes) + 16
         assert trust.cached_secrets(sig)["DOCKER_TEST_TOKEN"] == BASE_SECRETS["DOCKER_TEST_TOKEN"]
 
 
@@ -1113,6 +1119,202 @@ def test_cleanup_stale_run_logs_removes_old_ones_keeps_recent_ones() -> None:
         assert not old_path.exists(), "REGRESSION: a stale run log was not cleaned up"
         assert recent_path.exists(), "REGRESSION: a recent run log was incorrectly deleted"
         assert unrelated_path.exists(), "REGRESSION: a non-matching file was incorrectly deleted"
+
+
+# ---------------------------------------------------------------------------
+# 2.4.0 core: persistent (always-allow) entries and the AES-GCM session cache
+# ---------------------------------------------------------------------------
+
+AA_KEY = ("always_allow", "abc123def456")
+
+
+def _vault_fp() -> str:
+    import hashlib
+    return hashlib.sha256(store.SECRETS_FILE.read_bytes()).hexdigest()
+
+
+@contextlib.contextmanager
+def _clock_shifted(seconds: float):
+    """Both clocks jump forward -- the TTL checks either one."""
+    real_time, real_mono = time.time, time.monotonic
+    time.time = lambda: real_time() + seconds
+    time.monotonic = lambda: real_mono() + seconds
+    try:
+        yield
+    finally:
+        time.time, time.monotonic = real_time, real_mono
+
+
+def test_arm_entry_never_expires_while_ordinary_trust_does() -> None:
+    with isolated_vault() as tmp:
+        script = tmp / "run.py"
+        script.write_text("print(1)\n", encoding="utf-8")
+        cmd = [sys.executable, str(script)]
+        hashes = trust.referenced_file_hashes(cmd, str(tmp))
+        fp = _vault_fp()
+
+        trust.arm(AA_KEY, hashes, {"DOCKER_TEST_TOKEN": "tok-abc-123"}, fp)
+        plain_sig = trust.make_signature(cmd, str(tmp), ["DOCKER_TEST_TOKEN"], None)
+        trust.cache_secrets(plain_sig, {"DOCKER_TEST_TOKEN": "tok-abc-123"})
+        trust.trust(plain_sig, hashes)
+
+        assert trust.check_armed(AA_KEY) == (True, None)
+        assert trust.check(AA_KEY, cmd, str(tmp)) == (True, None)
+        assert trust.check(plain_sig, cmd, str(tmp)) == (True, None)
+
+        with _clock_shifted(9 * 3600):
+            assert trust.check_armed(AA_KEY) == (True, None)
+            assert trust.check(AA_KEY, cmd, str(tmp)) == (True, None)
+            assert trust.cached_secrets(AA_KEY) == {"DOCKER_TEST_TOKEN": "tok-abc-123"}
+            ok, reason = trust.check(plain_sig, cmd, str(tmp))
+            assert not ok and "expired" in reason.lower()
+        # the persistent entry is untouched by the ordinary entry's expiry
+        assert trust.check_armed(AA_KEY) == (True, None)
+
+
+def test_check_armed_unknown_disarmed_and_non_persistent_keys_are_not_armed() -> None:
+    with isolated_vault():
+        assert trust.check_armed(AA_KEY) == (False, None)
+        trust.arm(AA_KEY, {}, {"X": "1"}, _vault_fp())
+        assert trust.check_armed(AA_KEY) == (True, None)
+        trust.disarm(AA_KEY)
+        assert trust.check_armed(AA_KEY) == (False, None)
+        assert trust.cached_secrets(AA_KEY) is None
+        assert AA_KEY not in trust._trusted and AA_KEY not in trust._cache_keys
+        trust.disarm(AA_KEY)  # unknown key: no-op
+
+        sig = trust.make_signature(["x"], None, ["X"], None)
+        trust.cache_secrets(sig, {"X": "1"})
+        trust.trust(sig, {})
+        assert trust.check_armed(sig) == (False, None), (
+            "an ordinary TTL grant must not be reportable as armed")
+
+
+def test_vault_change_invalidates_armed_entries_and_everything_else() -> None:
+    with isolated_vault():
+        sig = trust.make_signature(["x"], None, ["X"], None)
+        trust.cache_secrets(sig, {"X": "1"})
+        trust.trust(sig, {})
+        trust.arm(AA_KEY, {}, {"X": "1"}, _vault_fp())
+        assert trust.check_armed(AA_KEY) == (True, None)
+
+        store.save_secrets(TEST_PASSWORD, {**BASE_SECRETS, "NEW_ONE": "v-new-1"})
+
+        ok, reason = trust.check_armed(AA_KEY)
+        assert not ok and reason and "vault changed" in reason
+        assert not trust._trusted and not trust._cached_secrets and not trust._cache_keys
+        assert trust.cached_secrets(AA_KEY) is None
+        assert trust.cached_secrets(sig) is None
+        assert trust._cached_vault_fingerprint is None
+
+
+def test_arm_with_a_new_vault_fingerprint_drops_what_was_armed_before() -> None:
+    with isolated_vault():
+        trust.arm(AA_KEY, {}, {"X": "old"}, _vault_fp())
+        other = ("always_allow", "zzz")
+        store.save_secrets(TEST_PASSWORD, {**BASE_SECRETS, "X": "rotated"})
+        trust.arm(other, {}, {"X": "rotated"}, _vault_fp())
+        # the first entry was approved against the previous vault: gone, not
+        # silently re-validated by the new fingerprint.
+        assert trust.check_armed(AA_KEY) == (False, None)
+        assert trust.cached_secrets(AA_KEY) is None
+        assert trust.check_armed(other) == (True, None)
+        assert trust.cached_secrets(other) == {"X": "rotated"}
+
+
+def test_arm_same_fingerprint_keeps_sibling_entries() -> None:
+    with isolated_vault():
+        fp = _vault_fp()
+        other = ("always_allow", "zzz")
+        trust.arm(AA_KEY, {}, {"A": "1"}, fp)
+        trust.arm(other, {}, {"B": "2"}, fp)
+        assert trust.check_armed(AA_KEY) == (True, None)
+        assert trust.check_armed(other) == (True, None)
+        trust.disarm(AA_KEY)
+        assert trust.check_armed(other) == (True, None)
+
+
+def test_cache_secrets_explicit_fingerprint_is_used_verbatim() -> None:
+    with isolated_vault():
+        sig = trust.make_signature(["x"], None, ["X"], None)
+        trust.cache_secrets(sig, {"X": "1"}, fingerprint="f" * 64)
+        assert trust._cached_vault_fingerprint == "f" * 64
+        trust.cache_secrets(sig, {"X": "2"})  # default: hash vault.enc now
+        assert trust._cached_vault_fingerprint == _vault_fp()
+
+
+def test_cache_restamp_does_not_revive_entries_from_an_older_vault() -> None:
+    with isolated_vault():
+        stale = trust.make_signature(["a"], None, ["X"], None)
+        trust.cache_secrets(stale, {"X": "old"})
+        trust.trust(stale, {})
+        store.save_secrets(TEST_PASSWORD, {**BASE_SECRETS, "X": "new"})
+        fresh = trust.make_signature(["b"], None, ["X"], None)
+        trust.cache_secrets(fresh, {"X": "new"})  # stamps the NEW fingerprint
+        assert trust.cached_secrets(stale) is None
+        assert stale not in trust._trusted
+        assert trust.cached_secrets(fresh) == {"X": "new"}
+
+
+def test_cache_round_trip_under_aes_gcm_and_tamper_detection() -> None:
+    with isolated_vault():
+        values = {"ASCII": "tok-abc-123", "UNI": "pässwörd-\u2603-\U0001F511", "EMPTY": "",
+                  "LONG": "x" * 5000}
+        sig = trust.make_signature(["x"], None, sorted(values), None)
+        trust.cache_secrets(sig, values)
+
+        got = trust.cached_secrets(sig)
+        assert got == values and type(got) is dict
+        for name, value in values.items():
+            blob = trust._cached_secrets[sig][name]
+            assert isinstance(blob, bytes)
+            assert len(blob) == 12 + len(value.encode("utf-8")) + 16
+            if value:
+                assert value.encode("utf-8") not in blob
+
+        # fresh nonce on every seal: re-caching the same values changes blobs
+        before = dict(trust._cached_secrets[sig])
+        trust.cache_secrets(sig, values)
+        assert all(trust._cached_secrets[sig][n] != before[n] for n in values)
+
+        # flipping one ciphertext bit makes the whole entry unreadable
+        blob = bytearray(trust._cached_secrets[sig]["ASCII"])
+        blob[14] ^= 1
+        trust._cached_secrets[sig]["ASCII"] = bytes(blob)
+        assert trust.cached_secrets(sig) is None
+
+
+def test_sealed_blob_does_not_open_under_another_signature_or_name() -> None:
+    with isolated_vault():
+        a = trust.make_signature(["a"], None, ["X"], None)
+        b = trust.make_signature(["b"], None, ["X"], None)
+        trust.cache_secrets(a, {"X": "secret-a", "Y": "secret-y"})
+        trust.cache_secrets(b, {"X": "secret-b"})
+        # move a's blob into b's slot: different grant context -> rejected
+        trust._cached_secrets[b]["X"] = trust._cached_secrets[a]["X"]
+        assert trust.cached_secrets(b) is None
+        # swap two names inside one grant: associated data binds the name
+        trust.cache_secrets(a, {"X": "secret-a", "Y": "secret-y"})
+        sx, sy = trust._cached_secrets[a]["X"], trust._cached_secrets[a]["Y"]
+        trust._cached_secrets[a]["X"], trust._cached_secrets[a]["Y"] = sy, sx
+        assert trust.cached_secrets(a) is None
+
+
+def test_session_key_is_per_process_random_and_reset_drops_the_cache() -> None:
+    with isolated_vault():
+        sig = trust.make_signature(["x"], None, ["X"], None)
+        trust.cache_secrets(sig, {"X": "v"})
+        key1 = bytes(trust._session_key)
+        assert len(key1) == 32 and key1 != b"\0" * 32
+        trust._reset_session_key()
+        assert trust.cached_secrets(sig) is None and not trust.has_cached_secrets()
+        trust.cache_secrets(sig, {"X": "v"})
+        assert bytes(trust._session_key) != key1
+        assert trust.cached_secrets(sig) == {"X": "v"}
+        # the key never lands on disk next to the vault
+        for f in store.ROOT.iterdir():
+            if f.is_file():
+                assert bytes(trust._session_key) not in f.read_bytes()
 
 
 # ---------------------------------------------------------------------------

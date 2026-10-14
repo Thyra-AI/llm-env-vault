@@ -221,12 +221,17 @@ def test_dialog_checks_pass_in_a_clean_interpreter() -> None:
         env["LLM_ENV_VAULT_PRIVATE_DESKTOP"] = "1"
 
     proc = subprocess.run([python, script], cwd=repo, capture_output=True, env=env,
-                          # A clean sweep takes about 5 seconds. 300 s meant a
-                          # dialog that hangs -- a pack/grid deadlock inside
-                          # .grid(), say, which no teardown guard can rescue --
-                          # sat on someone's screen for five minutes before the
-                          # test admitted it. Fail fast instead.
-                          text=True, timeout=90)
+                          # A clean sweep takes about 5 seconds on a machine whose Tk
+                          # behaves, and 300 s meant a dialog that hangs -- a pack/grid
+                          # deadlock inside .grid(), say, which no teardown guard can
+                          # rescue -- sat on someone's screen for five minutes before
+                          # the test admitted it. Fail reasonably fast instead. 90 s
+                          # was too tight on Windows 11 build 26200 / Tk 8.6: from the
+                          # third root in a process onward, EVERY wm deiconify of a
+                          # realised window stalls exactly 2.0 s (reproduced with
+                          # eight lines of bare tkinter on the private desktop, so it
+                          # is not this code), and ~55 windows then take ~2 minutes.
+                          text=True, timeout=240)
     out = (proc.stdout or "") + (proc.stderr or "")
 
     # Exit 3 is "no private desktop": a failure, never a skip. A sweep that

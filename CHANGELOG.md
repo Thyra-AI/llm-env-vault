@@ -7,6 +7,72 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 default branch rather than a tag, so tags here are for reference and rollback rather than for
 pinning what a user installs.
 
+## [2.4.0] — 2026-10-14
+
+Persistent "always allow" for `git`, `docker`, `kubectl` and exact native programs. Read the
+**behaviour changes** first: two of them affect people who never use the new feature.
+
+### Behaviour changes
+
+- **The 8-hour trust now refuses `.cmd`, `.bat` and `.ps1`.** If the program a `run_with_env`
+  call executes resolves to a batch or PowerShell script (`npm.cmd`, `yarn.cmd`, a `.ps1`
+  wrapper, ...), the 8-hour checkbox is no longer offered and trust is never consulted: cmd.exe
+  re-expands `%VAR%` and metacharacters in arguments and `shutil.which` can resolve from the
+  working directory, so an "exact command" signature is not exact. Such a command **still runs,
+  but through the dialog every time**. Native executables are unaffected.
+- **`add_secret` refuses NEW variable names on the tool-control denylist.** Names that steer a
+  tool rather than carry a credential (`PATH`, `HOME`, `USERPROFILE`, `KUBECONFIG`, `GIT_*`,
+  `DOCKER_*`, `COMPOSE_*`, `KUBE*`, `SSH_*`, `LD_*`, `PYTHON*`, `*_PROXY`, ...; the full list is in
+  `vault_lib/envnames.py`) are rejected when you add them. **Variables already in your vault keep
+  working** for ordinary `run_with_env` use and are never renamed; they are only ineligible for
+  always-allow entries.
+- **`run_with_env` output of auto-allowed runs is strictly redacted and capped.** A run that an
+  always-allow entry auto-approved also has the base64url, hex, `quote_plus`, upper-case and
+  lower-case forms of its values redacted, and each of stdout and stderr is capped at 256 KiB (the
+  tail is kept; the result says it was truncated). Runs you approve in the dialog are unchanged.
+- **A kubeconfig stored as a vault secret is unsupported for kubectl entries.** The vault would
+  have to write a flattened copy of it to disk, which is a leak window beyond what it promises.
+  Use the kubeconfig file on disk, or run kubectl through the dialog.
+
+### Added
+
+- **Always-allow entries.** The `run_with_env` unlock dialog has a second checkbox, "Always allow
+  (survives restarts)", off by default and hidden for 30 minutes after three denials of the same
+  command. An entry lives in the encrypted vault body (reserved key `#always_allow`, so tampering
+  makes the vault fail to open) until you remove it, and is **armed by every successful
+  master-password unlock**; a recovery-key unlock never arms. Every unlock dialog lists the entries
+  it is about to arm. Profiles, each with a clamped grammar, a from-scratch environment, a pinned
+  and hashed binary and a re-check right before every run:
+  - `git`: `push` (strict: branch refspecs only, no force/tags/`+`/`:`), `pull` (fast-forward
+    only), `fetch`, `ls-remote`; pinned remote URL, credential helper and hooks directory; hooks
+    run normally; refused below a git version floor (CVE-2025-48384).
+  - `docker`: `compose up|down|pull|ps|logs|build` for approved services and `docker pull|push`;
+    pinned daemon endpoint, vault-owned `DOCKER_CONFIG`, compose model hashed and linted. Images
+    are not pinned. Vault values are never put in docker's own environment.
+  - `kubectl`: `get`, `describe`, `logs`, `rollout status` and `apply` of one hash-approved,
+    policy-checked manifest (fed through stdin; `imagePullSecrets` refused), pinned to a context and
+    namespace, run against a vault-owned sanitised kubeconfig copy kept as a persistent,
+    content-addressed file in the per-user state folder.
+  - `exact`: the whole command line, native programs only. No `.cmd`/`.bat`/`.ps1`, shells,
+    interpreters or launchers (`npm`, `make`, `cargo`, ...), and none of `git`/`docker`/`kubectl`/`helm`
+    (those must use their profiles).
+- **`manage_vault` actions `always_allow_list` and `always_allow_remove`** (password-gated). The
+  listing returns only `id`, `kind`, `cwd`, `shape` and `label`; removal disarms the entry at once.
+- **Rollback protection.** The vault body carries a generation counter, raised on every write; the
+  highest generation seen is also kept in memory and in a small sidecar file outside the vault
+  folder. A vault older than that arms nothing and the tool result says why.
+- **Drift is visible.** When a pinned input changes, the entry is not used and the dialog explains
+  what changed; approving it re-snapshots the entry.
+- `docs/security-posture-2.4.0.md`: the threat model and residual risks of the above.
+
+### Changed
+
+- The in-memory trust cache now encrypts cached values with a per-process AES-GCM session key
+  (never written to disk) instead of an XOR obfuscation; values are decrypted only while a run
+  needs them.
+- `vault_lib/` gains `allowlist.py`, `envnames.py` and a `profiles/` package. No existing tool
+  signature changes.
+
 ## [2.3.3] — 2026-10-08
 
 The test suite no longer puts windows on your screen or takes your focus.

@@ -98,6 +98,10 @@ MAX_VAR_NAME_LEN = 128
 # names a variable -- see is_reserved_key.
 RESERVED_KEY_PREFIX = "#"
 FMK_KEY = "#fmk"
+# Monotonic write counter, bumped by every body write (see _write_body_locked).
+# Lets a later unlock tell "this is the newest state I have seen" from "someone
+# put an older vault.enc back" -- see body_generation.
+GENERATION_KEY = "#generation"
 FMK_BYTES = 32
 ENV_LINE_RE = re.compile(
     r'^(?P<indent>\s*)(?P<export>export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*)$'
@@ -2120,6 +2124,149 @@ def _decode_body(plaintext: bytes, what: str) -> dict:
         raise ValueError(f"Decrypted {what} contents are corrupted.") from None
 
 
+def body_generation(body) -> int:
+    """The ``#generation`` counter of a raw body, or 0 if absent/malformed.
+
+    A vault written before the counter existed has none and counts as 0; its
+    next write stores 1.  bool is rejected (True would read as 1) and negative
+    or non-int values count as 0, so a tampered value can only ever look
+    *older*, never newer.
+    """
+    try:
+        value = body.get(GENERATION_KEY, 0)
+    except AttributeError:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _with_next_generation(body: dict, prior_body) -> dict:
+    """A copy of *body* whose ``#generation`` is one past the highest seen in
+    *body* or *prior_body* (the on-disk body being replaced, when known).
+    Never lowers the counter; never mutates the caller's dict."""
+    nxt = max(body_generation(body), body_generation(prior_body or {})) + 1
+    return {**body, GENERATION_KEY: nxt}
+
+
+def _plaintext_with_next_generation(plaintext: bytes) -> bytes:
+    """Re-pad *plaintext* (a v2 body) with ``#generation`` one higher.
+
+    For credential operations that re-wrap the envelope without going through
+    _write_body_locked: without a bump, restoring a copy of vault.enc from
+    before a password change or recovery-key reissue would carry the very same
+    generation and look current.  A body that will not decode is left exactly
+    as it is (the credential operation itself must still succeed).
+    """
+    try:
+        body = _decode_body(plaintext, "v2 vault")
+    except ValueError:
+        return plaintext
+    body = _with_next_generation(body, None)
+    return _pkcs7_pad(json.dumps(body).encode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Unlock listeners
+# ---------------------------------------------------------------------------
+#
+# Something above this module (the always-allow arming code) needs to know
+# the moment the human has just proven the master password, and with which
+# body, so it can re-arm from what the vault itself says.  The vault must not
+# import that code, so it is a plain registry of callables.
+#
+# Contract: ``fn(body, fingerprint, method)``.
+#   body         shallow copy of the FULL decrypted body, reserved keys
+#                included (``#generation`` too).  For a write it is the body
+#                that was just written.
+#   fingerprint  sha256 hex of the vault.enc bytes that body came from / was
+#                written as.
+#   method       "password"        load_vault_body_ex (so load_secrets*, the
+#                                  dialogs, every read-modify-write) succeeded
+#                "write"           _write_body_locked finished (save_secrets,
+#                                  save_vault_body, add/remove secret ...)
+#                "change_password" change_password finished (v1 and v2)
+#                "reissue"         reissue_recovery_key finished
+#                "recovery"        a write/credential op that ran inside
+#                                  recovery_session() -- the human proved a
+#                                  RECOVERY KEY, not the password, and such
+#                                  sessions must never arm anything.
+# Recovery-key unlocks themselves do NOT notify at all.  Listener exceptions
+# are swallowed: arming is a convenience layered on top and must never turn a
+# successful unlock or write into a failure.
+
+_unlock_listeners: list = []
+_notify_state = threading.local()
+
+
+def register_unlock_listener(fn) -> None:
+    """Add *fn* to the unlock listeners (a second registration of the same
+    callable is ignored).  See the contract above."""
+    if fn not in _unlock_listeners:
+        _unlock_listeners.append(fn)
+
+
+def unregister_unlock_listener(fn) -> None:
+    """Remove *fn*; unknown callables are ignored."""
+    try:
+        _unlock_listeners.remove(fn)
+    except ValueError:
+        pass
+
+
+def _notify_unlocked(body, fingerprint, method="password") -> None:
+    """Call every registered listener as ``fn(body_copy, fingerprint, method)``.
+
+    Inside recovery_session() the method is forced to "recovery"; inside
+    _quiet_notifications() nothing is delivered.  Never raises.
+    """
+    if getattr(_notify_state, "quiet", 0) or not _unlock_listeners:
+        return
+    if getattr(_notify_state, "recovery", 0):
+        method = "recovery"
+    for fn in list(_unlock_listeners):
+        try:
+            fn(dict(body), fingerprint, method)
+        except Exception:
+            pass
+
+
+@contextlib.contextmanager
+def recovery_session():
+    """Mark the enclosed vault operations (this thread) as running on the
+    authority of a recovery key: any notification they would send carries
+    method="recovery" so arming code can refuse to arm from them."""
+    _notify_state.recovery = getattr(_notify_state, "recovery", 0) + 1
+    try:
+        yield
+    finally:
+        _notify_state.recovery -= 1
+
+
+@contextlib.contextmanager
+def _quiet_notifications():
+    """Suppress notifications for internal reads/writes that are only steps of
+    a larger operation which notifies once, itself, at the end."""
+    _notify_state.quiet = getattr(_notify_state, "quiet", 0) + 1
+    try:
+        yield
+    finally:
+        _notify_state.quiet -= 1
+
+
+def _notify_envelope_body(plaintext: bytes, new_data: bytes, method: str) -> None:
+    """Notify with the body inside an already-open v2 plaintext and the
+    fingerprint of the bytes just written.  Best effort: a body that will not
+    decode simply means no notification (the operation itself succeeded)."""
+    if not _unlock_listeners:
+        return
+    try:
+        body = _decode_body(plaintext, "v2 vault")
+    except ValueError:
+        return
+    _notify_unlocked(body, hashlib.sha256(new_data).hexdigest(), method)
+
+
 # ---------------------------------------------------------------------------
 # Raw body accessors -- reserved keys INCLUDED.  Prefer load_secrets.
 # ---------------------------------------------------------------------------
@@ -2143,8 +2290,12 @@ def load_vault_body_ex(password: str) -> tuple:
     if crypto.is_v2(data):
         with _unlock_attempt():
             plaintext, _dek, _header = crypto.open_v2_with_password(data, password)
-        return _decode_body(plaintext, "v2 vault"), data, fingerprint
-    return _load_secrets_v1(password, data), None, fingerprint
+        body = _decode_body(plaintext, "v2 vault")
+        _notify_unlocked(body, fingerprint, "password")
+        return body, data, fingerprint
+    body = _load_secrets_v1(password, data)
+    _notify_unlocked(body, fingerprint, "password")
+    return body, None, fingerprint
 
 
 def save_vault_body(
@@ -2341,6 +2492,7 @@ def _write_body(
     expect_fingerprint: Optional[str] = None,
     *,
     merge_reserved: bool = False,
+    bump_generation: bool = True,
 ) -> None:
     """Shared writer behind save_secrets and save_vault_body.
 
@@ -2365,7 +2517,8 @@ def _write_body(
     """
     with _vault_lock():
         _write_body_locked(password, body, expect_fingerprint,
-                            merge_reserved=merge_reserved)
+                            merge_reserved=merge_reserved,
+                            bump_generation=bump_generation)
 
 
 def _write_body_locked(
@@ -2374,8 +2527,17 @@ def _write_body_locked(
     expect_fingerprint: Optional[str] = None,
     *,
     merge_reserved: bool = False,
+    bump_generation: bool = True,
 ) -> None:
-    """_write_body's body, with the vault lock assumed already held."""
+    """_write_body's body, with the vault lock assumed already held.
+
+    Every write raises ``#generation`` to one past the highest value seen in
+    the supplied body and in the body being replaced (never lowers it);
+    *bump_generation* is False only for change_password's v1 path, which must
+    carry the body across verbatim.  Once the file is replaced, unlock
+    listeners are told (method "write") with the body as written and the
+    sha256 of the new bytes.
+    """
     # If vault.enc doesn't exist yet, this is first-time creation from
     # create_secrets_vault which writes vault.salt first and then calls us.
     # Fall through to the v1 path -- there's nothing to read yet, so there is
@@ -2383,10 +2545,13 @@ def _write_body_locked(
     if not SECRETS_FILE.exists():
         if merge_reserved:
             body = _merge_reserved({}, body)
+        if bump_generation:
+            body = _with_next_generation(body, None)
         salt = SALT_FILE.read_bytes()
         padded = _pkcs7_pad(json.dumps(body).encode("utf-8"))
         token = crypto.encrypt(password, salt, padded)
         _atomic_write_bytes(SECRETS_FILE, token)
+        _notify_unlocked(body, hashlib.sha256(token).hexdigest(), "write")
         return
 
     data = SECRETS_FILE.read_bytes()
@@ -2403,7 +2568,17 @@ def _write_body_locked(
         with _unlock_attempt():
             _pt, dek, header = crypto.open_v2_with_password(data, password)
         if merge_reserved:
-            body = _merge_reserved(_decode_body(_pt, "v2 vault"), body)
+            prior_body = _decode_body(_pt, "v2 vault")
+            body = _merge_reserved(prior_body, body)
+        else:
+            # Only the counter is wanted from the old body, so a body that
+            # will not decode must not turn a plain save into a failure.
+            try:
+                prior_body = _decode_body(_pt, "v2 vault")
+            except ValueError:
+                prior_body = None
+        if bump_generation:
+            body = _with_next_generation(body, prior_body)
         padded = _pkcs7_pad(json.dumps(body).encode("utf-8"))
         vault_id = _vault_id_from_header(header)
 
@@ -2434,6 +2609,7 @@ def _write_body_locked(
 
         new_data = crypto.build_envelope(new_header, bytes(dek), padded)
         _atomic_write_bytes(SECRETS_FILE, new_data)
+        _notify_unlocked(body, hashlib.sha256(new_data).hexdigest(), "write")
     else:
         # v1 path.  Unlike v2 there is no decryption on the way in, so the
         # merge costs an extra PBKDF2 -- do it anyway for correctness, but
@@ -2442,16 +2618,23 @@ def _write_body_locked(
         # on disk is still under the OLD one, so this read cannot succeed
         # there; that path bypasses the merge entirely via save_vault_body,
         # and this except is the belt to that braces.
-        if merge_reserved:
+        prior = {}
+        if merge_reserved or bump_generation:
+            # The counter is wanted from the on-disk body even when nothing is
+            # merged, so a stale body can never move it backwards.
             try:
                 prior = _load_secrets_v1(password, data)
             except Exception:
                 prior = {}
+        if merge_reserved:
             body = _merge_reserved(prior, body)
+        if bump_generation:
+            body = _with_next_generation(body, prior)
         padded = _pkcs7_pad(json.dumps(body).encode("utf-8"))
         salt = SALT_FILE.read_bytes()
         token = crypto.encrypt(password, salt, padded)
         _atomic_write_bytes(SECRETS_FILE, token)
+        _notify_unlocked(body, hashlib.sha256(token).hexdigest(), "write")
 
 
 def change_password(
@@ -2502,14 +2685,24 @@ def _change_password_locked(old_password: str,
         # and would drop every reserved key. Carrying the whole body across
         # sidesteps the merge entirely, which is also more obviously correct:
         # a password change should change the password and nothing else.
-        body = load_vault_body(old_password)
+        #
+        # The internal reads/writes are silent; the one notification, method
+        # "change_password", is sent at the end.
+        with _quiet_notifications():
+            body = load_vault_body(old_password)
+        # The write below carries the body verbatim, so the bump happens here:
+        # an older vault.enc (sealed under the old password) must not look as
+        # current as this one.
+        body = _with_next_generation(body, None)
         original_bytes = SECRETS_FILE.read_bytes()
         # The salt is deliberately reused -- rotating it would require a
         # two-file atomic write that does not exist, creating a crash window
         # that can permanently brick the vault.
-        save_vault_body(new_password, body)
+        with _quiet_notifications():
+            _write_body_locked(new_password, body, None, bump_generation=False)
         try:
-            verified = load_vault_body(new_password)
+            with _quiet_notifications():
+                verified = load_vault_body(new_password)
         except Exception as exc:
             _atomic_write_bytes(SECRETS_FILE, original_bytes)
             raise RuntimeError(
@@ -2524,6 +2717,8 @@ def _change_password_locked(old_password: str,
                 "vault has been restored to its previous state. "
                 "The password was NOT changed."
             )
+        _notify_unlocked(verified, hashlib.sha256(SECRETS_FILE.read_bytes()).hexdigest(),
+                         "change_password")
         return None
 
     # ---- v2 path ----
@@ -2564,7 +2759,8 @@ def _change_password_locked(old_password: str,
     new_header["slots"] = new_slots
 
     # Build and atomically write the new envelope.  plaintext_bytes is already
-    # padded (that is what seal_body stored).
+    # padded (that is what seal_body stored); only the generation is raised.
+    plaintext_bytes = _plaintext_with_next_generation(plaintext_bytes)
     new_data = crypto.build_envelope(new_header, bytes(new_dek), plaintext_bytes)
     _atomic_write_bytes(SECRETS_FILE, new_data)
 
@@ -2585,6 +2781,7 @@ def _change_password_locked(old_password: str,
         )
 
     _cleanup_backup()
+    _notify_envelope_body(plaintext_bytes, new_data, "change_password")
     return (
         crypto.format_recovery_key(bytes(new_recovery_raw))
         if new_recovery_raw is not None
@@ -2754,7 +2951,9 @@ def _reissue_recovery_key_locked(password: str):
 
     original_bytes = _backup_vault()
 
-    # Same DEK and body; only the recovery slot changes.
+    # Same DEK and body; only the recovery slot changes (and the generation
+    # rises, so a pre-reissue copy of vault.enc reads as older).
+    plaintext_bytes = _plaintext_with_next_generation(plaintext_bytes)
     new_data = crypto.build_envelope(new_header, bytes(dek), plaintext_bytes)
     _atomic_write_bytes(SECRETS_FILE, new_data)
 
@@ -2769,6 +2968,7 @@ def _reissue_recovery_key_locked(password: str):
         )
 
     _cleanup_backup()
+    _notify_envelope_body(plaintext_bytes, new_data, "reissue")
     return crypto.format_recovery_key(bytes(new_recovery_raw))
 
 
@@ -2801,7 +3001,7 @@ def recover_with_recovery_key(
     Raises crypto.WrongRecoveryKey if the key is well-formed but wrong.
     Raises crypto.NoRecoverySlot if the vault has no recovery slot.
     """
-    with _vault_lock():
+    with _vault_lock(), recovery_session():
         return _recover_with_recovery_key_locked(recovery_key_text, new_password)
 
 
@@ -2852,6 +3052,8 @@ def _recover_with_recovery_key_locked(recovery_key_text: str,
 
     original_bytes = _backup_vault()
 
+    # Credential change: raise the generation like every other write.
+    plaintext_bytes = _plaintext_with_next_generation(plaintext_bytes)
     new_data = crypto.build_envelope(new_header, bytes(new_dek), plaintext_bytes)
     _atomic_write_bytes(SECRETS_FILE, new_data)
 
