@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -1250,11 +1251,36 @@ def test_drift_kubectl_binary(world):
     assert k.verify(bad, req).ok is False
 
 
+def _copyable_kubectl() -> str:
+    """The kubectl whose copy still runs.  Chocolatey puts a shimgen launcher
+    on PATH; a copy of the shim cannot find its target, so ask the shim where
+    the real binary is (``--shimgen-noop`` prints it without running it).  A
+    real kubectl rejects the flag and we keep the PATH entry."""
+    path = shutil.which("kubectl")
+    if WIN:
+        try:
+            out = subprocess.run([path, "--shimgen-noop"], capture_output=True, text=True,
+                                 timeout=15).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        found = re.search(r"path to executable:\s*(.+)", out, re.IGNORECASE)
+        if found and os.path.isfile(found.group(1).strip()):
+            return found.group(1).strip()
+    return path
+
+
 @needs_kubectl
 def test_drift_real_binary_changed_on_disk(world, monkeypatch):
     fake = world.root / "bin" / ("kubectl.exe" if WIN else "kubectl")
     fake.parent.mkdir()
-    shutil.copy2(shutil.which("kubectl"), fake)
+    shutil.copy2(_copyable_kubectl(), fake)
+    try:
+        runs = subprocess.run([str(fake), "version", "--client"], capture_output=True,
+                              timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        runs = False
+    if not runs:
+        pytest.skip("the installed kubectl is a launcher whose copy does not run")
     monkeypatch.setattr(k, "KUBECTL_PROGRAM", str(fake))
     entry, req = world.entry("get pods")
     assert entry["snapshot"]["kubectl"]["path"].lower() == str(fake).lower() or \
@@ -1452,8 +1478,12 @@ def test_kuberc_selftest_flags_broken_kuberc_as_fatal(world, tmp_path, text):
 
 
 @needs_kubectl
-def test_typo_kuberc_really_prints_the_strict_decoding_marker(tmp_path):
-    """The premise of the fail-open guard: kubectl exits 0 and only warns on stderr."""
+@needs_kubectl
+def test_typo_kuberc_really_prints_the_strict_decoding_marker(world, tmp_path):
+    """The premise of the fail-open guard: kubectl exits 0 and only warns on stderr.
+    Needs ``world`` like the other ``_pin_and_dirs`` tests: it relaxes the
+    exe-dir-writable check, which refuses a kubectl installed under a
+    user-writable folder (Chocolatey on the CI runners)."""
     pin, dirs = _pin_and_dirs()
     rc = tmp_path / "typo.rc"
     rc.write_text(HEAD + "credentialPluginPolicyy: DenyAll\n", encoding="utf-8", newline="")
